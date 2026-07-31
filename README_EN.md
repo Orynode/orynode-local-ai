@@ -173,6 +173,14 @@ Before distributing a build, read:
 
 We are **not accepting external pull requests** at this stage. Please use Issues for bugs and suggestions. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Douyin
+
+Follow **@Orynode** on Douyin (ID: `orynode`) for AI app development and hands-on demos.
+
+<p align="center">
+  <img src="docs/images/douyin.png" alt="Douyin QR code for @Orynode (ID: orynode)" width="280" />
+</p>
+
 ## License
 
 Orynode Local AI is available under the [MIT License](LICENSE).

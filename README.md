@@ -155,6 +155,14 @@ orynode-local-ai/
 
 当前阶段**不接受外部 Pull Request / 代码贡献**。欢迎通过 Issues 反馈问题或建议，详见 [CONTRIBUTING_zh-CN.md](CONTRIBUTING_zh-CN.md)。
 
+## 抖音
+
+扫码关注 **@Orynode**（抖音号：`orynode`），了解 AI 应用开发与实测动态。
+
+<p align="center">
+  <img src="docs/images/douyin.png" alt="抖音二维码：@Orynode（抖音号 orynode）" width="280" />
+</p>
+
 ## 开源许可证
 
 Orynode Local AI 使用 [MIT License](LICENSE)。
