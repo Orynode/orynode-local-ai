@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import type { Message } from "../../services/types";
+import type { Message, MessageAttachment } from "../../services/types";
+import { scopeFromAttachments } from "../lib/attachments";
 
 export type { Message };
 
@@ -38,10 +39,7 @@ export function useChat() {
       content: string,
       conversationId: string | null,
       conversationTitle: string,
-      knowledgeScope:
-        | { mode: "none" }
-        | { mode: "documents"; documentIds: string[] }
-        | { mode: "all" },
+      attachments: MessageAttachment[] | undefined,
       temperature: number,
       topP: number,
       topK: number,
@@ -53,14 +51,17 @@ export function useChat() {
         id: string | null,
       ) => Promise<{ id: string; title: string }>,
     ) => {
+      const knowledgeScope = scopeFromAttachments(attachments);
       const userMessage: Message = {
         id: crypto.randomUUID(),
         role: "user",
         content,
         createdAt: new Date().toISOString(),
+        ...(attachments && attachments.length > 0 ? { attachments } : {}),
       };
       const nextMessages = [...messages, userMessage];
-      const nextTitle = conversationTitle || content.replace(/\s+/g, " ").slice(0, 32);
+      const nextTitle =
+        conversationTitle || content.replace(/\s+/g, " ").slice(0, 32);
 
       let activeId = conversationId;
       const controller = new AbortController();
@@ -80,9 +81,12 @@ export function useChat() {
       setError("");
 
       try {
-        // Save conversation first
         try {
-          const saved = await onConversationSaved(nextMessages, nextTitle, activeId);
+          const saved = await onConversationSaved(
+            nextMessages,
+            nextTitle,
+            activeId,
+          );
           activeId = saved.id;
         } catch {
           // Continue even if save fails
@@ -134,17 +138,31 @@ export function useChat() {
                 const delta = chunk.choices?.[0]?.delta?.content;
                 if (typeof delta !== "string" || !delta) continue;
                 answer += delta;
-                setMessages([...nextMessages, { ...assistantMessage, content: answer }]);
+                setMessages([
+                  ...nextMessages,
+                  { ...assistantMessage, content: answer },
+                ]);
               }
             }
             if (done) break;
           }
         } finally {
-          try { reader.cancel(); } catch {}
+          try {
+            reader.cancel();
+          } catch {
+            // ignore
+          }
         }
 
         const completed: Message[] = answer
-          ? [...nextMessages, { ...assistantMessage, content: answer, durationMs: Math.round(performance.now() - startedAt) }]
+          ? [
+              ...nextMessages,
+              {
+                ...assistantMessage,
+                content: answer,
+                durationMs: Math.round(performance.now() - startedAt),
+              },
+            ]
           : nextMessages;
 
         setMessages(completed);
@@ -154,13 +172,20 @@ export function useChat() {
       } catch (e) {
         if (e instanceof DOMException && e.name === "AbortError") {
           const completed: Message[] = answer
-            ? [...nextMessages, { ...assistantMessage, content: answer, durationMs: Math.round(performance.now() - startedAt) }]
+            ? [
+                ...nextMessages,
+                {
+                  ...assistantMessage,
+                  content: answer,
+                  durationMs: Math.round(performance.now() - startedAt),
+                },
+              ]
             : nextMessages;
           setMessages(completed);
           void onConversationSaved(completed, nextTitle, activeId);
           return { id: activeId ?? "", title: nextTitle };
         }
-        setMessages(nextMessages);
+        setMessages(messages);
         setConnected(false);
         setError(e instanceof Error ? e.message : "无法连接本地模型");
         return null;

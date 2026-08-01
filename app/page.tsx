@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { Message } from "../services/types";
+import type { Message, MessageAttachment } from "../services/types";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { ChatView } from "./components/chat/ChatView";
 import { WelcomeScreen } from "./components/chat/WelcomeScreen";
@@ -19,6 +19,7 @@ import {
   DEFAULT_DISPLAY_NAME,
   readStoredDisplayName,
 } from "./lib/displayName";
+import { attachmentFromDocument } from "./lib/attachments";
 
 type PendingDelete =
   | { type: "conversation"; id: string }
@@ -35,6 +36,10 @@ export default function Home() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState(DEFAULT_DISPLAY_NAME);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete>(null);
+  /** 仅作用于下次发送；成功发送后清空，打开历史/新对话/删除当前会话不保留 */
+  const [draftAttachments, setDraftAttachments] = useState<MessageAttachment[]>(
+    [],
+  );
 
   // ---- Hooks ----
   const chat = useChat();
@@ -101,11 +106,15 @@ export default function Home() {
       maxTokens: settingsHook.settings.maxTokens,
     };
 
+    const attachments =
+      draftAttachments.length > 0 ? [...draftAttachments] : undefined;
+    setDraftAttachments([]);
+
     const result = await chat.sendMessage(
       content,
       conversationId,
       conversationTitle,
-      knowledge.scope,
+      attachments,
       sampling.temperature,
       sampling.topP,
       sampling.topK,
@@ -118,6 +127,9 @@ export default function Home() {
       setConversationId(result.id);
       setConversationTitle(result.title);
       void conversations.refresh();
+    } else {
+      setInput(content);
+      if (attachments) setDraftAttachments(attachments);
     }
   }
 
@@ -127,6 +139,7 @@ export default function Home() {
       setConversationId(conv.id);
       setConversationTitle(conv.title);
       chat.setMessages(conv.messages ?? []);
+      setDraftAttachments([]);
       setViewMode("assistant");
     } catch {
       chat.setError("无法读取本地对话");
@@ -153,6 +166,7 @@ export default function Home() {
           setConversationId(null);
           setConversationTitle("");
           chat.clearChat();
+          setDraftAttachments([]);
         }
         await conversations.refresh();
       } catch {
@@ -162,16 +176,32 @@ export default function Home() {
     }
 
     await knowledge.remove(current.id);
+    setDraftAttachments((prev) =>
+      prev.filter((item) => item.kind === "all" || item.id !== current.id),
+    );
   }
 
   async function handleUploadKnowledge(file: File) {
-    await knowledge.upload(file);
+    const doc = await knowledge.upload(file);
+    if (doc) {
+      setDraftAttachments((prev) => {
+        if (prev.some((item) => item.kind === "all")) return prev;
+        if (prev.some((item) => item.id === doc.id)) return prev;
+        return [...prev, attachmentFromDocument(doc)];
+      });
+    }
   }
 
   function handleNewChat() {
     setConversationId(null);
     setConversationTitle("");
     chat.clearChat();
+    setDraftAttachments([]);
+    setViewMode("assistant");
+  }
+
+  function handleAttachToChat(attachments: MessageAttachment[]) {
+    setDraftAttachments(attachments);
     setViewMode("assistant");
   }
 
@@ -287,21 +317,15 @@ export default function Home() {
           <KnowledgeView
             documents={knowledge.documents}
             meta={knowledge.meta}
-            selectedIds={knowledge.selectedIds}
-            useAllDocuments={knowledge.useAllDocuments}
             uploading={knowledge.uploading}
             reindexing={knowledge.reindexing}
             notice={knowledge.notice}
             error={knowledge.error}
-            onToggle={knowledge.toggleDocument}
-            onUseAll={() => {
-              knowledge.setUseAllDocuments(true);
-            }}
             onDelete={(id) => { void handleDeleteKnowledge(id); }}
             onReindex={(id) => { void knowledge.reindex(id); }}
             onReindexAll={() => { void knowledge.reindexAll(); }}
             onFileSelect={(file) => { void handleUploadKnowledge(file); }}
-            onChatWithSelection={() => setViewMode("assistant")}
+            onAttachToChat={handleAttachToChat}
           />
         ) : chat.messages.length === 0 ? (
           <>
@@ -319,12 +343,10 @@ export default function Home() {
               sending={chat.sending}
               onStop={chat.stopGeneration}
               documents={knowledge.documents}
-              selectedIds={knowledge.selectedIds}
-              useAllDocuments={knowledge.useAllDocuments}
-              onToggleDocument={knowledge.toggleDocument}
-              onUseAllDocuments={() => knowledge.setUseAllDocuments(true)}
-              onClearScope={knowledge.clearScope}
+              draftAttachments={draftAttachments}
+              onDraftAttachmentsChange={setDraftAttachments}
               uploading={knowledge.uploading}
+              uploadState={knowledge.uploadState}
               onFileSelect={(file) => { void handleUploadKnowledge(file); }}
               hotSettings={{
                 temperature: settingsHook.settings.temperature,
@@ -360,12 +382,10 @@ export default function Home() {
               sending={chat.sending}
               onStop={chat.stopGeneration}
               documents={knowledge.documents}
-              selectedIds={knowledge.selectedIds}
-              useAllDocuments={knowledge.useAllDocuments}
-              onToggleDocument={knowledge.toggleDocument}
-              onUseAllDocuments={() => knowledge.setUseAllDocuments(true)}
-              onClearScope={knowledge.clearScope}
+              draftAttachments={draftAttachments}
+              onDraftAttachmentsChange={setDraftAttachments}
               uploading={knowledge.uploading}
+              uploadState={knowledge.uploadState}
               onFileSelect={(file) => { void handleUploadKnowledge(file); }}
               hotSettings={{
                 temperature: settingsHook.settings.temperature,

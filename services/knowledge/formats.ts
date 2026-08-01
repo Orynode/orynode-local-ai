@@ -82,14 +82,20 @@ export function detectKnowledgeKind(options: {
 }
 
 export function isPdfMagic(bytes: Uint8Array): boolean {
-  if (bytes.byteLength < 5) return false;
-  return (
-    bytes[0] === 0x25 &&
-    bytes[1] === 0x50 &&
-    bytes[2] === 0x44 &&
-    bytes[3] === 0x46 &&
-    bytes[4] === 0x2d
-  ); // %PDF-
+  // 规范允许文件头前有空白；部分 PDF 前几字节还有垃圾，在前 1KB 内找 %PDF-
+  const limit = Math.min(bytes.byteLength, 1024);
+  for (let i = 0; i <= limit - 5; i += 1) {
+    if (
+      bytes[i] === 0x25 &&
+      bytes[i + 1] === 0x50 &&
+      bytes[i + 2] === 0x44 &&
+      bytes[i + 3] === 0x46 &&
+      bytes[i + 4] === 0x2d
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function looksLikeText(bytes: Uint8Array): boolean {

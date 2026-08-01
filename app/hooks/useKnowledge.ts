@@ -2,7 +2,6 @@
 
 import { useCallback, useRef, useState } from "react";
 import type { KnowledgeDocument } from "../../services/types";
-import type { KnowledgeScope } from "../../services/knowledge/types";
 import {
   detectBrowserFileKind,
   mimeForKind,
@@ -14,6 +13,13 @@ export interface KnowledgeMeta {
   embeddingModel: string;
   embeddingDim: number;
 }
+
+/** 上传进度（仅 UI；不表示对话选中） */
+export type KnowledgeUploadState = {
+  fileName: string;
+  percent: number;
+  phase: "uploading" | "processing";
+};
 
 function summarizeReindex(
   results: Array<{ id: string; status: string; reason?: string }>,
@@ -38,19 +44,25 @@ function summarizeReindex(
     return { text: `已更新 ${indexed.length} 篇索引`, isError: false };
   }
   return {
-    text: `已更新 ${indexed.length} 篇` +
+    text:
+      `已更新 ${indexed.length} 篇` +
       (errors.length ? `，失败 ${errors.length}` : "") +
       (skipped.length ? `，跳过 ${skipped.length}` : ""),
     isError: errors.length > 0,
   };
 }
 
+/**
+ * 本地资料库：只负责文档仓库 CRUD / 上传 / 索引。
+ * 对话「本轮附件」由页面 draftAttachments 管理，不在此粘性保存。
+ */
 export function useKnowledge() {
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
   const [meta, setMeta] = useState<KnowledgeMeta | null>(null);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [useAllDocuments, setUseAllDocumentsState] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadState, setUploadState] = useState<KnowledgeUploadState | null>(
+    null,
+  );
   const [reindexing, setReindexing] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -124,34 +136,6 @@ export function useKnowledge() {
     }, 1500);
   }, [refresh, stopPolling]);
 
-  const setSelectedId = useCallback((id: string | null) => {
-    setUseAllDocumentsState(false);
-    setSelectedIds(id ? [id] : []);
-  }, []);
-
-  const toggleDocument = useCallback((id: string) => {
-    setUseAllDocumentsState(false);
-    setSelectedIds((prev) =>
-      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
-    );
-  }, []);
-
-  const setUseAllDocuments = useCallback((value: boolean) => {
-    setUseAllDocumentsState(value);
-    if (value) setSelectedIds([]);
-  }, []);
-
-  const clearScope = useCallback(() => {
-    setSelectedIds([]);
-    setUseAllDocumentsState(false);
-  }, []);
-
-  const scope: KnowledgeScope = useAllDocuments
-    ? { mode: "all" }
-    : selectedIds.length > 0
-      ? { mode: "documents", documentIds: selectedIds }
-      : { mode: "none" };
-
   const upload = useCallback(
     async (file: File): Promise<KnowledgeDocument | null> => {
       const kind = detectBrowserFileKind(file);
@@ -167,19 +151,61 @@ export function useKnowledge() {
       setUploading(true);
       setError("");
       setNotice("");
+      setUploadState({
+        fileName: file.name,
+        percent: 0,
+        phase: "uploading",
+      });
+
       try {
-        const response = await fetch("/api/knowledge", {
-          method: "POST",
-          headers: {
-            "content-type": mimeForKind(kind),
-            "x-file-name": encodeURIComponent(file.name),
-            "x-file-kind": kind,
+        const result = await new Promise<{ document: KnowledgeDocument }>(
+          (resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", "/api/knowledge");
+            xhr.setRequestHeader("content-type", mimeForKind(kind));
+            xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
+            xhr.setRequestHeader("x-file-kind", kind);
+            xhr.responseType = "json";
+
+            xhr.upload.onprogress = (event) => {
+              if (!event.lengthComputable) return;
+              const percent = Math.max(
+                0,
+                Math.min(99, Math.round((event.loaded / event.total) * 100)),
+              );
+              setUploadState({
+                fileName: file.name,
+                percent,
+                phase: "uploading",
+              });
+            };
+
+            xhr.upload.onload = () => {
+              setUploadState({
+                fileName: file.name,
+                percent: 100,
+                phase: "processing",
+              });
+            };
+
+            xhr.onload = () => {
+              const body = xhr.response ?? {};
+              if (xhr.status >= 200 && xhr.status < 300 && body.document) {
+                resolve(body as { document: KnowledgeDocument });
+                return;
+              }
+              reject(
+                new Error(
+                  typeof body.error === "string" ? body.error : "导入失败",
+                ),
+              );
+            };
+            xhr.onerror = () => reject(new Error("资料导入失败"));
+            xhr.onabort = () => reject(new Error("上传已取消"));
+            xhr.send(file);
           },
-          body: file,
-        });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "导入失败");
-        setSelectedId(result.document.id);
+        );
+
         await refresh();
         startStatusPolling();
         return result.document;
@@ -188,9 +214,10 @@ export function useKnowledge() {
         return null;
       } finally {
         setUploading(false);
+        setUploadState(null);
       }
     },
-    [refresh, setSelectedId, startStatusPolling],
+    [refresh, startStatusPolling],
   );
 
   const remove = useCallback(
@@ -202,12 +229,9 @@ export function useKnowledge() {
         setError("删除失败");
         return;
       }
-      if (selectedIds.includes(id)) {
-        setSelectedIds((prev) => prev.filter((item) => item !== id));
-      }
       await refresh();
     },
-    [refresh, selectedIds],
+    [refresh],
   );
 
   const reindex = useCallback(
@@ -266,10 +290,8 @@ export function useKnowledge() {
   return {
     documents,
     meta,
-    selectedIds,
-    useAllDocuments,
-    scope,
     uploading,
+    uploadState,
     reindexing,
     error,
     notice,
@@ -278,8 +300,5 @@ export function useKnowledge() {
     remove,
     reindex,
     reindexAll,
-    toggleDocument,
-    setUseAllDocuments,
-    clearScope,
   };
 }

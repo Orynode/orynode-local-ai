@@ -22,7 +22,7 @@ can work with a local model without using the original command-line chat.
 
 ## Release stage
 
-The current release is **V1: source installation**. Users install and start it
+The current release is **V1: source installation** (npm package version in `package.json` / [CHANGELOG](CHANGELOG.md)). Users install and start it
 with npm. This keeps the first public version fully open and avoids distributing
 an unsigned macOS application.
 
@@ -39,10 +39,33 @@ layout introduced in V1. See the [roadmap](docs/ROADMAP.md).
 - Resumable Gemma 4 model installation
 - One command to start the model and web interface
 - Automatic local SQLite conversation history
-- Local PDF / TXT / Markdown import and document-grounded answers (optional semantic search via `ORYNODE_SEMANTIC_SEARCH=1`)
+- Local PDF / TXT / Markdown import and document-grounded answers (keyword retrieval by default; optional semantic vectors)
 - Settings and chat composer for sampling parameters (context length requires restart)
 - No account, analytics, or cloud conversation storage
 - Responsive desktop/mobile UI and trusted LAN sharing
+
+## Local documents and retrieval
+
+After you upload a document:
+
+1. **Parse** — extract text (PDF / TXT / Markdown)
+2. **Chunk** — split into searchable passages and store in local SQLite
+3. **Retrieve** — for **that turn’s message**, pull relevant excerpts from the attached document scope into the chat context (attachments apply only to that message and clear after send; opening history does not restore composer attachments). To retrieve the same PDF on a later turn, attach it again; files remain in the local library.
+
+**Keyword retrieval is the default.** No embedding model is loaded, so there is no extra RAM cost out of the box. If keywords miss, nothing is injected into the prompt.
+
+To enable **semantic vector search** (hybrid keyword + vectors with RRF):
+
+1. Copy `.env.example` to `.env.local` if needed
+2. Set `ORYNODE_SEMANTIC_SEARCH=1`
+3. Restart `npm run local` (the local data-service loads ONNX `bge-small-zh-v1.5`; `@xenova/transformers` is already a dependency)
+
+After enabling:
+
+- New uploads are embedded asynchronously (`ready` → `embedding` → `indexed`; `error` still allows keyword search)
+- Documents uploaded before enabling can be reindexed in the UI, or via `POST /api/knowledge/reindex`
+
+See the [Architecture Reference](docs/ARCHITECTURE.md) for the full RAG design, status model, and extension points.
 
 ## Requirements
 

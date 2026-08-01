@@ -1,21 +1,43 @@
 /**
  * 文档解析入口
  *
- * - PDF：pdfjs-dist（Workers 需 DOM 垫片）
+ * - PDF：pdfjs-dist（Workers 需 DOM 垫片；主线程加载 worker 模块，避免 Vite 假路径）
  * - TXT / Markdown：UTF-8 文本；按标题或分段映射为「页」便于引用
  */
 
 import "./pdf-dom-polyfill";
 import type { ParsedDocument, ParsedPage } from "./types";
-import { type KnowledgeFileKind, isPdfMagic } from "./formats";
+import { type KnowledgeFileKind } from "./formats";
 
 type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
 
+type PdfJsWorkerModule = {
+  WorkerMessageHandler: unknown;
+};
+
 let pdfjsPromise: Promise<PdfJsModule> | null = null;
 
-function loadPdfJs(): Promise<PdfJsModule> {
+/**
+ * vinext / Vite RSC 下动态 import("./pdf.worker.mjs") 会指到不存在的
+ * `.vite/deps_rsc/pdf.worker.mjs`。显式导入 worker 并挂到 globalThis，
+ * 让 pdfjs 走主线程 fake worker（与 OS 无关）。
+ */
+async function loadPdfJs(): Promise<PdfJsModule> {
   if (!pdfjsPromise) {
-    pdfjsPromise = import("pdfjs-dist/legacy/build/pdf.mjs");
+    pdfjsPromise = (async () => {
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+      const worker = (await import(
+        /* @vite-ignore */
+        "pdfjs-dist/legacy/build/pdf.worker.mjs"
+      )) as PdfJsWorkerModule;
+
+      const g = globalThis as typeof globalThis & {
+        pdfjsWorker?: PdfJsWorkerModule;
+      };
+      g.pdfjsWorker = worker;
+
+      return pdfjs;
+    })();
   }
   return pdfjsPromise;
 }
@@ -35,9 +57,12 @@ export async function parseDocument(
  */
 export async function parsePdf(buffer: ArrayBuffer): Promise<ParsedDocument> {
   const { getDocument } = await loadPdfJs();
+  // pdfjs 可能 transfer 掉 data 底层 ArrayBuffer；用副本避免调用方缓冲被掏空
+  const data = new Uint8Array(buffer.slice(0));
   const loadingTask = getDocument({
-    data: new Uint8Array(buffer),
+    data,
     useSystemFonts: true,
+    useWorkerFetch: false,
   });
   const pdf = await loadingTask.promise;
   const pages: ParsedPage[] = [];

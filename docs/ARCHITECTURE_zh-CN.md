@@ -123,13 +123,21 @@ API 网关层 (Gateway)
 ### 对话流程
 
 ```
-用户输入文本
-  → page.tsx (useChat.sendMessage)
-    → POST /api/chat
-      → normalizeKnowledgeScope (none | documents[] | all)
-      → HybridRetriever.retrieve（唯一检索入口）
-      → buildSystemPrompt + TurboFieldfare SSE
+Composer 草稿 draftAttachments（仅下一轮；发送后清空）
+  → page.tsx 交给 useChat.sendMessage(attachments)
+      → 写入本条 message.attachments（落库，气泡展示）
+      → scopeFromAttachments → knowledgeScope（none | documents[] | all）
+      → POST /api/chat
+          → normalizeKnowledgeScope
+          → HybridRetriever.retrieve（唯一检索入口）
+          → buildSystemPrompt + TurboFieldfare SSE
 ```
+
+**产品语义（对齐「附件跟这条消息」）**：
+
+- 资料库是仓库；`useKnowledge` 只做 CRUD / 上传 / 索引，**不**跨轮粘性保存选中
+- `draftAttachments` 只活在输入框；新对话、打开历史会话都会清空草稿，**不会**从旧消息恢复到 Composer
+- 后续轮次若要再检索 PDF，需再次附上；模型对旧内容的「记忆」主要来自对话文本，而非自动复用上一轮 scope
 
 ### 资料导入流程（单一管线）
 
@@ -163,17 +171,19 @@ query + KnowledgeScope
 ```
 orynode-local-ai/
 ├── app/                              # Next.js 前端 (App Router)
-│   ├── page.tsx                      # 入口页面（组件编排）
+│   ├── page.tsx                      # 入口（编排 + draftAttachments）
 │   ├── layout.tsx                    # 根布局
 │   ├── globals.css                   # 全局样式
+│   ├── lib/
+│   │   └── attachments.ts            #   附件 ↔ KnowledgeScope
 │   ├── components/                   # UI 组件
 │   │   ├── chat/                     #   对话视图
 │   │   │   ├── ChatView.tsx          #     消息列表容器
-│   │   │   ├── MessageBubble.tsx     #     消息气泡（Markdown 渲染）
-│   │   │   ├── Composer.tsx          #     输入框 + 附件按钮
+│   │   │   ├── MessageBubble.tsx     #     气泡（含本条 attachments）
+│   │   │   ├── Composer.tsx          #     输入框 + 本轮草稿附件
 │   │   │   └── WelcomeScreen.tsx     #     欢迎页
 │   │   ├── knowledge/                #   知识库视图
-│   │   │   ├── KnowledgeView.tsx     #     资料列表页
+│   │   │   ├── KnowledgeView.tsx     #     列表；「用于对话」→ 草稿
 │   │   │   └── DocumentCard.tsx      #     资料卡片
 │   │   ├── sidebar/                  #   侧边栏
 │   │   │   ├── Sidebar.tsx           #     导航 + 状态
@@ -184,9 +194,9 @@ orynode-local-ai/
 │   │       ├── Icon.tsx              #     SVG 图标
 │   │       └── Modal.tsx             #     模态框
 │   ├── hooks/                        # 自定义 Hooks
-│   │   ├── useChat.ts                #   聊天逻辑（流式、状态管理）
+│   │   ├── useChat.ts                #   流式聊天；本轮 attachments→scope
 │   │   ├── useConversations.ts       #   对话历史 CRUD
-│   │   ├── useKnowledge.ts           #   知识库 CRUD
+│   │   ├── useKnowledge.ts           #   资料仓库 CRUD（无跨轮选中）
 │   │   └── useSettings.ts            #   设置读写
 │   └── api/                          # API 路由 (Next.js 约定)
 │       ├── chat/route.ts             #   POST 对话代理
@@ -275,6 +285,9 @@ type KnowledgeScope =
 
 兼容旧字段：`knowledgeDocumentId` → `{ mode: "documents", documentIds: [id] }`。
 
+前端来源：发送时用本轮草稿附件调用 `app/lib/attachments.ts` 的 `scopeFromAttachments`，得到当次 `knowledgeScope`；同时把附件快照写入该条 `message.attachments`（仅展示与落库）。  
+未附带资料时为 `none`，本轮不检索；**不会**从会话历史里的旧附件自动拼出 scope。
+
 ### 向量存储
 
 - SQLite `knowledge_chunks.embedding BLOB` + 文档级 `embedding_model` / `embedding_dim`
@@ -353,6 +366,7 @@ const chunks = chunker.chunkDocument(doc.pages);
 **文件**: `services/knowledge/retriever.ts`
 
 - `retrieve(query, scope)` 为唯一入口
+- scope：`none | documents[] | all`；前端由 `app/lib/attachments.ts` 的本轮附件推导，**不会**从历史消息自动拼 scope
 - keyword 始终可用；存在非空 embedding 时走 hybrid + RRF（按排名与 chunk id）
 - `error` 文档会清空向量 BLOB，仅 keyword；`awaiting_chunks` 不参与检索
 - 兼容 `knowledgeDocumentId`
@@ -546,6 +560,11 @@ ORYNODE_SEMANTIC_SEARCH=1                        # 可选语义向量；包已�
 | DELETE | `/knowledge/:id` | 删除文档 |
 
 检索业务**不在**数据服务；已移除 `/knowledge/search`。
+
+### 数据库 Schema（对话消息附件）
+
+消息表含可选 `attachments TEXT`（JSON），记录**该条用户消息**附带的资料展示信息（`kind: document | all`）。  
+仅用于历史气泡与落库真相；下一轮检索仍以当次请求的 `knowledgeScope` 为准。
 
 ### 数据库 Schema（知识库）
 

@@ -73,7 +73,12 @@ export default defineConfig(async () => {
       },
     },
     optimizeDeps: {
-      exclude: ["@xenova/transformers"],
+      // pdfjs worker 不能被 Vite 预构建进 deps_rsc（会丢 worker 文件）
+      exclude: ["@xenova/transformers", "pdfjs-dist"],
+    },
+    ssr: {
+      // 让服务端用 node_modules 原包，避免 worker 路径被改写
+      external: ["pdfjs-dist"],
     },
     plugins: [
       vinext(),

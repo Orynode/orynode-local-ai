@@ -1047,6 +1047,47 @@ button {
   color: var(--ink);
 }
 
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.message-attachment {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border: 1px solid rgb(36 74 54 / 18%);
+  border-radius: 9px;
+  background: #edf3ed;
+  color: var(--green);
+}
+
+.message-attachment-icon {
+  display: grid;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+}
+
+.message-attachment-icon .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.message-attachment-name {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .message-bubble p {
   margin: 0;
   white-space: pre-wrap;
@@ -1247,6 +1288,42 @@ button {
   padding-top: 8px;
   padding-bottom: 20px;
   margin: 0 auto;
+}
+
+.composer-drop-overlay {
+  position: fixed;
+  z-index: 35;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(13 21 16 / 42%);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+
+.composer-drop-card {
+  display: grid;
+  gap: 6px;
+  min-width: min(320px, 100%);
+  padding: 22px 26px;
+  border: 1px dashed #8aa593;
+  border-radius: 16px;
+  background: var(--panel);
+  box-shadow: 0 18px 48px rgb(37 42 34 / 18%);
+  color: var(--ink);
+  text-align: center;
+}
+
+.composer-drop-card strong {
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.composer-drop-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .composer-picker-anchor {
@@ -1722,12 +1799,14 @@ button {
 
 .knowledge-chip {
   display: flex;
+  position: relative;
   width: fit-content;
   max-width: 100%;
   align-items: center;
   gap: 7px;
   padding: 7px 8px 7px 10px;
   margin-bottom: 7px;
+  overflow: hidden;
   border: 1px solid #b8c6bb;
   border-radius: 10px;
   background: #edf3ed;
@@ -1742,12 +1821,16 @@ button {
 }
 
 .knowledge-chip .icon {
+  position: relative;
+  z-index: 1;
   width: 14px;
   height: 14px;
 }
 
 .knowledge-chip > button {
   display: grid;
+  position: relative;
+  z-index: 1;
   width: 22px;
   height: 22px;
   place-items: center;
@@ -1760,6 +1843,135 @@ button {
 
 .knowledge-chip > button:hover {
   background: rgb(36 74 54 / 9%);
+}
+
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.composer-attachment {
+  display: inline-flex;
+  max-width: min(280px, 100%);
+  align-items: center;
+  gap: 7px;
+  padding: 8px 8px 8px 10px;
+  border: 1px solid #b8c6bb;
+  border-radius: 12px;
+  background: #edf3ed;
+  color: var(--green);
+  box-shadow: 0 1px 0 rgb(36 74 54 / 4%);
+}
+
+.composer-attachment-icon {
+  display: grid;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+}
+
+.composer-attachment-icon .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.composer-attachment-name {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attachment > button {
+  display: grid;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.composer-attachment > button:hover {
+  background: rgb(36 74 54 / 9%);
+}
+
+.composer-attachment > button .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.knowledge-chip--busy {
+  min-width: min(280px, 100%);
+  padding-right: 12px;
+}
+
+.knowledge-chip-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 0;
+  background: rgb(36 74 54 / 18%);
+  transition: width 0.18s ease-out;
+}
+
+.knowledge-chip-spinner {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgb(36 74 54 / 22%);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: knowledge-chip-spin 0.75s linear infinite;
+}
+
+.knowledge-chip-label {
+  display: grid;
+  position: relative;
+  z-index: 1;
+  gap: 1px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.knowledge-chip-label strong {
+  overflow: hidden;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-chip-label small {
+  color: rgb(36 74 54 / 72%);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+@keyframes knowledge-chip-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .knowledge-chip-spinner {
+    animation: none;
+    border-top-color: rgb(36 74 54 / 22%);
+    border-right-color: var(--green);
+  }
+
+  .knowledge-chip-fill {
+    transition: none;
+  }
 }
 
 .error-banner {

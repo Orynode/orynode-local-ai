@@ -75,6 +75,7 @@ database.exec(`
     created_at TEXT NOT NULL,
     position INTEGER NOT NULL,
     duration_ms INTEGER,
+    attachments TEXT,
     FOREIGN KEY (conversation_id)
       REFERENCES conversations(id)
       ON DELETE CASCADE
@@ -117,6 +118,12 @@ database.exec(`
 
 try {
   database.exec("ALTER TABLE messages ADD COLUMN duration_ms INTEGER");
+} catch {
+  // Column already exists on upgraded local databases.
+}
+
+try {
+  database.exec("ALTER TABLE messages ADD COLUMN attachments TEXT");
 } catch {
   // Column already exists on upgraded local databases.
 }
@@ -177,7 +184,8 @@ const getMessages = database.prepare(`
     role,
     content,
     created_at AS createdAt,
-    duration_ms AS durationMs
+    duration_ms AS durationMs,
+    attachments
   FROM messages
   WHERE conversation_id = ?
   ORDER BY position ASC
@@ -194,8 +202,8 @@ const deleteMessages = database.prepare(
 );
 const insertMessage = database.prepare(`
   INSERT INTO messages (
-    id, conversation_id, role, content, created_at, position, duration_ms
-  ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    id, conversation_id, role, content, created_at, position, duration_ms, attachments
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const deleteConversation = database.prepare(
   "DELETE FROM conversations WHERE id = ?",
@@ -462,12 +470,28 @@ function looksLikeTextBuffer(buffer) {
   return weird / sample.length < 0.05;
 }
 
+function isPdfMagicBuffer(buffer) {
+  const limit = Math.min(buffer.length, 1024);
+  for (let i = 0; i <= limit - 5; i += 1) {
+    if (
+      buffer[i] === 0x25 &&
+      buffer[i + 1] === 0x50 &&
+      buffer[i + 2] === 0x44 &&
+      buffer[i + 3] === 0x46 &&
+      buffer[i + 4] === 0x2d
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Phase 1: store original bytes only. Parsing happens in services/knowledge. */
 function storeKnowledgeFile(buffer, name, kindHint) {
   const extFromName = extensionFromName(name);
   let kind = kindHint;
   if (!kind) {
-    if (buffer.length >= 5 && buffer.subarray(0, 5).toString() === "%PDF-") {
+    if (isPdfMagicBuffer(buffer)) {
       kind = "pdf";
     } else if (extFromName === "md" || extFromName === "markdown") {
       kind = "md";
@@ -477,7 +501,7 @@ function storeKnowledgeFile(buffer, name, kindHint) {
   }
 
   if (kind === "pdf") {
-    if (buffer.length < 5 || buffer.subarray(0, 5).toString() !== "%PDF-") {
+    if (!isPdfMagicBuffer(buffer)) {
       throw new Error("请选择有效的 PDF 文件");
     }
   } else if (kind === "txt" || kind === "md") {
@@ -620,6 +644,43 @@ function recoverStaleEmbeddings() {
   }
 }
 
+function normalizeAttachments(value) {
+  if (!Array.isArray(value)) return null;
+  const items = value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const id = typeof item.id === "string" ? item.id.trim() : "";
+      const name = typeof item.name === "string" ? item.name.trim() : "";
+      const kind = item.kind === "all" ? "all" : "document";
+      if (!id || !name) return null;
+      return { id, name, kind };
+    })
+    .filter(Boolean);
+  return items.length > 0 ? items : null;
+}
+
+function parseStoredAttachments(raw) {
+  if (raw == null || raw === "") return undefined;
+  try {
+    const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return normalizeAttachments(parsed) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function mapMessageRow(row) {
+  const attachments = parseStoredAttachments(row.attachments);
+  return {
+    id: row.id,
+    role: row.role,
+    content: row.content,
+    createdAt: row.createdAt,
+    durationMs: row.durationMs ?? undefined,
+    ...(attachments ? { attachments } : {}),
+  };
+}
+
 function validateMessages(messages) {
   if (!Array.isArray(messages)) throw new Error("messages must be an array");
   return messages.map((message, position) => {
@@ -636,6 +697,7 @@ function validateMessages(messages) {
       message.durationMs > 0
         ? Math.round(message.durationMs)
         : null;
+    const attachments = normalizeAttachments(message.attachments);
     return {
       id: typeof message.id === "string" ? message.id : randomUUID(),
       role: message.role,
@@ -645,6 +707,7 @@ function validateMessages(messages) {
           ? message.createdAt
           : new Date().toISOString(),
       durationMs,
+      attachments,
       position,
     };
   });
@@ -673,6 +736,7 @@ function saveConversation(input, id = randomUUID()) {
         message.createdAt,
         message.position,
         message.durationMs,
+        message.attachments ? JSON.stringify(message.attachments) : null,
       );
     }
     database.exec("COMMIT");
@@ -686,7 +750,7 @@ function saveConversation(input, id = randomUUID()) {
     title,
     createdAt,
     updatedAt: now,
-    messages,
+    messages: getMessages.all(id).map(mapMessageRow),
   };
 }
 
@@ -1126,7 +1190,7 @@ const server = createServer(async (request, response) => {
         json(response, 200, {
           conversation: {
             ...conversation,
-            messages: getMessages.all(id),
+            messages: getMessages.all(id).map(mapMessageRow),
           },
         });
         return;

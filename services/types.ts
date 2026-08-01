@@ -4,12 +4,21 @@
 
 export type MessageRole = "user" | "assistant";
 
+/** 用户消息上展示的资料附件（对话内可见，类似 ChatGPT） */
+export interface MessageAttachment {
+  id: string;
+  name: string;
+  /** document = 单篇资料；all = 全部资料库 */
+  kind: "document" | "all";
+}
+
 export interface Message {
   id: string;
   role: MessageRole;
   content: string;
   createdAt: string;
   durationMs?: number;
+  attachments?: MessageAttachment[];
 }
 
 export interface ConversationSummary {

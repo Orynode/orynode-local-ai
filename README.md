@@ -21,7 +21,7 @@ Orynode Local AI 是一款面向 Apple Silicon Mac 的开源、本地优先 AI
 
 ## 发布阶段
 
-当前版本为 **V1：源码安装版**。用户通过 npm 安装和启动项目。这样可以让第一个公开版本保持完全开源，同时避免分发未经签名的 macOS 应用。
+当前版本为 **V1：源码安装版**（npm 包版本见 `package.json` / [CHANGELOG](CHANGELOG.md)）。用户通过 npm 安装和启动项目。这样可以让第一个公开版本保持完全开源，同时避免分发未经签名的 macOS 应用。
 
 V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复用 V1
 已经建立的本地 API、模型目录、Web 界面和 TurboFieldfare 运行结构。详情请参阅[中文路线图](docs/ROADMAP_zh-CN.md)。
@@ -35,10 +35,33 @@ V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复�
 - 支持断点续传的 Gemma 4 模型安装
 - 一条命令同时启动模型和 Web 界面
 - 使用本地 SQLite 自动保存和恢复对话
-- 本地 PDF / TXT / Markdown 导入与基于原文的资料问答（可选语义向量：`ORYNODE_SEMANTIC_SEARCH=1`）
+- 本地 PDF / TXT / Markdown 导入与基于原文的资料问答（默认关键词检索；可选语义向量）
 - 设置页与对话框可配置模型采样参数（上下文长度需重启后生效）
 - 无需账号，不包含统计分析，不在云端保存对话
 - 支持桌面端和移动端浏览器，以及可信局域网共享
+
+## 本地资料与检索
+
+上传资料后的处理流程：
+
+1. **解析**：按类型提取文本（PDF / TXT / Markdown）
+2. **分块**：切成可检索的文本片段并写入本机 SQLite
+3. **检索**：对话时按**本轮消息**附带的资料范围取相关片段，注入模型上下文（附件只作用于该条消息，发送后清空；打开历史会话不会恢复输入框旁的附件）。后续提问若要再检索同一 PDF，需再次附上；资料仍保留在本地库中。
+
+**默认只做关键词检索**（keyword），不加载向量模型，开箱无额外内存开销。关键词无命中时不会强行塞无关片段。
+
+若要开启**语义向量检索**（keyword + 向量混合，RRF 融合）：
+
+1. 将 `.env.example` 复制为 `.env.local`（若尚未创建）
+2. 设置 `ORYNODE_SEMANTIC_SEARCH=1`
+3. 重启 `npm run local`（由本地 data-service 加载 ONNX 模型 `bge-small-zh-v1.5`；`@xenova/transformers` 已在依赖中）
+
+开启后：
+
+- 新上传的文档会在入库后异步写向量；状态大致为 `ready` → `embedding` → `indexed`（失败为 `error`，仍可 keyword 检索）
+- 开启前已存在的文档，可在资料库中重建索引，或调用 `POST /api/knowledge/reindex` 批量补齐
+
+更完整的 RAG 设计、状态机与扩展接口见 [架构文档](docs/ARCHITECTURE_zh-CN.md)。
 
 ## 系统要求
 

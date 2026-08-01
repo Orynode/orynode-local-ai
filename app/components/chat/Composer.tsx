@@ -2,7 +2,17 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../ui/Icon";
-import type { KnowledgeDocument, RuntimeSettings } from "../../../services/types";
+import type {
+  KnowledgeDocument,
+  MessageAttachment,
+  RuntimeSettings,
+} from "../../../services/types";
+import type { KnowledgeUploadState } from "../../hooks/useKnowledge";
+import {
+  allDocumentsAttachment,
+  removeDraftAttachment,
+  toggleDraftDocument,
+} from "../../lib/attachments";
 
 type PanelMode = "closed" | "actions" | "library" | "params";
 
@@ -56,12 +66,10 @@ interface ComposerProps {
   sending: boolean;
   onStop: () => void;
   documents: KnowledgeDocument[];
-  selectedIds: string[];
-  useAllDocuments: boolean;
-  onToggleDocument: (id: string) => void;
-  onUseAllDocuments: () => void;
-  onClearScope: () => void;
+  draftAttachments: MessageAttachment[];
+  onDraftAttachmentsChange: (next: MessageAttachment[]) => void;
   uploading: boolean;
+  uploadState?: KnowledgeUploadState | null;
   onFileSelect: (file: File) => void;
   hotSettings: HotSettings;
   onPatchHotSettings: (
@@ -76,12 +84,10 @@ export function Composer({
   sending,
   onStop,
   documents,
-  selectedIds,
-  useAllDocuments,
-  onToggleDocument,
-  onUseAllDocuments,
-  onClearScope,
+  draftAttachments,
+  onDraftAttachmentsChange,
   uploading,
+  uploadState = null,
   onFileSelect,
   hotSettings,
   onPatchHotSettings,
@@ -90,9 +96,11 @@ export function Composer({
   const fileInput = useRef<HTMLInputElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dragDepth = useRef(0);
   const [panel, setPanel] = useState<PanelMode>("closed");
   const [draft, setDraft] = useState<HotSettings>(hotSettings);
   const [paramsHelpOpen, setParamsHelpOpen] = useState(false);
+  const [draggingFile, setDraggingFile] = useState(false);
 
   useEffect(() => {
     setDraft(hotSettings);
@@ -107,6 +115,59 @@ export function Composer({
       if (saveTimer.current) clearTimeout(saveTimer.current);
     };
   }, []);
+
+  useEffect(() => {
+    function isFileDrag(event: DragEvent) {
+      return Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    }
+
+    function onDragEnter(event: DragEvent) {
+      if (!isFileDrag(event) || uploading) return;
+      event.preventDefault();
+      dragDepth.current += 1;
+      setDraggingFile(true);
+    }
+
+    function onDragLeave(event: DragEvent) {
+      if (!isFileDrag(event)) return;
+      dragDepth.current = Math.max(0, dragDepth.current - 1);
+      if (dragDepth.current === 0) setDraggingFile(false);
+    }
+
+    function onDragOver(event: DragEvent) {
+      if (!isFileDrag(event) || uploading) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    }
+
+    function onDrop(event: DragEvent) {
+      if (!isFileDrag(event)) return;
+      event.preventDefault();
+      dragDepth.current = 0;
+      setDraggingFile(false);
+      if (uploading) return;
+      const file = event.dataTransfer?.files?.[0];
+      if (file) {
+        setPanel("closed");
+        onFileSelect(file);
+      }
+    }
+
+    window.addEventListener("dragenter", onDragEnter);
+    window.addEventListener("dragleave", onDragLeave);
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragenter", onDragEnter);
+      window.removeEventListener("dragleave", onDragLeave);
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, [onFileSelect, uploading]);
+
+  function openAttachMenu() {
+    setPanel("actions");
+  }
 
   function resize(element: HTMLTextAreaElement | null = composer.current) {
     if (!element) return;
@@ -181,29 +242,77 @@ export function Composer({
     fileInput.current?.click();
   }
 
-  const selectedDocuments = documents.filter((doc) =>
-    selectedIds.includes(doc.id),
-  );
-  const chipLabel = useAllDocuments
-    ? "全部资料"
-    : selectedDocuments.length === 1
-      ? selectedDocuments[0].name
-      : selectedDocuments.length > 1
-        ? `${selectedDocuments.length} 篇资料`
-        : "";
+  const pendingAttachments = uploadState ? [] : draftAttachments;
+  const useAllDocuments = draftAttachments.some((item) => item.kind === "all");
+  const selectedIds = draftAttachments
+    .filter((item) => item.kind === "document")
+    .map((item) => item.id);
   const plusActive =
-    panel === "actions" || panel === "library" || Boolean(chipLabel);
+    panel === "actions" ||
+    panel === "library" ||
+    pendingAttachments.length > 0 ||
+    Boolean(uploadState);
   const styleLabel = presetLabel(draft);
 
   return (
     <div className="composer-wrap">
-      {chipLabel ? (
-        <div className="knowledge-chip">
-          <Icon name="database" />
-          <span>{chipLabel}</span>
-          <button type="button" onClick={onClearScope} aria-label="取消资料检索">
-            <Icon name="close" />
-          </button>
+      {draggingFile ? (
+        <div className="composer-drop-overlay" role="status" aria-live="polite">
+          <div className="composer-drop-card">
+            <strong>松开以上传资料</strong>
+            <p>支持 PDF、TXT、Markdown</p>
+          </div>
+        </div>
+      ) : null}
+      {uploadState ? (
+        <div
+          className="knowledge-chip knowledge-chip--busy"
+          role="status"
+          aria-live="polite"
+          aria-busy="true"
+        >
+          <span
+            className="knowledge-chip-fill"
+            style={{ width: `${uploadState.percent}%` }}
+            aria-hidden
+          />
+          <span className="knowledge-chip-spinner" aria-hidden />
+          <span className="knowledge-chip-label">
+            <strong>{uploadState.fileName}</strong>
+            <small>
+              {uploadState.phase === "uploading"
+                ? `上传中 ${uploadState.percent}%`
+                : "正在解析入库…"}
+            </small>
+          </span>
+        </div>
+      ) : pendingAttachments.length > 0 ? (
+        <div className="composer-attachments" aria-label="下次发送附带的资料">
+          {pendingAttachments.map((item) => (
+            <div key={item.id} className="composer-attachment">
+              <span className="composer-attachment-icon" aria-hidden>
+                <Icon name={item.kind === "all" ? "database" : "attach"} />
+              </span>
+              <span className="composer-attachment-name">
+                {item.kind === "all"
+                  ? documents.length > 0
+                    ? `全部资料（${documents.length}）`
+                    : "全部资料"
+                  : item.name}
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  onDraftAttachmentsChange(
+                    removeDraftAttachment(draftAttachments, item.id),
+                  )
+                }
+                aria-label={`移除 ${item.name}`}
+              >
+                <Icon name="close" />
+              </button>
+            </div>
+          ))}
         </div>
       ) : null}
 
@@ -234,16 +343,16 @@ export function Composer({
               </span>
               <span className="composer-action-copy">
                 <strong>从资料库选择</strong>
-                <small>设定本轮对话的检索范围</small>
+                <small>设定下次发送要检索的资料</small>
               </span>
             </button>
           </div>
         ) : null}
 
         {panel === "library" ? (
-          <div className="composer-picker" role="dialog" aria-label="选择检索资料">
+          <div className="composer-picker" role="dialog" aria-label="选择本条消息的检索资料">
             <div className="composer-picker-head">
-              <strong>对话检索范围</strong>
+              <strong>本条消息检索资料</strong>
               <button type="button" onClick={() => setPanel("closed")}>
                 完成
               </button>
@@ -259,7 +368,9 @@ export function Composer({
                     type="button"
                     className={useAllDocuments ? "active" : ""}
                     onClick={() => {
-                      onUseAllDocuments();
+                      onDraftAttachmentsChange([
+                        allDocumentsAttachment(),
+                      ]);
                     }}
                   >
                     <span>全部资料</span>
@@ -274,7 +385,11 @@ export function Composer({
                       <button
                         type="button"
                         className={active ? "active" : ""}
-                        onClick={() => onToggleDocument(doc.id)}
+                        onClick={() =>
+                          onDraftAttachmentsChange(
+                            toggleDraftDocument(draftAttachments, doc),
+                          )
+                        }
                       >
                         <span>{doc.name}</span>
                         <small>
@@ -286,11 +401,11 @@ export function Composer({
                 })}
               </ul>
             )}
-            {(useAllDocuments || selectedIds.length > 0) && (
+            {draftAttachments.length > 0 && (
               <button
                 type="button"
                 className="composer-picker-clear"
-                onClick={onClearScope}
+                onClick={() => onDraftAttachmentsChange([])}
               >
                 不使用资料
               </button>
@@ -441,20 +556,39 @@ export function Composer({
             ref={composer}
             value={input}
             onChange={(event) => {
-              onInputChange(event.target.value);
+              const next = event.target.value;
+              // 空输入时粘贴/输入以 @ 开头 → 打开附加菜单（与 + 相同）
+              if (input === "" && next.startsWith("@")) {
+                onInputChange(next.replace(/^@+/, ""));
+                openAttachMenu();
+                requestAnimationFrame(() => resize(event.currentTarget));
+                return;
+              }
+              onInputChange(next);
               resize(event.currentTarget);
             }}
             onKeyDown={(event) => {
               if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+              const el = event.currentTarget;
+              // 光标在开头输入 @ → 打开附加菜单，不写入 @
+              if (
+                event.key === "@" &&
+                el.selectionStart === 0 &&
+                el.selectionEnd === 0
+              ) {
+                event.preventDefault();
+                openAttachMenu();
+                return;
+              }
               if (event.key !== "Enter") return;
               if (event.shiftKey) {
-                requestAnimationFrame(() => resize(event.currentTarget));
+                requestAnimationFrame(() => resize(el));
                 return;
               }
               event.preventDefault();
               void handleSubmit();
             }}
-            placeholder="输入问题，Shift+Enter 换行..."
+            placeholder="输入问题；Shift+Enter 换行"
             rows={1}
           />
           <button

@@ -122,17 +122,22 @@ Configuration Layer
 ### Chat Flow
 
 ```
-User input
-  → page.tsx (useChat.sendMessage)
-    → POST /api/chat
-      → services/chat/prompt.ts (build system prompt)
-      → services/knowledge/retriever.ts (retrieve context if document selected)
-      → services/inference/turbo-fieldfare.ts (proxy Chat Completions)
-        → TurboFieldfare (:8080/v1/chat/completions)
-          ← SSE stream
-      → Return SSE stream to browser
+Composer draftAttachments (next turn only; cleared after send)
+  → page.tsx → useChat.sendMessage(attachments)
+      → persist message.attachments (bubble + SQLite)
+      → scopeFromAttachments → knowledgeScope (none | documents[] | all)
+      → POST /api/chat
+          → normalizeKnowledgeScope
+          → HybridRetriever.retrieve (sole retrieval entry)
+          → buildSystemPrompt + TurboFieldfare SSE
   → page.tsx renders Markdown incrementally
 ```
+
+**Product semantics (attachments follow the message):**
+
+- Library is storage; `useKnowledge` is CRUD / upload / index only — **no** sticky cross-turn selection
+- `draftAttachments` live in the composer only; new chat and opening history clear the draft (history does **not** rehydrate composer attachments)
+- Later turns must re-attach to retrieve again; continuity is mainly from prior chat text, not reuse of the previous scope
 
 ### Document Import Flow
 
@@ -165,17 +170,19 @@ User query + knowledgeScope (none | documents[] | all)
 ```
 orynode-local-ai/
 ├── app/                              # Next.js frontend (App Router)
-│   ├── page.tsx                      # Entry page (component orchestration)
+│   ├── page.tsx                      # Entry (orchestration + draftAttachments)
 │   ├── layout.tsx                    # Root layout
 │   ├── globals.css                   # Global styles
+│   ├── lib/
+│   │   └── attachments.ts            #   Attachments ↔ KnowledgeScope
 │   ├── components/                   # UI components
 │   │   ├── chat/                     #   Chat views
 │   │   │   ├── ChatView.tsx          #     Message list container
-│   │   │   ├── MessageBubble.tsx     #     Message bubble (Markdown render)
-│   │   │   ├── Composer.tsx          #     Input box + attach button
+│   │   │   ├── MessageBubble.tsx     #     Bubble (incl. per-message attachments)
+│   │   │   ├── Composer.tsx          #     Input + per-turn draft attachments
 │   │   │   └── WelcomeScreen.tsx     #     Welcome page
 │   │   ├── knowledge/                #   Knowledge views
-│   │   │   ├── KnowledgeView.tsx     #     Document list page
+│   │   │   ├── KnowledgeView.tsx     #     List; “use in chat” → draft
 │   │   │   └── DocumentCard.tsx      #     Document card
 │   │   ├── sidebar/                  #   Sidebar
 │   │   │   ├── Sidebar.tsx           #     Navigation + status
@@ -186,9 +193,9 @@ orynode-local-ai/
 │   │       ├── Icon.tsx              #     SVG icons
 │   │       └── Modal.tsx             #     Modal dialog
 │   ├── hooks/                        # Custom hooks
-│   │   ├── useChat.ts                #   Chat logic (streaming, state)
+│   │   ├── useChat.ts                #   Streaming; turn attachments → scope
 │   │   ├── useConversations.ts       #   Conversation CRUD
-│   │   ├── useKnowledge.ts           #   Knowledge CRUD
+│   │   ├── useKnowledge.ts           #   Library CRUD (no sticky selection)
 │   │   └── useSettings.ts            #   Settings read/write
 │   └── api/                          # API routes (Next.js convention)
 │       ├── chat/route.ts             #   POST chat proxy
@@ -346,6 +353,7 @@ interface VectorStore {
 
 - Unique entry: `retrieve(query, scope)`
 - Scope: `none | documents[] | all` (compat: `knowledgeDocumentId`)
+- UI derives `knowledgeScope` at send time from the turn’s draft attachments via `scopeFromAttachments` (then persists a display snapshot on `message.attachments`); no auto-scope from older messages in the thread
 - Keyword always; hybrid when Embedder + vectors exist
 - RRF uses rank + chunk id
 
@@ -529,7 +537,9 @@ CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, ...);
 -- Messages (cascade delete)
 CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
   role TEXT CHECK (role IN ('user','assistant')), content TEXT NOT NULL,
-  duration_ms INTEGER, FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE);
+  duration_ms INTEGER,
+  attachments TEXT,  -- optional JSON: per-message display scope (document | all)
+  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE);
 
 -- Knowledge documents
 CREATE TABLE knowledge_documents (id TEXT PRIMARY KEY, name TEXT NOT NULL,

@@ -94,6 +94,7 @@ export async function POST(request: Request) {
     }
 
     const name = decodeFileName(headerName, extensionForKind(kind));
+    // parsePdf 内部会拷贝 buffer，调用方的 ArrayBuffer 可安全继续用于落盘
     const doc = await parseDocument(buffer, kind);
     const chunker = createChunker();
     const rawChunks = chunker.chunkDocument(doc.pages);
