@@ -2,6 +2,7 @@
 
 import { useCallback, useState } from "react";
 import type { ConversationSummary, Message } from "../../services/types";
+import { normalizeAttachments } from "../lib/attachments";
 
 export function useConversations() {
   const [history, setHistory] = useState<ConversationSummary[]>([]);
@@ -24,10 +25,17 @@ export function useConversations() {
       cache: "no-store",
     });
     if (!response.ok) throw new Error("无法读取本地对话");
-    return (await response.json()).conversation as {
+    const conversation = (await response.json()).conversation as {
       id: string;
       title: string;
       messages: Message[];
+    };
+    return {
+      ...conversation,
+      messages: (conversation.messages ?? []).map((message) => ({
+        ...message,
+        attachments: normalizeAttachments(message.attachments),
+      })),
     };
   }, []);
 

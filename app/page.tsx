@@ -1,7 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import type { Message, MessageAttachment } from "../services/types";
+import type {
+  KnowledgeDocument,
+  Message,
+  MessageAttachment,
+} from "../services/types";
 import { Sidebar } from "./components/sidebar/Sidebar";
 import { ChatView } from "./components/chat/ChatView";
 import { WelcomeScreen } from "./components/chat/WelcomeScreen";
@@ -10,16 +14,18 @@ import { KnowledgeView } from "./components/knowledge/KnowledgeView";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { useChat } from "./hooks/useChat";
 import { useConversations } from "./hooks/useConversations";
+import { useConversationFiles } from "./hooks/useConversationFiles";
 import { useKnowledge } from "./hooks/useKnowledge";
 import { useSettings } from "./hooks/useSettings";
 import { Icon } from "./components/ui/Icon";
+import { AlertDialog } from "./components/ui/AlertDialog";
 import { ConfirmDialog } from "./components/ui/ConfirmDialog";
 import { GITHUB_REPO_URL } from "../config/defaults";
 import {
   DEFAULT_DISPLAY_NAME,
   readStoredDisplayName,
 } from "./lib/displayName";
-import { attachmentFromDocument } from "./lib/attachments";
+import { attachmentFromConversationFile } from "./lib/attachments";
 
 type PendingDelete =
   | { type: "conversation"; id: string }
@@ -36,6 +42,9 @@ export default function Home() {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState(DEFAULT_DISPLAY_NAME);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete>(null);
+  /** 内容去重命中时弹窗（对话页也可见） */
+  const [duplicateNotice, setDuplicateNotice] =
+    useState<KnowledgeDocument | null>(null);
   /** 仅作用于下次发送；成功发送后清空，打开历史/新对话/删除当前会话不保留 */
   const [draftAttachments, setDraftAttachments] = useState<MessageAttachment[]>(
     [],
@@ -45,6 +54,7 @@ export default function Home() {
   const chat = useChat();
   const conversations = useConversations();
   const knowledge = useKnowledge();
+  const conversationFiles = useConversationFiles();
   const settingsHook = useSettings();
 
   // ---- Init ----
@@ -140,6 +150,7 @@ export default function Home() {
       setConversationTitle(conv.title);
       chat.setMessages(conv.messages ?? []);
       setDraftAttachments([]);
+      await conversationFiles.refresh(conv.id);
       setViewMode("assistant");
     } catch {
       chat.setError("无法读取本地对话");
@@ -167,6 +178,7 @@ export default function Home() {
           setConversationTitle("");
           chat.clearChat();
           setDraftAttachments([]);
+          conversationFiles.clear();
         }
         await conversations.refresh();
       } catch {
@@ -177,18 +189,69 @@ export default function Home() {
 
     await knowledge.remove(current.id);
     setDraftAttachments((prev) =>
-      prev.filter((item) => item.kind === "all" || item.id !== current.id),
+      prev.filter(
+        (item) =>
+          item.kind === "library_all" ||
+          item.kind === "conversation_file" ||
+          item.id !== current.id,
+      ),
     );
+    if (conversationId) {
+      void conversationFiles.refresh(conversationId);
+    }
   }
 
-  async function handleUploadKnowledge(file: File) {
-    const doc = await knowledge.upload(file);
-    if (doc) {
-      setDraftAttachments((prev) => {
-        if (prev.some((item) => item.kind === "all")) return prev;
-        if (prev.some((item) => item.id === doc.id)) return prev;
-        return [...prev, attachmentFromDocument(doc)];
-      });
+  /** 导入资料库：不自动挂草稿；内容去重，显示名可选 */
+  async function handleUploadKnowledge(
+    file: File,
+    options?: { displayName?: string },
+  ) {
+    const result = await knowledge.upload(file, options);
+    if (result?.deduplicated) {
+      setDuplicateNotice(result.document);
+    }
+  }
+
+  async function ensureConversationId(): Promise<string> {
+    if (conversationId) return conversationId;
+    const response = await fetch("/api/conversations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ title: "新对话", messages: [] }),
+    });
+    if (!response.ok) {
+      throw new Error("无法创建对话以挂载附件");
+    }
+    const result = await response.json();
+    const id = result.conversation.id as string;
+    setConversationId(id);
+    setConversationTitle(result.conversation.title || "新对话");
+    void conversations.refresh();
+    return id;
+  }
+
+  /** 附到本对话：会话附件命名空间 */
+  async function handleAttachConversationFile(file: File) {
+    try {
+      const id = await ensureConversationId();
+      const uploaded = await conversationFiles.upload(id, file);
+      if (uploaded) {
+        setDraftAttachments((prev) => {
+          if (
+            prev.some(
+              (item) =>
+                item.kind === "conversation_file" && item.id === uploaded.id,
+            )
+          ) {
+            return prev;
+          }
+          return [...prev, attachmentFromConversationFile(uploaded)];
+        });
+      }
+    } catch (e) {
+      conversationFiles.setError(
+        e instanceof Error ? e.message : "无法附到本对话",
+      );
     }
   }
 
@@ -197,12 +260,36 @@ export default function Home() {
     setConversationTitle("");
     chat.clearChat();
     setDraftAttachments([]);
+    conversationFiles.clear();
     setViewMode("assistant");
   }
 
+  /** 资料库「去对话」：始终新开空对话，再挂上本轮资料库草稿 */
   function handleAttachToChat(attachments: MessageAttachment[]) {
+    setConversationId(null);
+    setConversationTitle("");
+    chat.clearChat();
+    conversationFiles.clear();
     setDraftAttachments(attachments);
     setViewMode("assistant");
+  }
+
+  async function handleRemoveConversationFile(fileId: string) {
+    if (!conversationId) return;
+    const ok = await conversationFiles.remove(conversationId, fileId);
+    if (ok) {
+      setDraftAttachments((prev) =>
+        prev.filter(
+          (item) =>
+            !(item.kind === "conversation_file" && item.id === fileId),
+        ),
+      );
+    }
+  }
+
+  async function handleReindexConversationFile(fileId: string) {
+    if (!conversationId) return;
+    await conversationFiles.reindex(conversationId, fileId);
   }
 
   function handleCopy(message: Message, format: "txt" | "md") {
@@ -324,7 +411,10 @@ export default function Home() {
             onDelete={(id) => { void handleDeleteKnowledge(id); }}
             onReindex={(id) => { void knowledge.reindex(id); }}
             onReindexAll={() => { void knowledge.reindexAll(); }}
-            onFileSelect={(file) => { void handleUploadKnowledge(file); }}
+            onRename={(id, name) => knowledge.rename(id, name)}
+            onImport={(file, options) => {
+              void handleUploadKnowledge(file, options);
+            }}
             onAttachToChat={handleAttachToChat}
           />
         ) : chat.messages.length === 0 ? (
@@ -333,8 +423,10 @@ export default function Home() {
               connected={chat.connected}
               onSuggestionClick={(text) => setInput(text)}
             />
-            {knowledge.error && (
-              <div className="error-banner">{knowledge.error}</div>
+            {(knowledge.error || conversationFiles.error) && (
+              <div className="error-banner">
+                {knowledge.error || conversationFiles.error}
+              </div>
             )}
             <Composer
               input={input}
@@ -343,11 +435,27 @@ export default function Home() {
               sending={chat.sending}
               onStop={chat.stopGeneration}
               documents={knowledge.documents}
+              conversationFiles={conversationFiles.files}
               draftAttachments={draftAttachments}
               onDraftAttachmentsChange={setDraftAttachments}
-              uploading={knowledge.uploading}
-              uploadState={knowledge.uploadState}
-              onFileSelect={(file) => { void handleUploadKnowledge(file); }}
+              uploading={
+                knowledge.uploading || conversationFiles.uploading
+              }
+              uploadState={
+                conversationFiles.uploadState ?? knowledge.uploadState
+              }
+              onAttachFileSelect={(file) => {
+                void handleAttachConversationFile(file);
+              }}
+              onImportLibrarySelect={(file) => {
+                void handleUploadKnowledge(file);
+              }}
+              onRemoveConversationFile={(fileId) => {
+                void handleRemoveConversationFile(fileId);
+              }}
+              onReindexConversationFile={(fileId) => {
+                void handleReindexConversationFile(fileId);
+              }}
               hotSettings={{
                 temperature: settingsHook.settings.temperature,
                 topP: settingsHook.settings.topP,
@@ -365,8 +473,10 @@ export default function Home() {
         ) : (
           <>
             {chat.error && <div className="error-banner">{chat.error}</div>}
-            {knowledge.error && (
-              <div className="error-banner">{knowledge.error}</div>
+            {(knowledge.error || conversationFiles.error) && (
+              <div className="error-banner">
+                {knowledge.error || conversationFiles.error}
+              </div>
             )}
             <ChatView
               messages={chat.messages}
@@ -382,11 +492,27 @@ export default function Home() {
               sending={chat.sending}
               onStop={chat.stopGeneration}
               documents={knowledge.documents}
+              conversationFiles={conversationFiles.files}
               draftAttachments={draftAttachments}
               onDraftAttachmentsChange={setDraftAttachments}
-              uploading={knowledge.uploading}
-              uploadState={knowledge.uploadState}
-              onFileSelect={(file) => { void handleUploadKnowledge(file); }}
+              uploading={
+                knowledge.uploading || conversationFiles.uploading
+              }
+              uploadState={
+                conversationFiles.uploadState ?? knowledge.uploadState
+              }
+              onAttachFileSelect={(file) => {
+                void handleAttachConversationFile(file);
+              }}
+              onImportLibrarySelect={(file) => {
+                void handleUploadKnowledge(file);
+              }}
+              onRemoveConversationFile={(fileId) => {
+                void handleRemoveConversationFile(fileId);
+              }}
+              onReindexConversationFile={(fileId) => {
+                void handleReindexConversationFile(fileId);
+              }}
               hotSettings={{
                 temperature: settingsHook.settings.temperature,
                 topP: settingsHook.settings.topP,
@@ -404,6 +530,23 @@ export default function Home() {
         )}
       </section>
 
+      <AlertDialog
+        open={duplicateNotice != null}
+        title="资料库已有相同内容"
+        description={
+          duplicateNotice
+            ? `未重复入库。已有资料：「${duplicateNotice.name}」${
+                duplicateNotice.originalName &&
+                duplicateNotice.originalName !== duplicateNotice.name
+                  ? `（原文件 ${duplicateNotice.originalName}）`
+                  : ""
+              }。去重按文件内容，与显示名称无关。`
+            : ""
+        }
+        confirmLabel="知道了"
+        onClose={() => setDuplicateNotice(null)}
+      />
+
       <ConfirmDialog
         open={pendingDelete != null}
         title={
@@ -412,7 +555,7 @@ export default function Home() {
         description={
           pendingDelete?.type === "knowledge"
             ? "将删除这份资料及其索引，此操作无法撤销。"
-            : "将删除这条对话记录，此操作无法撤销。"
+            : "将删除这条对话及其会话附件，此操作无法撤销。"
         }
         confirmLabel="删除"
         cancelLabel="取消"

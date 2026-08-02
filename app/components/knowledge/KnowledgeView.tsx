@@ -20,13 +20,15 @@ interface KnowledgeViewProps {
   onDelete: (id: string) => void;
   onReindex: (id: string) => void;
   onReindexAll: () => void;
-  onFileSelect: (file: File) => void;
-  /** 将选中资料写入对话草稿附件，并回到对话 */
+  onRename: (id: string, name: string) => void | Promise<unknown>;
+  /** 导入；displayName 可选，默认文件名；内容哈希去重与名字无关 */
+  onImport: (file: File, options?: { displayName?: string }) => void;
+  /** 将选中资料写入新对话的本轮草稿，并切到助手 */
   onAttachToChat: (attachments: MessageAttachment[]) => void;
 }
 
 /**
- * 资料库页的选中仅用于「去对话」打包草稿，不持久、不跨会话粘性。
+ * 资料库页的选中仅用于「去对话」打包草稿；始终新开对话，不粘到历史会话。
  */
 export function KnowledgeView({
   documents,
@@ -38,12 +40,15 @@ export function KnowledgeView({
   onDelete,
   onReindex,
   onReindexAll,
-  onFileSelect,
+  onRename,
+  onImport,
   onAttachToChat,
 }: KnowledgeViewProps) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [pickedIds, setPickedIds] = useState<string[]>([]);
   const [pickAll, setPickAll] = useState(false);
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [displayName, setDisplayName] = useState("");
 
   const semanticOn = meta?.semanticSearchEnabled === true;
   const indexedCount = documents.filter((doc) => doc.status === "indexed").length;
@@ -52,7 +57,9 @@ export function KnowledgeView({
 
   const metaLine = (() => {
     if (documents.length === 0) {
-      return semanticOn ? "语义检索已开启" : "默认关键词检索";
+      return semanticOn
+        ? "语义检索已开启 · 相同内容只会保留一份"
+        : "默认关键词检索 · 相同内容只会保留一份";
     }
     if (semanticOn) {
       return indexedCount === documents.length
@@ -81,13 +88,37 @@ export function KnowledgeView({
     onAttachToChat(attachments);
   }
 
+  function openPicker() {
+    fileInput.current?.click();
+  }
+
+  function onFileChosen(file: File) {
+    setPendingFile(file);
+    setDisplayName(file.name.replace(/\.[^.]+$/, "") || file.name);
+  }
+
+  function confirmImport() {
+    if (!pendingFile || uploading) return;
+    const name = displayName.trim();
+    onImport(pendingFile, name ? { displayName: name } : undefined);
+    setPendingFile(null);
+    setDisplayName("");
+  }
+
+  function cancelImport() {
+    setPendingFile(null);
+    setDisplayName("");
+  }
+
   return (
     <section className="knowledge-view">
       <div className="knowledge-header">
         <div>
           <span className="local-badge">LOCAL DOCS</span>
           <h1>本地资料库</h1>
-          <p>点选资料后「去对话」会写入本轮附件草稿；发送后不会自动带到下一轮。</p>
+          <p>
+            按文件内容去重（与显示名无关）；点选后「去对话」会新开对话并写入本轮草稿，发送后不会自动带到下一轮。
+          </p>
           <p className="knowledge-meta-line">{metaLine}</p>
         </div>
         <div className="knowledge-header-actions">
@@ -126,7 +157,7 @@ export function KnowledgeView({
           )}
           <button
             className="knowledge-upload"
-            onClick={() => fileInput.current?.click()}
+            onClick={openPicker}
             disabled={uploading}
           >
             <Icon name="plus" />
@@ -140,7 +171,7 @@ export function KnowledgeView({
           accept="application/pdf,.pdf,text/plain,.txt,text/markdown,.md,.markdown"
           onChange={(event) => {
             const file = event.target.files?.[0];
-            if (file) onFileSelect(file);
+            if (file) onFileChosen(file);
             if (fileInput.current) fileInput.current.value = "";
           }}
         />
@@ -158,14 +189,14 @@ export function KnowledgeView({
       {documents.length === 0 ? (
         <button
           className="knowledge-empty"
-          onClick={() => fileInput.current?.click()}
+          onClick={openPicker}
           disabled={uploading}
         >
           <span>
             <Icon name="database" />
           </span>
           <strong>导入第一份资料</strong>
-          <small>支持 PDF、TXT、Markdown，单个文件最大 50 MB</small>
+          <small>支持 PDF、TXT、Markdown，单个文件最大 50 MB；相同内容不会重复入库</small>
         </button>
       ) : (
         <div className="knowledge-list">
@@ -179,10 +210,56 @@ export function KnowledgeView({
               onSelect={togglePick}
               onDelete={onDelete}
               onReindex={onReindex}
+              onRename={onRename}
             />
           ))}
         </div>
       )}
+
+      {pendingFile ? (
+        <div
+          className="knowledge-import-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) cancelImport();
+          }}
+        >
+          <div
+            className="knowledge-import-dialog"
+            role="dialog"
+            aria-labelledby="knowledge-import-title"
+          >
+            <h2 id="knowledge-import-title">导入到资料库</h2>
+            <p className="knowledge-import-file">文件：{pendingFile.name}</p>
+            <label className="knowledge-import-label">
+              显示名称（可选）
+              <input
+                type="text"
+                value={displayName}
+                maxLength={180}
+                onChange={(event) => setDisplayName(event.target.value)}
+                placeholder={pendingFile.name}
+              />
+            </label>
+            <p className="knowledge-import-hint">
+              去重按文件内容，与显示名称无关；导入后仍可重命名。
+            </p>
+            <div className="knowledge-import-actions">
+              <button type="button" className="knowledge-scope-btn" onClick={cancelImport}>
+                取消
+              </button>
+              <button
+                type="button"
+                className="knowledge-upload"
+                disabled={uploading}
+                onClick={confirmImport}
+              >
+                确认导入
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

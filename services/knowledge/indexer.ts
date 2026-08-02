@@ -1,5 +1,5 @@
 /**
- * 文档向量索引与状态机
+ * 文档向量索引与状态机（资料库与会话附件共用）
  *
  * status:
  *   awaiting_chunks — 原件已存，分块未提交（不可检索）
@@ -11,6 +11,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { ChunkResult } from "./chunker";
+import type { DocumentNamespace } from "./types";
 import { resolveEmbedder, resetEmbedderCache, getEmbedderUnavailableReason } from "./embedder";
 import { SQLiteVectorStore } from "./vector-store";
 import {
@@ -19,17 +20,24 @@ import {
   ORYNODE_DATA_URL,
   SEARCH_CONFIG,
 } from "../../config/defaults";
-import type { KnowledgeDocument } from "../types";
+import type { ConversationFile, KnowledgeDocument } from "../types";
 
 export type IndexStatus = "indexed" | "ready" | "error" | "skipped";
+
+function basePath(namespace: DocumentNamespace): string {
+  return namespace === "conversation"
+    ? `${ORYNODE_DATA_URL}/conversation-files`
+    : `${ORYNODE_DATA_URL}/knowledge`;
+}
 
 async function setStatus(
   documentId: string,
   status: string,
   extra: Record<string, unknown> = {},
+  namespace: DocumentNamespace = "library",
 ): Promise<void> {
   const response = await fetch(
-    `${ORYNODE_DATA_URL}/knowledge/${encodeURIComponent(documentId)}/status`,
+    `${basePath(namespace)}/${encodeURIComponent(documentId)}/status`,
     {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -45,9 +53,10 @@ async function setStatus(
 
 async function fetchDocumentChunks(
   documentId: string,
+  namespace: DocumentNamespace = "library",
 ): Promise<Array<ChunkResult & { id: string }>> {
   const response = await fetch(
-    `${ORYNODE_DATA_URL}/knowledge/${encodeURIComponent(documentId)}/chunks`,
+    `${basePath(namespace)}/${encodeURIComponent(documentId)}/chunks`,
     {
       cache: "no-store",
       signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
@@ -79,6 +88,7 @@ async function fetchDocumentChunks(
 export async function indexDocumentEmbeddings(
   documentId: string,
   chunks?: Array<ChunkResult & { id: string }>,
+  namespace: DocumentNamespace = "library",
 ): Promise<{ status: IndexStatus; reason?: string }> {
   if (!SEARCH_CONFIG.semanticSearchEnabled) {
     return { status: "skipped" };
@@ -92,14 +102,14 @@ export async function indexDocumentEmbeddings(
     };
   }
 
-  const targetChunks = chunks ?? (await fetchDocumentChunks(documentId));
+  const targetChunks =
+    chunks ?? (await fetchDocumentChunks(documentId, namespace));
   if (targetChunks.length === 0) {
     return { status: "ready", reason: "文档没有可用分块" };
   }
 
   try {
-    // status=embedding 时 data-service 会先清空旧 BLOB
-    await setStatus(documentId, "embedding");
+    await setStatus(documentId, "embedding", {}, namespace);
     const vectors = await embedder.embedBatch(
       targetChunks.map((chunk) => chunk.content),
     );
@@ -109,6 +119,7 @@ export async function indexDocumentEmbeddings(
         id: chunk.id,
         documentId,
         vector: vectors[index],
+        namespace,
         metadata: {
           pageNumber: chunk.pageNumber,
           position: chunk.position,
@@ -116,18 +127,27 @@ export async function indexDocumentEmbeddings(
         },
       })),
     );
-    await setStatus(documentId, "indexed", {
-      embeddingModel: embedder.modelName || EMBEDDING_CONFIG.modelName,
-      embeddingDim: embedder.dimension || EMBEDDING_CONFIG.dimension,
-      errorMessage: null,
-    });
+    await setStatus(
+      documentId,
+      "indexed",
+      {
+        embeddingModel: embedder.modelName || EMBEDDING_CONFIG.modelName,
+        embeddingDim: embedder.dimension || EMBEDDING_CONFIG.dimension,
+        errorMessage: null,
+      },
+      namespace,
+    );
     return { status: "indexed" };
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "向量索引失败";
     try {
-      // status=error 时 data-service 会清空该文档 embedding BLOB
-      await setStatus(documentId, "error", { errorMessage: message });
+      await setStatus(
+        documentId,
+        "error",
+        { errorMessage: message },
+        namespace,
+      );
     } catch {
       // status update best-effort
     }
@@ -138,6 +158,7 @@ export async function indexDocumentEmbeddings(
 /** 强制按库中 chunks 重建向量（开启语义后补齐旧文档） */
 export async function reindexDocument(
   documentId: string,
+  namespace: DocumentNamespace = "library",
 ): Promise<{ status: IndexStatus; reason?: string }> {
   resetEmbedderCache();
   if (!SEARCH_CONFIG.semanticSearchEnabled) {
@@ -155,7 +176,7 @@ export async function reindexDocument(
         "向量模型不可用。请确认 data-service 已启动",
     };
   }
-  const result = await indexDocumentEmbeddings(documentId);
+  const result = await indexDocumentEmbeddings(documentId, undefined, namespace);
   if (result.status === "ready") {
     return {
       status: "skipped",
@@ -201,7 +222,7 @@ export async function reindexAllDocuments(): Promise<{
       });
       continue;
     }
-    const result = await reindexDocument(document.id);
+    const result = await reindexDocument(document.id, "library");
     results.push({ id: document.id, ...result });
   }
 
@@ -221,9 +242,10 @@ export async function commitDocumentChunks(
   documentId: string,
   pageCount: number,
   chunks: Array<ChunkResult & { id: string }>,
-): Promise<KnowledgeDocument> {
+  namespace: DocumentNamespace = "library",
+): Promise<KnowledgeDocument | ConversationFile> {
   const response = await fetch(
-    `${ORYNODE_DATA_URL}/knowledge/${encodeURIComponent(documentId)}/chunks`,
+    `${basePath(namespace)}/${encodeURIComponent(documentId)}/chunks`,
     {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -234,6 +256,9 @@ export async function commitDocumentChunks(
   const result = await response.json();
   if (!response.ok) {
     throw new Error(result.error || "写入文档分块失败");
+  }
+  if (namespace === "conversation") {
+    return result.file as ConversationFile;
   }
   return result.document as KnowledgeDocument;
 }

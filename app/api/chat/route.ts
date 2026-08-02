@@ -15,7 +15,7 @@ import {
 import { trimChatHistory } from "../../../services/chat/context";
 import {
   HybridRetriever,
-  normalizeKnowledgeScope,
+  normalizeRetrievalScope,
 } from "../../../services/knowledge";
 import { inferenceService } from "../../../services/inference/turbo-fieldfare";
 import type { ChatMessage } from "../../../services/types";
@@ -54,7 +54,33 @@ export async function POST(request: Request) {
     );
 
     let knowledgePrompt = "";
-    const scope = normalizeKnowledgeScope(body);
+    const conversationId =
+      typeof body.conversationId === "string" && body.conversationId.trim()
+        ? body.conversationId.trim()
+        : null;
+    let scope = normalizeRetrievalScope(body);
+    // 会话附件必须绑定 conversationId；用请求顶层 id 收紧归属，禁止跨会话 fileId
+    const incomingFileIds = Array.isArray(
+      body?.retrievalScope?.conversationFiles?.fileIds,
+    )
+      ? body.retrievalScope.conversationFiles.fileIds.filter(
+          (id: unknown): id is string => typeof id === "string" && Boolean(id),
+        )
+      : scope.mode === "sources" && scope.conversationFiles
+        ? scope.conversationFiles.fileIds
+        : [];
+    if (conversationId && incomingFileIds.length > 0) {
+      const library = scope.mode === "sources" ? scope.library : undefined;
+      scope = {
+        mode: "sources",
+        ...(library ? { library } : {}),
+        conversationFiles: { conversationId, fileIds: incomingFileIds },
+      };
+    } else if (scope.mode === "sources" && scope.conversationFiles) {
+      scope = scope.library
+        ? { mode: "sources", library: scope.library }
+        : { mode: "none" };
+    }
     if (scope.mode !== "none") {
       try {
         const lastUserMessage = [...body.messages]
@@ -71,6 +97,7 @@ export async function POST(request: Request) {
                 documentName: chunk.documentName,
                 pageNumber: chunk.pageNumber,
                 content: chunk.content,
+                source: chunk.source,
               })),
             );
           }
@@ -78,7 +105,7 @@ export async function POST(request: Request) {
       } catch {
         // 选了资料却检索失败：诚实告知模型，勿假装已引用资料
         knowledgePrompt =
-          "\n\n（系统：用户已选择本地资料，但本轮检索失败。请正常回答，并说明未能引用资料库。）\n";
+          "\n\n（系统：用户已选择本地资料，但本轮检索失败。请正常回答，并说明未能引用所选资料。）\n";
       }
     }
 
@@ -96,12 +123,23 @@ export async function POST(request: Request) {
       ...trimmedHistory,
     ];
 
+    // 客户端停止生成 → request.signal；同时保留超时上限
+    const signal =
+      typeof AbortSignal.any === "function"
+        ? AbortSignal.any([
+            request.signal,
+            AbortSignal.timeout(HTTP_TIMEOUT.chat),
+          ])
+        : request.signal.aborted
+          ? request.signal
+          : AbortSignal.timeout(HTTP_TIMEOUT.chat);
+
     const stream = await inferenceService.chatCompletions(messages, {
       temperature,
       topP,
       topK,
       maxTokens,
-      signal: AbortSignal.timeout(HTTP_TIMEOUT.chat),
+      signal,
     });
 
     return new Response(stream, {

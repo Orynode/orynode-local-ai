@@ -115,6 +115,7 @@ API 网关层 (Gateway)
 3. **Embedder 可缺省**：默认无向量模型；Keyword 是 Retriever 策略，不是假 Embedder
 4. **检索唯一入口**：`HybridRetriever.retrieve(query, scope)`；chat 不得旁路查库
 5. **不做 sqlite-vec 硬依赖**：向量以 BLOB 存 SQLite，JS 余弦即可；规模不够再考虑 ANN
+6. **双命名空间**：会话附件（`conversation_files`）与持久资料库（`knowledge_documents`）分表分目录；共享 `ingestDocument`，禁止上传时隐式串库
 
 ---
 
@@ -126,37 +127,44 @@ API 网关层 (Gateway)
 Composer 草稿 draftAttachments（仅下一轮；发送后清空）
   → page.tsx 交给 useChat.sendMessage(attachments)
       → 写入本条 message.attachments（落库，气泡展示）
-      → scopeFromAttachments → knowledgeScope（none | documents[] | all）
+      → scopeFromAttachments → RetrievalScope（sources: library + conversationFiles）
       → POST /api/chat
-          → normalizeKnowledgeScope
+          → normalizeRetrievalScope（兼容旧 knowledgeScope）
           → HybridRetriever.retrieve（唯一检索入口）
           → buildSystemPrompt + TurboFieldfare SSE
 ```
 
-**产品语义（对齐「附件跟这条消息」）**：
+**产品语义**：
 
-- 资料库是仓库；`useKnowledge` 只做 CRUD / 上传 / 索引，**不**跨轮粘性保存选中
-- `draftAttachments` 只活在输入框；新对话、打开历史会话都会清空草稿，**不会**从旧消息恢复到 Composer
-- 后续轮次若要再检索 PDF，需再次附上；模型对旧内容的「记忆」主要来自对话文本，而非自动复用上一轮 scope
+- **资料库**是持久仓库；`useKnowledge` 只做 CRUD / 上传 / 索引
+- **会话附件**绑 `conversationId`（`.orynode/attachments/`）；删会话级联清理
+- `draftAttachments` 只表示**本条消息**检索范围；发送后清空选中；打开历史会加载该会话的文件列表供再选，但不会自动恢复上次草稿
+- 对话拖拽 /「附到本对话」→ 会话附件；需要持久保存时由用户显式「导入资料库」（不提供会话附件一键提升）
 
-### 资料导入流程（单一管线）
+### 摄取流程（共享管线，双目标）
 
 ```
-用户上传 PDF / TXT / Markdown
-  → POST /api/knowledge
-      → detectKnowledgeKind + parseDocument（唯一解析）
-      → chunker.chunkDocument（唯一分块）+ 分配 chunk id
-      → POST :4318/knowledge          （只存原件，status=awaiting_chunks）
-      → PUT  :4318/knowledge/:id/chunks（写入已切好的 chunks，status=ready）
-      → await indexDocumentEmbeddings（Workers 下不可 fire-and-forget）
-           Embedder 可用 → 写 BLOB，status=indexed
-           未开语义 / Embedder 不可用 → skipped 或保持 ready（仅 keyword）
+ingestDocument({ bytes, displayName?, target })
+  → library：
+        contentHash = sha256(bytes)
+        GET :4318/knowledge/by-hash/:hash → 命中则返回已有文档（deduplicated）
+        未命中 → parse/chunk → POST :4318/knowledge（写入 hash + name + original_name）
+                 → commit chunks → index embeddings
+  → conversation：不做全局去重；parse/chunk → conversation-files …
 ```
+
+**资料库身份与显示名**：
+
+- 身份 = `content_hash`（UNIQUE），与文件名/显示名无关
+- `name` = 显示名（导入可选初值；`PATCH /knowledge/:id` 可改，不触发重解析）
+- `original_name` = 原始文件名（溯源）
+- 去重命中默认**不**改已有显示名；用户可再点「重命名」
 
 ### 检索流程
 
 ```
-query + KnowledgeScope
+query + RetrievalScope
+  → POST :4318/retrieval/chunks/query（双命名空间）
   → HybridRetriever
     ├── keyword：有命中才返回片段；无词命中则不灌上下文
     ├── semantic：Embedder.embed(query) + SQLite BLOB 余弦（可选）
@@ -175,7 +183,7 @@ orynode-local-ai/
 │   ├── layout.tsx                    # 根布局
 │   ├── globals.css                   # 全局样式
 │   ├── lib/
-│   │   └── attachments.ts            #   附件 ↔ KnowledgeScope
+│   │   └── attachments.ts            #   附件 ↔ RetrievalScope
 │   ├── components/                   # UI 组件
 │   │   ├── chat/                     #   对话视图
 │   │   │   ├── ChatView.tsx          #     消息列表容器
@@ -196,6 +204,7 @@ orynode-local-ai/
 │   ├── hooks/                        # 自定义 Hooks
 │   │   ├── useChat.ts                #   流式聊天；本轮 attachments→scope
 │   │   ├── useConversations.ts       #   对话历史 CRUD
+│   │   ├── useConversationFiles.ts   #   会话附件 CRUD
 │   │   ├── useKnowledge.ts           #   资料仓库 CRUD（无跨轮选中）
 │   │   └── useSettings.ts            #   设置读写
 │   └── api/                          # API 路由 (Next.js 约定)
@@ -203,7 +212,9 @@ orynode-local-ai/
 │       ├── status/route.ts           #   GET 模型连接状态
 │       ├── conversations/
 │       │   ├── route.ts              #   对话列表/创建
-│       │   └── [id]/route.ts         #   对话详情/更新/删除
+│       │   └── [id]/
+│       │       ├── route.ts          #   对话详情/更新/删除
+│       │       └── files/            #   会话附件
 │       ├── knowledge/
 │       │   ├── route.ts              #   文档列表/上传
 │       │   ├── reindex/route.ts      #   批量重建向量
@@ -238,7 +249,8 @@ orynode-local-ai/
 │
 ├── .orynode/                         # 运行时数据 (gitignore)
 │   ├── data/orynode.db
-│   ├── knowledge/files/
+│   ├── knowledge/files/              #   资料库原件
+│   ├── attachments/{conversationId}/ #   会话附件原件
 │   └── models/
 │
 ├── .env.example
@@ -266,7 +278,7 @@ orynode-local-ai/
 | `embedder` | 可选语义向量；`resolveEmbedder()` 可能返回 `null` |
 | `indexer` | 入库后异步写向量并更新 status |
 | `vector-store` | insert + search（BLOB + JS 余弦）；删除靠 SQLite CASCADE |
-| `retriever` | **唯一检索入口**；scope = none / documents / all |
+| `retriever` | **唯一检索入口**；scope = RetrievalScope（library + conversationFiles） |
 
 ### Embedder（诚实模型）
 
@@ -277,16 +289,24 @@ orynode-local-ai/
 ### Scope
 
 ```ts
-type KnowledgeScope =
+type RetrievalScope =
   | { mode: "none" }
-  | { mode: "documents"; documentIds: string[] }
-  | { mode: "all" };
+  | {
+      mode: "sources";
+      library?: { documentIds: string[] } | "all";
+      conversationFiles?: { fileIds: string[] };
+    };
+
+type MessageAttachment =
+  | { kind: "library"; id: string; name: string }
+  | { kind: "library_all"; id: "all"; name: string }
+  | { kind: "conversation_file"; id: string; name: string };
 ```
 
-兼容旧字段：`knowledgeDocumentId` → `{ mode: "documents", documentIds: [id] }`。
+兼容：旧 `knowledgeScope` / `knowledgeDocumentId`；旧附件 kind `document`→`library`、`all`→`library_all`。
 
-前端来源：发送时用本轮草稿附件调用 `app/lib/attachments.ts` 的 `scopeFromAttachments`，得到当次 `knowledgeScope`；同时把附件快照写入该条 `message.attachments`（仅展示与落库）。  
-未附带资料时为 `none`，本轮不检索；**不会**从会话历史里的旧附件自动拼出 scope。
+前端来源：`scopeFromAttachments(draftAttachments)` → `retrievalScope`；附件快照写入 `message.attachments`。  
+未附带资料时为 `none`；**不会**从历史气泡自动拼出下轮 scope。
 
 ### 向量存储
 
@@ -358,7 +378,7 @@ const chunks = chunker.chunkDocument(doc.pages);
 
 **文件**: `services/knowledge/vector-store.ts`
 
-- SQLite BLOB + JS 余弦；`search` 接受 scope（documents / all）
+- SQLite BLOB + JS 余弦；`search` 接受 `RetrievalScope`（双命名空间）
 - 不加 sqlite-vec 必装依赖
 
 ### 5. 检索 (Retriever)
@@ -366,7 +386,7 @@ const chunks = chunker.chunkDocument(doc.pages);
 **文件**: `services/knowledge/retriever.ts`
 
 - `retrieve(query, scope)` 为唯一入口
-- scope：`none | documents[] | all`；前端由 `app/lib/attachments.ts` 的本轮附件推导，**不会**从历史消息自动拼 scope
+- scope：`RetrievalScope`（`none` | `sources` + library / conversationFiles）；前端由本轮附件推导，**不会**从历史消息自动拼 scope
 - keyword 始终可用；存在非空 embedding 时走 hybrid + RRF（按排名与 chunk id）
 - `error` 文档会清空向量 BLOB，仅 keyword；`awaiting_chunks` 不参与检索
 - 兼容 `knowledgeDocumentId`
@@ -378,7 +398,7 @@ import { HybridRetriever } from "./services/knowledge";
 const retriever = new HybridRetriever();
 const result = await retriever.retrieve(
   "如何提高性能？",
-  { mode: "documents", documentIds: [documentId] }, // 或 { mode: "all" }
+  { mode: "sources", library: { documentIds: [documentId] } }, // 或 library: "all" / conversationFiles
   { topK: 8 },
 );
 // → { chunks, strategy: "keyword" | "hybrid" }
@@ -548,30 +568,40 @@ ORYNODE_SEMANTIC_SEARCH=1                        # 可选语义向量；包已�
 | GET/PUT | `/settings` | 运行时设置 |
 | GET/POST | `/conversations` | 对话列表 / 创建 |
 | GET/PUT/DELETE | `/conversations/:id` | 对话详情 |
+| GET/POST | `/conversation-files` | 会话附件列表 / 上传（须已有 conversationId） |
+| GET/DELETE | `/conversation-files/:id` | 会话附件元数据 / 删除 |
+| PUT | `/conversation-files/:id/chunks` | 写入会话附件 chunks |
+| PUT | `/conversation-files/:id/status` | 更新会话附件索引状态 |
+| POST | `/conversation-files/vectors` | 批量写入会话附件 embedding |
 | GET | `/knowledge` | 文档列表（含 status） |
 | POST | `/knowledge` | **只存原件**（PDF/TXT/MD，status=`awaiting_chunks`） |
+| GET | `/knowledge/by-hash/:hash` | 按内容哈希查找资料库文档 |
+| PATCH | `/knowledge/:id` | 仅改显示名（不重解析） |
 | PUT | `/knowledge/:id/chunks` | **写入服务层已切好的 chunks** |
 | PUT | `/knowledge/:id/status` | 更新索引状态 / embedding 元数据 |
-| POST | `/knowledge/chunks/query` | 按 scope 导出 chunks（可选向量） |
+| POST | `/retrieval/chunks/query` | 统一导出 chunks（library + conversationFiles，可选向量） |
+| POST | `/knowledge/chunks/query` | 旧版仅资料库导出（兼容保留） |
 | GET | `/knowledge/:id/chunks` | 单文档 chunks |
 | POST | `/knowledge/vectors` | 批量写入 embedding BLOB |
 | GET | `/knowledge/embed/status` | 向量模型是否可用 |
 | POST | `/knowledge/embed` | 文本批量向量化（Node/ONNX） |
 | DELETE | `/knowledge/:id` | 删除文档 |
 
-检索业务**不在**数据服务；已移除 `/knowledge/search`。
+检索业务**不在**数据服务；应用层另有 `POST /api/conversations/:id/files/:fileId/reindex` 重建会话附件向量。
 
 ### 数据库 Schema（对话消息附件）
 
-消息表含可选 `attachments TEXT`（JSON），记录**该条用户消息**附带的资料展示信息（`kind: document | all`）。  
-仅用于历史气泡与落库真相；下一轮检索仍以当次请求的 `knowledgeScope` 为准。
+消息表含可选 `attachments TEXT`（JSON），记录**该条用户消息**附带的资料展示信息（`kind: library | library_all | conversation_file`；兼容旧 `document | all`）。  
+仅用于历史气泡与落库真相；下一轮检索仍以当次请求的 `retrievalScope` + `conversationId` 为准。
 
-### 数据库 Schema（知识库）
+### 数据库 Schema（双命名空间）
 
 ```sql
 CREATE TABLE knowledge_documents (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
+  original_name TEXT,
+  content_hash TEXT UNIQUE,
   stored_path TEXT NOT NULL,
   size INTEGER NOT NULL,
   page_count INTEGER NOT NULL,
@@ -592,6 +622,34 @@ CREATE TABLE knowledge_chunks (
   embedding BLOB,
   FOREIGN KEY (document_id)
     REFERENCES knowledge_documents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE conversation_files (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  stored_path TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  page_count INTEGER NOT NULL,
+  chunk_count INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ready',
+  embedding_model TEXT,
+  embedding_dim INTEGER,
+  error_message TEXT,
+  FOREIGN KEY (conversation_id)
+    REFERENCES conversations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE conversation_file_chunks (
+  id TEXT PRIMARY KEY,
+  file_id TEXT NOT NULL,
+  page_number INTEGER NOT NULL,
+  position INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  embedding BLOB,
+  FOREIGN KEY (file_id)
+    REFERENCES conversation_files(id) ON DELETE CASCADE
 );
 ```
 

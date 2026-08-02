@@ -3,7 +3,7 @@
  *
  * - keyword：始终可用
  * - hybrid：Embedder 可用且库中有向量时，RRF 融合
- * - scope：none | documents[] | all
+ * - scope：RetrievalScope（资料库 + 会话附件）
  */
 
 import type {
@@ -11,6 +11,7 @@ import type {
   KnowledgeScope,
   RetrievalHit,
   RetrievalResult,
+  RetrievalScope,
   Retriever,
   VectorStore,
 } from "./types";
@@ -21,6 +22,16 @@ import {
   ORYNODE_DATA_URL,
   HTTP_TIMEOUT,
 } from "../../config/defaults";
+
+type ChunkRow = {
+  id: string;
+  documentId: string;
+  documentName: string;
+  pageNumber: number;
+  position: number;
+  content: string;
+  source: "library" | "conversation_file";
+};
 
 function extractSearchTerms(query: string): string[] {
   const normalized = query.toLocaleLowerCase().replace(/\s+/g, " ").trim();
@@ -71,23 +82,110 @@ function rrfFusion(
   return scores;
 }
 
-export function normalizeKnowledgeScope(
+function legacyToRetrievalScope(scope: KnowledgeScope): RetrievalScope {
+  if (scope.mode === "none") return { mode: "none" };
+  if (scope.mode === "all") {
+    return { mode: "sources", library: "all" };
+  }
+  if (scope.documentIds.length === 0) return { mode: "none" };
+  return {
+    mode: "sources",
+    library: { documentIds: scope.documentIds },
+  };
+}
+
+function isRetrievalScope(value: unknown): value is RetrievalScope {
+  if (!value || typeof value !== "object") return false;
+  const mode = (value as { mode?: unknown }).mode;
+  return mode === "none" || mode === "sources";
+}
+
+function isKnowledgeScope(value: unknown): value is KnowledgeScope {
+  if (!value || typeof value !== "object") return false;
+  const mode = (value as { mode?: unknown }).mode;
+  return mode === "none" || mode === "documents" || mode === "all";
+}
+
+export function normalizeRetrievalScope(
   input:
+    | RetrievalScope
     | KnowledgeScope
-    | { knowledgeDocumentId?: string; knowledgeScope?: KnowledgeScope }
+    | {
+        knowledgeDocumentId?: string;
+        knowledgeScope?: KnowledgeScope | RetrievalScope;
+        retrievalScope?: RetrievalScope;
+      }
     | null
     | undefined,
-): KnowledgeScope {
+): RetrievalScope {
   if (!input) return { mode: "none" };
-  if ("mode" in input) return input;
-  if (input.knowledgeScope) return input.knowledgeScope;
+
+  if ("retrievalScope" in input && input.retrievalScope) {
+    return normalizeRetrievalScope(input.retrievalScope);
+  }
+
+  if (isRetrievalScope(input) && !("knowledgeScope" in input)) {
+    if (input.mode === "none") return { mode: "none" };
+    const library = input.library;
+    const rawFiles = input.conversationFiles;
+    const fileIds = Array.isArray(rawFiles?.fileIds)
+      ? rawFiles.fileIds.filter(
+          (id): id is string => typeof id === "string" && Boolean(id),
+        )
+      : [];
+    const conversationId =
+      typeof rawFiles?.conversationId === "string"
+        ? rawFiles.conversationId.trim()
+        : "";
+    const files =
+      conversationId && fileIds.length > 0
+        ? { conversationId, fileIds }
+        : undefined;
+    if (!library && !files) return { mode: "none" };
+    return {
+      mode: "sources",
+      ...(library ? { library } : {}),
+      ...(files ? { conversationFiles: files } : {}),
+    };
+  }
+
+  if ("knowledgeScope" in input && input.knowledgeScope) {
+    return normalizeRetrievalScope(input.knowledgeScope);
+  }
+
+  if (isKnowledgeScope(input)) {
+    return legacyToRetrievalScope(input);
+  }
+
   if (
+    "knowledgeDocumentId" in input &&
     typeof input.knowledgeDocumentId === "string" &&
     input.knowledgeDocumentId
   ) {
-    return { mode: "documents", documentIds: [input.knowledgeDocumentId] };
+    return {
+      mode: "sources",
+      library: { documentIds: [input.knowledgeDocumentId] },
+    };
   }
+
   return { mode: "none" };
+}
+
+function scopeHasSources(
+  scope: Exclude<RetrievalScope, { mode: "none" }>,
+): boolean {
+  if (scope.library === "all") return true;
+  if (
+    scope.library &&
+    typeof scope.library === "object" &&
+    scope.library.documentIds.length > 0
+  ) {
+    return true;
+  }
+  return Boolean(
+    scope.conversationFiles?.conversationId &&
+      scope.conversationFiles.fileIds.length > 0,
+  );
 }
 
 export class HybridRetriever implements Retriever {
@@ -104,13 +202,10 @@ export class HybridRetriever implements Retriever {
 
   async retrieve(
     query: string,
-    scope: KnowledgeScope,
+    scope: RetrievalScope,
     options: { topK?: number } = {},
   ): Promise<RetrievalResult> {
-    if (scope.mode === "none") {
-      return { chunks: [], strategy: "keyword" };
-    }
-    if (scope.mode === "documents" && scope.documentIds.length === 0) {
+    if (scope.mode === "none" || !scopeHasSources(scope)) {
       return { chunks: [], strategy: "keyword" };
     }
 
@@ -141,23 +236,24 @@ export class HybridRetriever implements Retriever {
   }
 
   private async fetchChunks(
-    scope: Exclude<KnowledgeScope, { mode: "none" }>,
-  ): Promise<
-    Array<{
-      id: string;
-      documentId: string;
-      documentName: string;
-      pageNumber: number;
-      position: number;
-      content: string;
-    }>
-  > {
-    const response = await fetch(`${ORYNODE_DATA_URL}/knowledge/chunks/query`, {
+    scope: Exclude<RetrievalScope, { mode: "none" }>,
+  ): Promise<ChunkRow[]> {
+    const response = await fetch(`${ORYNODE_DATA_URL}/retrieval/chunks/query`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        mode: scope.mode,
-        documentIds: scope.mode === "documents" ? scope.documentIds : undefined,
+        library:
+          scope.library === "all"
+            ? { mode: "all" }
+            : scope.library
+              ? { mode: "documents", documentIds: scope.library.documentIds }
+              : undefined,
+        conversationFiles: scope.conversationFiles
+          ? {
+              conversationId: scope.conversationFiles.conversationId,
+              fileIds: scope.conversationFiles.fileIds,
+            }
+          : undefined,
         withVectors: false,
       }),
       signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
@@ -174,6 +270,7 @@ export class HybridRetriever implements Retriever {
         pageNumber: number;
         position: number;
         content: string;
+        source?: "library" | "conversation_file";
       }) => ({
         id: chunk.id,
         documentId: chunk.documentId,
@@ -181,20 +278,14 @@ export class HybridRetriever implements Retriever {
         pageNumber: chunk.pageNumber,
         position: chunk.position,
         content: chunk.content,
+        source: chunk.source ?? "library",
       }),
     );
   }
 
   private keywordSearch(
     query: string,
-    chunks: Array<{
-      id: string;
-      documentId: string;
-      documentName: string;
-      pageNumber: number;
-      position: number;
-      content: string;
-    }>,
+    chunks: ChunkRow[],
     topK: number,
   ): RetrievalResult {
     const terms = extractSearchTerms(query);
@@ -209,7 +300,6 @@ export class HybridRetriever implements Retriever {
         a.position - b.position,
     );
     const matched = scored.filter((chunk) => chunk.score > 0);
-    // 无词命中时不灌入「碰巧排前」的片段，避免伪引用
     return {
       chunks: matched.slice(0, topK),
       strategy: "keyword",
@@ -218,15 +308,8 @@ export class HybridRetriever implements Retriever {
 
   private async hybridSearch(
     query: string,
-    scope: Exclude<KnowledgeScope, { mode: "none" }>,
-    chunks: Array<{
-      id: string;
-      documentId: string;
-      documentName: string;
-      pageNumber: number;
-      position: number;
-      content: string;
-    }>,
+    scope: Exclude<RetrievalScope, { mode: "none" }>,
+    chunks: ChunkRow[],
     embedder: Embedder,
     topK: number,
   ): Promise<RetrievalResult> {

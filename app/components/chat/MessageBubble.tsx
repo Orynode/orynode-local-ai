@@ -95,11 +95,22 @@ export function MessageBubble({
             {message.attachments && message.attachments.length > 0 ? (
               <div className="message-attachments" aria-label="附带资料">
                 {message.attachments.map((item) => (
-                  <div key={item.id} className="message-attachment">
+                  <div
+                    key={`${item.kind}:${item.id}`}
+                    className="message-attachment"
+                  >
                     <span className="message-attachment-icon" aria-hidden>
-                      <Icon name={item.kind === "all" ? "database" : "attach"} />
+                      <Icon
+                        name={
+                          item.kind === "library_all" ? "database" : "attach"
+                        }
+                      />
                     </span>
-                    <span className="message-attachment-name">{item.name}</span>
+                    <span className="message-attachment-name">
+                      {item.kind === "conversation_file"
+                        ? `${item.name}（本对话）`
+                        : item.name}
+                    </span>
                   </div>
                 ))}
               </div>

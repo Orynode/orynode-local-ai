@@ -3,15 +3,34 @@
  *
  * Embedder = 只负责 text → vector（可缺省）
  * Retriever = keyword | hybrid（策略）
- * Scope = 本轮检索范围（与「是否必须绑一个文件」解耦）
+ * Scope = 本轮检索范围（双命名空间：资料库 + 会话附件）
  */
 
 import type { KnowledgeChunk } from "../types";
 
+/**
+ * 旧版 scope（仅 library）。仅供 normalizeRetrievalScope 入参兼容；
+ * 新代码请使用 RetrievalScope。
+ */
 export type KnowledgeScope =
   | { mode: "none" }
   | { mode: "documents"; documentIds: string[] }
   | { mode: "all" };
+
+/**
+ * 统一检索范围：资料库与会话附件可并存。
+ * chat / Retriever 的唯一 scope 类型。
+ */
+export type RetrievalScope =
+  | { mode: "none" }
+  | {
+      mode: "sources";
+      library?: { documentIds: string[] } | "all";
+      /** 必须带 conversationId，服务端按归属过滤，禁止跨会话用 fileId 捞片段 */
+      conversationFiles?: { conversationId: string; fileIds: string[] };
+    };
+
+export type DocumentNamespace = "library" | "conversation";
 
 export interface Embedder {
   readonly dimension: number;
@@ -30,10 +49,14 @@ export interface VectorDocument {
     position: number;
     content: string;
   };
+  namespace?: DocumentNamespace;
 }
 
 export interface SearchResult {
-  chunk: KnowledgeChunk & { documentName?: string };
+  chunk: KnowledgeChunk & {
+    documentName?: string;
+    source?: "library" | "conversation_file";
+  };
   score: number;
 }
 
@@ -43,7 +66,7 @@ export interface VectorStore {
     queryVector: Float32Array,
     options?: {
       topK?: number;
-      scope?: Exclude<KnowledgeScope, { mode: "none" }>;
+      scope?: Exclude<RetrievalScope, { mode: "none" }>;
     },
   ): Promise<SearchResult[]>;
 }
@@ -56,6 +79,7 @@ export interface RetrievalHit {
   position: number;
   content: string;
   score: number;
+  source: "library" | "conversation_file";
 }
 
 export interface RetrievalResult {
@@ -66,7 +90,7 @@ export interface RetrievalResult {
 export interface Retriever {
   retrieve(
     query: string,
-    scope: KnowledgeScope,
+    scope: RetrievalScope,
     options?: { topK?: number },
   ): Promise<RetrievalResult>;
 }

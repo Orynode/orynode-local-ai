@@ -21,6 +21,11 @@ export type KnowledgeUploadState = {
   phase: "uploading" | "processing";
 };
 
+export type KnowledgeUploadResult = {
+  document: KnowledgeDocument;
+  deduplicated: boolean;
+};
+
 function summarizeReindex(
   results: Array<{ id: string; status: string; reason?: string }>,
 ): { text: string; isError: boolean } {
@@ -53,8 +58,8 @@ function summarizeReindex(
 }
 
 /**
- * 本地资料库：只负责文档仓库 CRUD / 上传 / 索引。
- * 对话「本轮附件」由页面 draftAttachments 管理，不在此粘性保存。
+ * 本地资料库：CRUD / 上传（内容去重）/ 显示名重命名 / 索引。
+ * 会话附件见 useConversationFiles；本轮检索选中见 draftAttachments。
  */
 export function useKnowledge() {
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
@@ -137,7 +142,10 @@ export function useKnowledge() {
   }, [refresh, stopPolling]);
 
   const upload = useCallback(
-    async (file: File): Promise<KnowledgeDocument | null> => {
+    async (
+      file: File,
+      options?: { displayName?: string },
+    ): Promise<KnowledgeUploadResult | null> => {
       const kind = detectBrowserFileKind(file);
       if (!kind) {
         setError("目前只支持 PDF、TXT、Markdown（.md）文件");
@@ -148,22 +156,29 @@ export function useKnowledge() {
         return null;
       }
 
+      const label = options?.displayName?.trim() || file.name;
       setUploading(true);
       setError("");
       setNotice("");
       setUploadState({
-        fileName: file.name,
+        fileName: label,
         percent: 0,
         phase: "uploading",
       });
 
       try {
-        const result = await new Promise<{ document: KnowledgeDocument }>(
+        const result = await new Promise<KnowledgeUploadResult>(
           (resolve, reject) => {
             const xhr = new XMLHttpRequest();
             xhr.open("POST", "/api/knowledge");
             xhr.setRequestHeader("content-type", mimeForKind(kind));
             xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
+            if (options?.displayName?.trim()) {
+              xhr.setRequestHeader(
+                "x-display-name",
+                encodeURIComponent(options.displayName.trim()),
+              );
+            }
             xhr.setRequestHeader("x-file-kind", kind);
             xhr.responseType = "json";
 
@@ -174,7 +189,7 @@ export function useKnowledge() {
                 Math.min(99, Math.round((event.loaded / event.total) * 100)),
               );
               setUploadState({
-                fileName: file.name,
+                fileName: label,
                 percent,
                 phase: "uploading",
               });
@@ -182,7 +197,7 @@ export function useKnowledge() {
 
             xhr.upload.onload = () => {
               setUploadState({
-                fileName: file.name,
+                fileName: label,
                 percent: 100,
                 phase: "processing",
               });
@@ -191,7 +206,10 @@ export function useKnowledge() {
             xhr.onload = () => {
               const body = xhr.response ?? {};
               if (xhr.status >= 200 && xhr.status < 300 && body.document) {
-                resolve(body as { document: KnowledgeDocument });
+                resolve({
+                  document: body.document as KnowledgeDocument,
+                  deduplicated: Boolean(body.deduplicated),
+                });
                 return;
               }
               reject(
@@ -207,8 +225,11 @@ export function useKnowledge() {
         );
 
         await refresh();
-        startStatusPolling();
-        return result.document;
+        if (!result.deduplicated) {
+          startStatusPolling();
+        }
+        // 去重提示由页面弹窗展示（顶部 notice 在对话页不可见）
+        return result;
       } catch (e) {
         setError(e instanceof Error ? e.message : "资料导入失败");
         return null;
@@ -218,6 +239,41 @@ export function useKnowledge() {
       }
     },
     [refresh, startStatusPolling],
+  );
+
+  const rename = useCallback(
+    async (id: string, name: string): Promise<KnowledgeDocument | null> => {
+      const trimmed = name.trim();
+      if (!trimmed) {
+        flash("显示名称不能为空", true);
+        return null;
+      }
+      try {
+        const response = await fetch(
+          `/api/knowledge/${encodeURIComponent(id)}`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ name: trimmed }),
+          },
+        );
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          flash(
+            typeof body.error === "string" ? body.error : "重命名失败",
+            true,
+          );
+          return null;
+        }
+        await refresh();
+        flash("已更新显示名称");
+        return body.document as KnowledgeDocument;
+      } catch {
+        flash("重命名失败", true);
+        return null;
+      }
+    },
+    [flash, refresh],
   );
 
   const remove = useCallback(
@@ -297,6 +353,7 @@ export function useKnowledge() {
     notice,
     refresh,
     upload,
+    rename,
     remove,
     reindex,
     reindexAll,

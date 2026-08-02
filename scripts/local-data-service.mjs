@@ -1,18 +1,27 @@
 import { createServer } from "node:http";
-import { mkdirSync, unlinkSync, writeFileSync, readFileSync } from "node:fs";
+import {
+  mkdirSync,
+  unlinkSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  existsSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 // Knowledge parsing/chunking/retrieval orchestration live in services/knowledge.
 // This process stores files/SQLite/BLOBs. Optional ONNX embedding also runs here
 // (real Node), because vinext API Workers cannot load @xenova/transformers.
+// Dual namespace: knowledge_documents (library) + conversation_files (chat attachments).
 
 const projectRoot = resolve(new URL("..", import.meta.url).pathname);
 const databasePath =
   process.env.ORYNODE_DATABASE_PATH ??
   resolve(projectRoot, ".orynode/data/orynode.db");
 const knowledgeFilesPath = resolve(projectRoot, ".orynode/knowledge/files");
+const attachmentsRootPath = resolve(projectRoot, ".orynode/attachments");
 const settingsPath =
   process.env.ORYNODE_SETTINGS_PATH ??
   resolve(projectRoot, ".orynode/runtime-settings.json");
@@ -54,6 +63,7 @@ const ALLOWED_MAX_CONTEXT = new Set(runtimeDefaults.allowedMaxContext ?? []);
 
 mkdirSync(dirname(databasePath), { recursive: true });
 mkdirSync(knowledgeFilesPath, { recursive: true });
+mkdirSync(attachmentsRootPath, { recursive: true });
 mkdirSync(dirname(settingsPath), { recursive: true });
 const database = new DatabaseSync(databasePath);
 database.exec("PRAGMA journal_mode = WAL");
@@ -89,6 +99,8 @@ database.exec(`
   CREATE TABLE IF NOT EXISTS knowledge_documents (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    original_name TEXT,
+    content_hash TEXT,
     stored_path TEXT NOT NULL,
     size INTEGER NOT NULL,
     page_count INTEGER NOT NULL,
@@ -114,6 +126,42 @@ database.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_document
     ON knowledge_chunks(document_id, page_number, position);
+
+  CREATE TABLE IF NOT EXISTS conversation_files (
+    id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    stored_path TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    page_count INTEGER NOT NULL,
+    chunk_count INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ready',
+    embedding_model TEXT,
+    embedding_dim INTEGER,
+    error_message TEXT,
+    status_updated_at TEXT,
+    FOREIGN KEY (conversation_id)
+      REFERENCES conversations(id)
+      ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS conversation_file_chunks (
+    id TEXT PRIMARY KEY,
+    file_id TEXT NOT NULL,
+    page_number INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    content TEXT NOT NULL,
+    embedding BLOB,
+    FOREIGN KEY (file_id)
+      REFERENCES conversation_files(id)
+      ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_conversation_files_conversation
+    ON conversation_files(conversation_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_conversation_file_chunks_file
+    ON conversation_file_chunks(file_id, page_number, position);
 `);
 
 try {
@@ -135,6 +183,8 @@ for (const statement of [
   "ALTER TABLE knowledge_documents ADD COLUMN embedding_dim INTEGER",
   "ALTER TABLE knowledge_documents ADD COLUMN error_message TEXT",
   "ALTER TABLE knowledge_documents ADD COLUMN status_updated_at TEXT",
+  "ALTER TABLE knowledge_documents ADD COLUMN content_hash TEXT",
+  "ALTER TABLE knowledge_documents ADD COLUMN original_name TEXT",
 ]) {
   try {
     database.exec(statement);
@@ -213,6 +263,8 @@ const listKnowledgeDocuments = database.prepare(`
   SELECT
     id,
     name,
+    original_name AS originalName,
+    content_hash AS contentHash,
     size,
     page_count AS pageCount,
     chunk_count AS chunkCount,
@@ -229,6 +281,8 @@ const getKnowledgeDocument = database.prepare(`
   SELECT
     id,
     name,
+    original_name AS originalName,
+    content_hash AS contentHash,
     stored_path AS storedPath,
     size,
     page_count AS pageCount,
@@ -242,11 +296,39 @@ const getKnowledgeDocument = database.prepare(`
   FROM knowledge_documents
   WHERE id = ?
 `);
+const getKnowledgeDocumentByHash = database.prepare(`
+  SELECT
+    id,
+    name,
+    original_name AS originalName,
+    content_hash AS contentHash,
+    stored_path AS storedPath,
+    size,
+    page_count AS pageCount,
+    chunk_count AS chunkCount,
+    created_at AS createdAt,
+    status,
+    embedding_model AS embeddingModel,
+    embedding_dim AS embeddingDim,
+    error_message AS errorMessage,
+    status_updated_at AS statusUpdatedAt
+  FROM knowledge_documents
+  WHERE content_hash = ?
+`);
 const insertKnowledgeDocument = database.prepare(`
   INSERT INTO knowledge_documents (
-    id, name, stored_path, size, page_count, chunk_count, created_at,
-    status, embedding_model, embedding_dim, error_message, status_updated_at
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    id, name, original_name, content_hash, stored_path, size, page_count,
+    chunk_count, created_at, status, embedding_model, embedding_dim,
+    error_message, status_updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+const updateKnowledgeDocumentName = database.prepare(`
+  UPDATE knowledge_documents SET name = ? WHERE id = ?
+`);
+const updateKnowledgeDocumentHashMeta = database.prepare(`
+  UPDATE knowledge_documents
+  SET content_hash = ?, original_name = COALESCE(original_name, ?)
+  WHERE id = ?
 `);
 const insertKnowledgeChunk = database.prepare(`
   INSERT INTO knowledge_chunks (
@@ -357,6 +439,142 @@ const deleteKnowledgeDocument = database.prepare(
   "DELETE FROM knowledge_documents WHERE id = ?",
 );
 
+const listConversationFilesByConversation = database.prepare(`
+  SELECT
+    id,
+    conversation_id AS conversationId,
+    name,
+    size,
+    page_count AS pageCount,
+    chunk_count AS chunkCount,
+    created_at AS createdAt,
+    status,
+    embedding_model AS embeddingModel,
+    embedding_dim AS embeddingDim,
+    error_message AS errorMessage,
+    status_updated_at AS statusUpdatedAt,
+    stored_path AS storedPath
+  FROM conversation_files
+  WHERE conversation_id = ?
+  ORDER BY created_at DESC
+`);
+const getConversationFile = database.prepare(`
+  SELECT
+    id,
+    conversation_id AS conversationId,
+    name,
+    stored_path AS storedPath,
+    size,
+    page_count AS pageCount,
+    chunk_count AS chunkCount,
+    created_at AS createdAt,
+    status,
+    embedding_model AS embeddingModel,
+    embedding_dim AS embeddingDim,
+    error_message AS errorMessage,
+    status_updated_at AS statusUpdatedAt
+  FROM conversation_files
+  WHERE id = ?
+`);
+const insertConversationFile = database.prepare(`
+  INSERT INTO conversation_files (
+    id, conversation_id, name, stored_path, size, page_count, chunk_count,
+    created_at, status, embedding_model, embedding_dim, error_message,
+    status_updated_at
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+const insertConversationFileChunk = database.prepare(`
+  INSERT INTO conversation_file_chunks (
+    id, file_id, page_number, position, content, embedding
+  ) VALUES (?, ?, ?, ?, ?, ?)
+`);
+const getConversationFileChunks = database.prepare(`
+  SELECT
+    id,
+    file_id AS documentId,
+    page_number AS pageNumber,
+    position,
+    content
+  FROM conversation_file_chunks
+  WHERE file_id = ?
+  ORDER BY page_number, position
+`);
+const listConversationChunksByFiles = database.prepare(`
+  SELECT
+    conversation_file_chunks.id,
+    conversation_file_chunks.file_id AS documentId,
+    conversation_files.name AS documentName,
+    conversation_file_chunks.page_number AS pageNumber,
+    conversation_file_chunks.position,
+    conversation_file_chunks.content
+  FROM conversation_file_chunks
+  INNER JOIN conversation_files
+    ON conversation_files.id = conversation_file_chunks.file_id
+  WHERE conversation_file_chunks.file_id IN (SELECT value FROM json_each(?))
+    AND conversation_files.conversation_id = ?
+    AND conversation_files.status IN ('ready', 'embedding', 'indexed', 'error')
+  ORDER BY conversation_files.name, conversation_file_chunks.page_number,
+    conversation_file_chunks.position
+`);
+const listConversationChunksWithVectorsByFiles = database.prepare(`
+  SELECT
+    conversation_file_chunks.id,
+    conversation_file_chunks.file_id AS documentId,
+    conversation_files.name AS documentName,
+    conversation_file_chunks.page_number AS pageNumber,
+    conversation_file_chunks.position,
+    conversation_file_chunks.content,
+    conversation_file_chunks.embedding
+  FROM conversation_file_chunks
+  INNER JOIN conversation_files
+    ON conversation_files.id = conversation_file_chunks.file_id
+  WHERE conversation_file_chunks.file_id IN (SELECT value FROM json_each(?))
+    AND conversation_files.conversation_id = ?
+    AND conversation_files.status IN ('ready', 'embedding', 'indexed', 'error')
+  ORDER BY conversation_files.name, conversation_file_chunks.page_number,
+    conversation_file_chunks.position
+`);
+const updateConversationChunkEmbedding = database.prepare(`
+  UPDATE conversation_file_chunks SET embedding = ? WHERE id = ?
+`);
+const clearConversationFileEmbeddings = database.prepare(`
+  UPDATE conversation_file_chunks SET embedding = NULL WHERE file_id = ?
+`);
+const updateConversationFileStatus = database.prepare(`
+  UPDATE conversation_files
+  SET
+    status = ?,
+    embedding_model = ?,
+    embedding_dim = ?,
+    error_message = ?,
+    status_updated_at = ?
+  WHERE id = ?
+`);
+const commitConversationFileChunksMeta = database.prepare(`
+  UPDATE conversation_files
+  SET
+    page_count = ?,
+    chunk_count = ?,
+    status = ?,
+    error_message = NULL,
+    status_updated_at = ?
+  WHERE id = ?
+`);
+const listConversationFilesForStale = database.prepare(`
+  SELECT
+    id,
+    status,
+    status_updated_at AS statusUpdatedAt,
+    created_at AS createdAt
+  FROM conversation_files
+`);
+const deleteChunksForConversationFile = database.prepare(
+  "DELETE FROM conversation_file_chunks WHERE file_id = ?",
+);
+const deleteConversationFile = database.prepare(
+  "DELETE FROM conversation_files WHERE id = ?",
+);
+
 function embeddingToArray(embedding) {
   if (!embedding) return null;
   const buf = Buffer.isBuffer(embedding) ? embedding : Buffer.from(embedding);
@@ -376,6 +594,8 @@ function mapDocumentRow(row) {
   return {
     id: row.id,
     name: row.name,
+    originalName: row.originalName ?? row.name,
+    contentHash: row.contentHash ?? null,
     size: row.size,
     pageCount: row.pageCount,
     chunkCount: row.chunkCount,
@@ -385,6 +605,147 @@ function mapDocumentRow(row) {
     embeddingDim: row.embeddingDim ?? null,
     errorMessage: row.errorMessage ?? null,
   };
+}
+
+function hashBuffer(buffer) {
+  return createHash("sha256").update(buffer).digest("hex");
+}
+
+function normalizeDisplayName(displayName, originalName) {
+  const fallback = originalName || "未命名";
+  const trimmed =
+    typeof displayName === "string"
+      ? displayName.replace(/[/\\]/g, "_").trim().slice(0, 180)
+      : "";
+  return trimmed || fallback.slice(0, 180);
+}
+
+/** 为升级库补齐 content_hash；内容重复则保留较早文档并删除副本 */
+function backfillKnowledgeContentHashes() {
+  const rows = database
+    .prepare(
+      `SELECT id, name, original_name AS originalName, content_hash AS contentHash,
+              stored_path AS storedPath, created_at AS createdAt
+       FROM knowledge_documents
+       ORDER BY created_at ASC`,
+    )
+    .all();
+  const seen = new Map();
+  for (const row of rows) {
+    let hash = row.contentHash;
+    if (!hash) {
+      try {
+        hash = hashBuffer(readFileSync(row.storedPath));
+      } catch {
+        hash = `legacy-missing:${row.id}`;
+      }
+    }
+    if (seen.has(hash)) {
+      try {
+        database.exec("BEGIN IMMEDIATE");
+        deleteKnowledgeDocument.run(row.id);
+        database.exec("COMMIT");
+        try {
+          unlinkSync(row.storedPath);
+        } catch {}
+      } catch {
+        try {
+          database.exec("ROLLBACK");
+        } catch {}
+      }
+      continue;
+    }
+    seen.set(hash, row.id);
+    try {
+      updateKnowledgeDocumentHashMeta.run(hash, row.name, row.id);
+    } catch {
+      // ignore
+    }
+  }
+  try {
+    database.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_documents_content_hash
+        ON knowledge_documents(content_hash)
+    `);
+  } catch {
+    // index may fail if duplicates remain; leave without unique until cleaned
+  }
+}
+
+backfillKnowledgeContentHashes();
+
+function mapConversationFileRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    conversationId: row.conversationId,
+    name: row.name,
+    size: row.size,
+    pageCount: row.pageCount,
+    chunkCount: row.chunkCount,
+    createdAt: row.createdAt,
+    status: row.status ?? "ready",
+    embeddingModel: row.embeddingModel ?? null,
+    embeddingDim: row.embeddingDim ?? null,
+    errorMessage: row.errorMessage ?? null,
+  };
+}
+
+function conversationAttachmentsDir(conversationId) {
+  return resolve(attachmentsRootPath, conversationId);
+}
+
+/** 附件必须挂在已存在的对话上；禁止用旧 id「复活」空壳对话 */
+function requireConversationExists(conversationId) {
+  const existing = getConversation.get(conversationId);
+  if (!existing) {
+    const error = new Error("对话不存在");
+    error.code = "CONVERSATION_NOT_FOUND";
+    throw error;
+  }
+  return existing;
+}
+
+function removeConversationAttachmentDir(conversationId) {
+  const dir = conversationAttachmentsDir(conversationId);
+  if (!existsSync(dir)) return;
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // best-effort
+  }
+}
+
+function deleteConversationWithFiles(conversationId) {
+  const files = listConversationFilesByConversation.all(conversationId);
+  const result = deleteConversation.run(conversationId);
+  removeConversationAttachmentDir(conversationId);
+  for (const file of files) {
+    if (file.storedPath) {
+      try {
+        unlinkSync(file.storedPath);
+      } catch {
+        // ignore
+      }
+    }
+  }
+  return result;
+}
+
+function clearAllConversations() {
+  const conversations = listConversations.all();
+  clearConversations.run();
+  for (const conversation of conversations) {
+    removeConversationAttachmentDir(conversation.id);
+  }
+  if (existsSync(attachmentsRootPath)) {
+    try {
+      rmSync(attachmentsRootPath, { recursive: true, force: true });
+      mkdirSync(attachmentsRootPath, { recursive: true });
+    } catch {
+      // best-effort
+    }
+  }
 }
 
 function json(response, status, body) {
@@ -486,9 +847,30 @@ function isPdfMagicBuffer(buffer) {
   return false;
 }
 
-/** Phase 1: store original bytes only. Parsing happens in services/knowledge. */
-function storeKnowledgeFile(buffer, name, kindHint) {
-  const extFromName = extensionFromName(name);
+/**
+ * Phase 1: store original bytes only. Parsing happens in services/knowledge.
+ * Identity = contentHash; name is display-only metadata.
+ */
+function storeKnowledgeFile(
+  buffer,
+  {
+    originalName,
+    displayName,
+    contentHash,
+    kindHint,
+  } = {},
+) {
+  const hash = contentHash || hashBuffer(buffer);
+  const existing = getKnowledgeDocumentByHash.get(hash);
+  if (existing) {
+    const error = new Error("资料库已存在相同内容的文件");
+    error.code = "DUPLICATE_CONTENT";
+    error.document = mapDocumentRow(existing);
+    throw error;
+  }
+
+  const sourceName = originalName || displayName || "未命名";
+  const extFromName = extensionFromName(sourceName);
   let kind = kindHint;
   if (!kind) {
     if (isPdfMagicBuffer(buffer)) {
@@ -513,8 +895,11 @@ function storeKnowledgeFile(buffer, name, kindHint) {
   }
 
   const ext = kind === "pdf" ? "pdf" : kind === "md" ? "md" : "txt";
-  const safeName =
-    name && /\.[a-z0-9]+$/i.test(name) ? name : `${name || "未命名"}.${ext}`;
+  const original =
+    sourceName && /\.[a-z0-9]+$/i.test(sourceName)
+      ? sourceName
+      : `${sourceName || "未命名"}.${ext}`;
+  const name = normalizeDisplayName(displayName, original);
 
   const id = randomUUID();
   const storedPath = resolve(knowledgeFilesPath, `${id}.${ext}`);
@@ -524,7 +909,9 @@ function storeKnowledgeFile(buffer, name, kindHint) {
   try {
     insertKnowledgeDocument.run(
       id,
-      safeName,
+      name,
+      original,
+      hash,
       storedPath,
       buffer.length,
       0,
@@ -540,21 +927,31 @@ function storeKnowledgeFile(buffer, name, kindHint) {
     try {
       unlinkSync(storedPath);
     } catch {}
+    if (
+      String(error?.message || "").includes("UNIQUE") ||
+      String(error?.code || "").includes("CONSTRAINT")
+    ) {
+      const raced = getKnowledgeDocumentByHash.get(hash);
+      if (raced) {
+        const dup = new Error("资料库已存在相同内容的文件");
+        dup.code = "DUPLICATE_CONTENT";
+        dup.document = mapDocumentRow(raced);
+        throw dup;
+      }
+    }
     throw error;
   }
 
-  return {
-    id,
-    name: safeName,
-    size: buffer.length,
-    pageCount: 0,
-    chunkCount: 0,
-    createdAt,
-    status: "awaiting_chunks",
-    embeddingModel: null,
-    embeddingDim: null,
-    errorMessage: null,
-  };
+  return mapDocumentRow(getKnowledgeDocument.get(id));
+}
+
+function renameKnowledgeDocument(documentId, nextName) {
+  const document = getKnowledgeDocument.get(documentId);
+  if (!document) throw new Error("资料不存在");
+  const name = normalizeDisplayName(nextName, document.name);
+  if (!name) throw new Error("显示名称不能为空");
+  updateKnowledgeDocumentName.run(name, documentId);
+  return mapDocumentRow(getKnowledgeDocument.get(documentId));
 }
 
 /** Phase 2: persist chunks produced by services/knowledge. */
@@ -626,8 +1023,7 @@ function setDocumentIndexStatus(
 
 function recoverStaleEmbeddings() {
   const now = Date.now();
-  const rows = listKnowledgeDocuments.all();
-  for (const row of rows) {
+  for (const row of listKnowledgeDocuments.all()) {
     if (row.status !== "embedding") continue;
     const stamp = row.statusUpdatedAt || row.createdAt;
     const started = Date.parse(stamp);
@@ -642,6 +1038,21 @@ function recoverStaleEmbeddings() {
       // best-effort
     }
   }
+  for (const row of listConversationFilesForStale.all()) {
+    if (row.status !== "embedding") continue;
+    const stamp = row.statusUpdatedAt || row.createdAt;
+    const started = Date.parse(stamp);
+    if (!Number.isFinite(started) || now - started < EMBEDDING_STALE_MS) {
+      continue;
+    }
+    try {
+      setConversationFileIndexStatus(row.id, "error", {
+        errorMessage: "向量索引中断或超时，请在对话中对该附件重建索引",
+      });
+    } catch {
+      // best-effort
+    }
+  }
 }
 
 function normalizeAttachments(value) {
@@ -651,12 +1062,225 @@ function normalizeAttachments(value) {
       if (!item || typeof item !== "object") return null;
       const id = typeof item.id === "string" ? item.id.trim() : "";
       const name = typeof item.name === "string" ? item.name.trim() : "";
-      const kind = item.kind === "all" ? "all" : "document";
       if (!id || !name) return null;
-      return { id, name, kind };
+      if (item.kind === "conversation_file") {
+        return { id, name, kind: "conversation_file" };
+      }
+      if (item.kind === "library_all" || item.kind === "all") {
+        return { id: "all", name: name || "全部资料", kind: "library_all" };
+      }
+      if (item.kind === "library" || item.kind === "document") {
+        return { id, name, kind: "library" };
+      }
+      return null;
     })
     .filter(Boolean);
   return items.length > 0 ? items : null;
+}
+
+/** Phase 1: store conversation attachment bytes only. */
+function storeConversationFile(buffer, name, kindHint, conversationId) {
+  requireConversationExists(conversationId);
+  const extFromName = extensionFromName(name);
+  let kind = kindHint;
+  if (!kind) {
+    if (isPdfMagicBuffer(buffer)) {
+      kind = "pdf";
+    } else if (extFromName === "md" || extFromName === "markdown") {
+      kind = "md";
+    } else if (extFromName === "txt" || looksLikeTextBuffer(buffer)) {
+      kind = "txt";
+    }
+  }
+
+  if (kind === "pdf") {
+    if (!isPdfMagicBuffer(buffer)) {
+      throw new Error("请选择有效的 PDF 文件");
+    }
+  } else if (kind === "txt" || kind === "md") {
+    if (!looksLikeTextBuffer(buffer)) {
+      throw new Error("请选择有效的文本文件");
+    }
+  } else {
+    throw new Error("目前只支持 PDF、TXT、Markdown（.md）文件");
+  }
+
+  const ext = kind === "pdf" ? "pdf" : kind === "md" ? "md" : "txt";
+  const safeName =
+    name && /\.[a-z0-9]+$/i.test(name) ? name : `${name || "未命名"}.${ext}`;
+
+  const id = randomUUID();
+  const dir = conversationAttachmentsDir(conversationId);
+  mkdirSync(dir, { recursive: true });
+  const storedPath = resolve(dir, `${id}.${ext}`);
+  const createdAt = new Date().toISOString();
+  writeFileSync(storedPath, buffer, { flag: "wx" });
+
+  try {
+    insertConversationFile.run(
+      id,
+      conversationId,
+      safeName,
+      storedPath,
+      buffer.length,
+      0,
+      0,
+      createdAt,
+      "awaiting_chunks",
+      null,
+      null,
+      null,
+      createdAt,
+    );
+  } catch (error) {
+    try {
+      unlinkSync(storedPath);
+    } catch {}
+    throw error;
+  }
+
+  return mapConversationFileRow(getConversationFile.get(id));
+}
+
+function commitConversationFileChunks(fileId, pageCount, chunks) {
+  const file = getConversationFile.get(fileId);
+  if (!file) throw new Error("会话附件不存在");
+  if (!Array.isArray(chunks) || chunks.length === 0) {
+    throw new Error("chunks 不能为空");
+  }
+
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    deleteChunksForConversationFile.run(fileId);
+    for (const chunk of chunks) {
+      if (
+        typeof chunk.pageNumber !== "number" ||
+        typeof chunk.position !== "number" ||
+        typeof chunk.content !== "string" ||
+        !chunk.content.trim()
+      ) {
+        throw new Error("chunk 格式无效");
+      }
+      insertConversationFileChunk.run(
+        typeof chunk.id === "string" && chunk.id ? chunk.id : randomUUID(),
+        fileId,
+        chunk.pageNumber,
+        chunk.position,
+        chunk.content,
+        null,
+      );
+    }
+    commitConversationFileChunksMeta.run(
+      pageCount,
+      chunks.length,
+      "ready",
+      new Date().toISOString(),
+      fileId,
+    );
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+
+  return mapConversationFileRow(getConversationFile.get(fileId));
+}
+
+function setConversationFileIndexStatus(
+  fileId,
+  status,
+  { embeddingModel = null, embeddingDim = null, errorMessage = null } = {},
+) {
+  const file = getConversationFile.get(fileId);
+  if (!file) throw new Error("会话附件不存在");
+  if (status === "embedding" || status === "error") {
+    clearConversationFileEmbeddings.run(fileId);
+  }
+  updateConversationFileStatus.run(
+    status,
+    embeddingModel,
+    embeddingDim,
+    errorMessage,
+    new Date().toISOString(),
+    fileId,
+  );
+  return mapConversationFileRow(getConversationFile.get(fileId));
+}
+
+function queryRetrievalChunks({ library, conversationFiles, withVectors }) {
+  const chunks = [];
+
+  if (library) {
+    const mode = library.mode === "all" ? "all" : "documents";
+    let rows;
+    if (mode === "all") {
+      rows = withVectors
+        ? listAllChunksWithVectors.all()
+        : listAllKnowledgeChunks.all();
+    } else {
+      const documentIds = Array.isArray(library.documentIds)
+        ? library.documentIds.filter((id) => typeof id === "string")
+        : [];
+      if (documentIds.length > 0) {
+        const idsJson = JSON.stringify(documentIds);
+        rows = withVectors
+          ? listChunksWithVectorsByDocuments.all(idsJson)
+          : listKnowledgeChunksByDocuments.all(idsJson);
+      } else {
+        rows = [];
+      }
+    }
+    for (const row of rows) {
+      chunks.push({
+        id: row.id,
+        documentId: row.documentId,
+        documentName: row.documentName,
+        pageNumber: row.pageNumber,
+        position: row.position,
+        content: row.content,
+        source: "library",
+        ...(withVectors
+          ? { embedding: embeddingToArray(row.embedding) }
+          : {}),
+      });
+    }
+  }
+
+  if (conversationFiles) {
+    const conversationId =
+      typeof conversationFiles.conversationId === "string"
+        ? conversationFiles.conversationId.trim()
+        : "";
+    const fileIds = Array.isArray(conversationFiles.fileIds)
+      ? conversationFiles.fileIds.filter((id) => typeof id === "string")
+      : [];
+    // 无 conversationId 时不返回任何会话片段，防止跨会话按 fileId 捞取
+    if (conversationId && fileIds.length > 0) {
+      const idsJson = JSON.stringify(fileIds);
+      const rows = withVectors
+        ? listConversationChunksWithVectorsByFiles.all(
+            idsJson,
+            conversationId,
+          )
+        : listConversationChunksByFiles.all(idsJson, conversationId);
+      for (const row of rows) {
+        chunks.push({
+          id: row.id,
+          documentId: row.documentId,
+          documentName: row.documentName,
+          pageNumber: row.pageNumber,
+          position: row.position,
+          content: row.content,
+          source: "conversation_file",
+          ...(withVectors
+            ? { embedding: embeddingToArray(row.embedding) }
+            : {}),
+        });
+      }
+    }
+  }
+
+  return chunks;
 }
 
 function parseStoredAttachments(raw) {
@@ -713,31 +1337,39 @@ function validateMessages(messages) {
   });
 }
 
+/**
+ * 保存会话。
+ * - 仅当 body 显式带 messages 数组时替换消息（含 [] 表示刻意清空/建空会话）
+ * - 未带 messages 时只更新 title，绝不误删历史消息
+ */
 function saveConversation(input, id = randomUUID()) {
   const existing = getConversation.get(id);
   const now = new Date().toISOString();
   const title =
     typeof input.title === "string" && input.title.trim()
       ? input.title.trim().slice(0, 80)
-      : "新对话";
-  const messages = validateMessages(input.messages ?? []);
+      : existing?.title || "新对话";
+  const replaceMessages = Array.isArray(input.messages);
+  const messages = replaceMessages ? validateMessages(input.messages) : null;
   const createdAt = existing?.createdAt ?? now;
 
   database.exec("BEGIN IMMEDIATE");
   try {
     upsertConversation.run(id, title, createdAt, now);
-    deleteMessages.run(id);
-    for (const message of messages) {
-      insertMessage.run(
-        message.id,
-        id,
-        message.role,
-        message.content,
-        message.createdAt,
-        message.position,
-        message.durationMs,
-        message.attachments ? JSON.stringify(message.attachments) : null,
-      );
+    if (replaceMessages) {
+      deleteMessages.run(id);
+      for (const message of messages) {
+        insertMessage.run(
+          message.id,
+          id,
+          message.role,
+          message.content,
+          message.createdAt,
+          message.position,
+          message.durationMs,
+          message.attachments ? JSON.stringify(message.attachments) : null,
+        );
+      }
     }
     database.exec("COMMIT");
   } catch (error) {
@@ -1011,24 +1643,89 @@ const server = createServer(async (request, response) => {
               ? "md"
               : "txt";
       const buffer = await readBuffer(request);
-      const name = decodeFileName(request.headers["x-file-name"]);
-      json(response, 201, {
-        document: storeKnowledgeFile(buffer, name, kindHint),
+      const originalName = decodeFileName(request.headers["x-file-name"]);
+      const displayHeader = request.headers["x-display-name"];
+      const displayName = displayHeader
+        ? decodeFileName(displayHeader)
+        : undefined;
+      const contentHashHeader = String(
+        request.headers["x-content-hash"] || "",
+      ).trim();
+      const contentHash =
+        /^[a-f0-9]{64}$/i.test(contentHashHeader)
+          ? contentHashHeader.toLowerCase()
+          : hashBuffer(buffer);
+      try {
+        json(response, 201, {
+          document: storeKnowledgeFile(buffer, {
+            originalName,
+            displayName,
+            contentHash,
+            kindHint,
+          }),
+        });
+      } catch (error) {
+        if (error?.code === "DUPLICATE_CONTENT" && error.document) {
+          json(response, 409, {
+            error: error.message,
+            document: error.document,
+            deduplicated: true,
+          });
+          return;
+        }
+        throw error;
+      }
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      parts[0] === "knowledge" &&
+      parts[1] === "by-hash" &&
+      parts.length === 3
+    ) {
+      const hash = String(parts[2] || "")
+        .trim()
+        .toLowerCase();
+      if (!/^[a-f0-9]{64}$/.test(hash)) {
+        json(response, 400, { error: "content hash 无效" });
+        return;
+      }
+      const document = getKnowledgeDocumentByHash.get(hash);
+      if (!document) {
+        json(response, 404, { error: "资料不存在" });
+        return;
+      }
+      json(response, 200, { document: mapDocumentRow(document) });
+      return;
+    }
+
+    // Unified retrieval chunk export (library + conversation files)
+    if (request.method === "POST" && url.pathname === "/retrieval/chunks/query") {
+      const body = await readJson(request);
+      const withVectors = Boolean(body.withVectors);
+      const hasLibrary = Boolean(body.library);
+      const hasFiles = Boolean(body.conversationFiles);
+      if (!hasLibrary && !hasFiles) {
+        json(response, 400, { error: "至少指定 library 或 conversationFiles" });
+        return;
+      }
+      json(response, 200, {
+        chunks: queryRetrievalChunks({
+          library: body.library,
+          conversationFiles: body.conversationFiles,
+          withVectors,
+        }),
       });
       return;
     }
 
-    // Optional bulk chunk export for retriever (scope = documents | all)
+    // Legacy library-only chunk query (kept for compatibility)
     if (request.method === "POST" && url.pathname === "/knowledge/chunks/query") {
       const body = await readJson(request);
       const mode = body.mode === "all" ? "all" : "documents";
       const withVectors = Boolean(body.withVectors);
-      let rows;
-      if (mode === "all") {
-        rows = withVectors
-          ? listAllChunksWithVectors.all()
-          : listAllKnowledgeChunks.all();
-      } else {
+      if (mode === "documents") {
         const documentIds = Array.isArray(body.documentIds)
           ? body.documentIds.filter((id) => typeof id === "string")
           : [];
@@ -1036,25 +1733,231 @@ const server = createServer(async (request, response) => {
           json(response, 400, { error: "documentIds 不能为空" });
           return;
         }
-        const idsJson = JSON.stringify(documentIds);
-        rows = withVectors
-          ? listChunksWithVectorsByDocuments.all(idsJson)
-          : listKnowledgeChunksByDocuments.all(idsJson);
       }
       json(response, 200, {
-        chunks: rows.map((row) => ({
-          id: row.id,
-          documentId: row.documentId,
-          documentName: row.documentName,
-          pageNumber: row.pageNumber,
-          position: row.position,
-          content: row.content,
-          ...(withVectors
-            ? { embedding: embeddingToArray(row.embedding) }
-            : {}),
-        })),
+        chunks: queryRetrievalChunks({
+          library:
+            mode === "all"
+              ? { mode: "all" }
+              : { mode: "documents", documentIds: body.documentIds },
+          withVectors,
+        }),
       });
       return;
+    }
+
+    // Conversation files: list / create
+    if (request.method === "GET" && url.pathname === "/conversation-files") {
+      recoverStaleEmbeddings();
+      const conversationId = String(
+        url.searchParams.get("conversationId") || "",
+      ).trim();
+      if (!conversationId) {
+        json(response, 400, { error: "conversationId 不能为空" });
+        return;
+      }
+      json(response, 200, {
+        files: listConversationFilesByConversation
+          .all(conversationId)
+          .map(mapConversationFileRow),
+      });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/conversation-files") {
+      const conversationId = String(
+        request.headers["x-conversation-id"] ||
+          url.searchParams.get("conversationId") ||
+          "",
+      ).trim();
+      if (!conversationId) {
+        json(response, 400, { error: "conversationId 不能为空" });
+        return;
+      }
+      const contentType = String(request.headers["content-type"] || "")
+        .split(";")[0]
+        .trim()
+        .toLowerCase();
+      const allowed = new Set([
+        "application/pdf",
+        "text/plain",
+        "text/markdown",
+        "text/x-markdown",
+      ]);
+      if (!allowed.has(contentType)) {
+        json(response, 415, {
+          error: "目前只支持 PDF、TXT、Markdown（.md）文件",
+        });
+        return;
+      }
+      const kindHeader = String(request.headers["x-file-kind"] || "")
+        .trim()
+        .toLowerCase();
+      const kindHint =
+        kindHeader === "pdf" || kindHeader === "txt" || kindHeader === "md"
+          ? kindHeader
+          : contentType === "application/pdf"
+            ? "pdf"
+            : contentType === "text/markdown" ||
+                contentType === "text/x-markdown"
+              ? "md"
+              : "txt";
+      const buffer = await readBuffer(request);
+      const name = decodeFileName(request.headers["x-file-name"]);
+      try {
+        json(response, 201, {
+          file: storeConversationFile(buffer, name, kindHint, conversationId),
+        });
+      } catch (error) {
+        if (error?.code === "CONVERSATION_NOT_FOUND") {
+          json(response, 404, { error: "对话不存在" });
+          return;
+        }
+        throw error;
+      }
+      return;
+    }
+
+    if (
+      request.method === "POST" &&
+      url.pathname === "/conversation-files/vectors"
+    ) {
+      const body = await readJson(request);
+      const vectors = body.vectors ?? [];
+      if (!Array.isArray(vectors) || vectors.length === 0) {
+        json(response, 400, { error: "vectors 数组不能为空" });
+        return;
+      }
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        for (const vec of vectors) {
+          if (typeof vec.id !== "string" || !Array.isArray(vec.vector)) {
+            throw new Error("vector 条目格式无效");
+          }
+          updateConversationChunkEmbedding.run(
+            arrayToEmbeddingBlob(vec.vector),
+            vec.id,
+          );
+        }
+        database.exec("COMMIT");
+        json(response, 200, { inserted: vectors.length });
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+      return;
+    }
+
+    // Conversation file scoped routes: /conversation-files/:id/...
+    if (parts[0] === "conversation-files" && parts.length >= 2) {
+      const fileId = parts[1];
+      const action = parts[2];
+
+      if (!action && request.method === "GET") {
+        const file = getConversationFile.get(fileId);
+        if (!file) {
+          json(response, 404, { error: "会话附件不存在" });
+          return;
+        }
+        json(response, 200, { file: mapConversationFileRow(file) });
+        return;
+      }
+
+      if (!action && request.method === "DELETE") {
+        const file = getConversationFile.get(fileId);
+        if (!file) {
+          json(response, 404, { error: "会话附件不存在" });
+          return;
+        }
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          deleteConversationFile.run(fileId);
+          database.exec("COMMIT");
+          try {
+            unlinkSync(file.storedPath);
+          } catch {}
+          json(response, 200, { deleted: true });
+        } catch (error) {
+          database.exec("ROLLBACK");
+          throw error;
+        }
+        return;
+      }
+
+      if (action === "bytes" && request.method === "GET") {
+        const file = getConversationFile.get(fileId);
+        if (!file) {
+          json(response, 404, { error: "会话附件不存在" });
+          return;
+        }
+        try {
+          const bytes = readFileSync(file.storedPath);
+          response.writeHead(200, {
+            "content-type": "application/octet-stream",
+            "content-length": bytes.length,
+            "x-file-name": encodeURIComponent(file.name),
+            "cache-control": "no-store",
+          });
+          response.end(bytes);
+        } catch {
+          json(response, 404, { error: "原件文件不存在" });
+        }
+        return;
+      }
+
+      if (action === "chunks" && request.method === "PUT") {
+        const body = await readJson(request);
+        const pageCount = Number(body.pageCount);
+        if (!Number.isFinite(pageCount) || pageCount < 1) {
+          json(response, 400, { error: "pageCount 无效" });
+          return;
+        }
+        json(response, 200, {
+          file: commitConversationFileChunks(
+            fileId,
+            pageCount,
+            body.chunks ?? [],
+          ),
+        });
+        return;
+      }
+
+      if (action === "chunks" && request.method === "GET") {
+        const file = getConversationFile.get(fileId);
+        if (!file) {
+          json(response, 404, { error: "会话附件不存在" });
+          return;
+        }
+        json(response, 200, {
+          chunks: getConversationFileChunks.all(fileId),
+          documentName: file.name,
+        });
+        return;
+      }
+
+      if (action === "status" && request.method === "PUT") {
+        const body = await readJson(request);
+        const allowed = new Set([
+          "awaiting_chunks",
+          "ready",
+          "embedding",
+          "indexed",
+          "error",
+        ]);
+        if (!allowed.has(body.status)) {
+          json(response, 400, { error: "status 无效" });
+          return;
+        }
+        json(response, 200, {
+          file: setConversationFileIndexStatus(fileId, body.status, {
+            embeddingModel: body.embeddingModel ?? null,
+            embeddingDim:
+              typeof body.embeddingDim === "number" ? body.embeddingDim : null,
+            errorMessage: body.errorMessage ?? null,
+          }),
+        });
+        return;
+      }
     }
 
     // Vector batch upsert
@@ -1162,6 +2065,24 @@ const server = createServer(async (request, response) => {
         return;
       }
 
+      if (request.method === "PATCH") {
+        const body = await readJson(request);
+        try {
+          json(response, 200, {
+            document: renameKnowledgeDocument(id, body.name),
+          });
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "重命名失败";
+          json(
+            response,
+            message === "资料不存在" ? 404 : 400,
+            { error: message },
+          );
+        }
+        return;
+      }
+
       if (request.method === "GET") {
         const document = getKnowledgeDocument.get(id);
         if (!document) {
@@ -1197,6 +2118,11 @@ const server = createServer(async (request, response) => {
       }
 
       if (request.method === "PUT") {
+        // 禁止用已删 id upsert 复活空壳（与附件上传 requireConversationExists 一致）
+        if (!getConversation.get(id)) {
+          json(response, 404, { error: "对话不存在" });
+          return;
+        }
         const body = await readJson(request);
         json(response, 200, {
           conversation: saveConversation(body, id),
@@ -1205,7 +2131,12 @@ const server = createServer(async (request, response) => {
       }
 
       if (request.method === "DELETE") {
-        const result = deleteConversation.run(id);
+        const conversation = getConversation.get(id);
+        if (!conversation) {
+          json(response, 404, { deleted: false });
+          return;
+        }
+        const result = deleteConversationWithFiles(id);
         json(response, result.changes ? 200 : 404, {
           deleted: Boolean(result.changes),
         });
@@ -1214,7 +2145,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === "DELETE" && url.pathname === "/conversations") {
-      clearConversations.run();
+      clearAllConversations();
       json(response, 200, { deleted: true });
       return;
     }

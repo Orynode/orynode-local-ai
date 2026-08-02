@@ -125,36 +125,35 @@ Configuration Layer
 Composer draftAttachments (next turn only; cleared after send)
   → page.tsx → useChat.sendMessage(attachments)
       → persist message.attachments (bubble + SQLite)
-      → scopeFromAttachments → knowledgeScope (none | documents[] | all)
+      → scopeFromAttachments → RetrievalScope (library + conversationFiles)
       → POST /api/chat
-          → normalizeKnowledgeScope
+          → normalizeRetrievalScope (compat: knowledgeScope)
           → HybridRetriever.retrieve (sole retrieval entry)
           → buildSystemPrompt + TurboFieldfare SSE
   → page.tsx renders Markdown incrementally
 ```
 
-**Product semantics (attachments follow the message):**
+**Product semantics:**
 
-- Library is storage; `useKnowledge` is CRUD / upload / index only — **no** sticky cross-turn selection
-- `draftAttachments` live in the composer only; new chat and opening history clear the draft (history does **not** rehydrate composer attachments)
-- Later turns must re-attach to retrieve again; continuity is mainly from prior chat text, not reuse of the previous scope
+- **Library** is durable storage (`useKnowledge`); **conversation files** bind to `conversationId` and cascade-delete with the chat
+- `draftAttachments` are the **per-message** retrieval scope only; opening history reloads the conversation file list for re-selection, not the previous draft
+- Drag / “attach to chat” → conversation files; persistence requires an explicit “import to library” (no one-click lift from chat attachments)
 
-### Document Import Flow
+### Shared ingest (dual target)
 
 ```
-User uploads PDF / TXT / Markdown
-  → POST /api/knowledge
-      → detectKnowledgeKind + parseDocument
-      → chunker.chunkDocument + assign chunk ids
-      → POST :4318/knowledge          (store original bytes, awaiting_chunks)
-      → PUT  :4318/knowledge/:id/chunks (commit chunks, ready)
-      → await indexDocumentEmbeddings (optional vectors → indexed | error | skipped)
+ingestDocument({ bytes, displayName?, target })
+  → library: sha256 short-circuit (deduplicated) or parse→store(hash,name)→chunks→embed
+  → conversation: no global dedup; parse→store→chunks→embed
 ```
+
+Library identity is `content_hash` (UNIQUE). `name` is display metadata (optional at import, `PATCH` later; rename does not re-parse).
 
 ### Retrieval Flow
 
 ```
-User query + knowledgeScope (none | documents[] | all)
+User query + RetrievalScope
+  → POST :4318/retrieval/chunks/query (both namespaces)
   → services/knowledge/retriever.ts HybridRetriever.retrieve()
     ├── [Keyword] score chunks; **no hits → inject nothing** (no fake topK)
     ├── [Semantic] embed query via data-service → JS cosine on BLOBs
@@ -174,7 +173,7 @@ orynode-local-ai/
 │   ├── layout.tsx                    # Root layout
 │   ├── globals.css                   # Global styles
 │   ├── lib/
-│   │   └── attachments.ts            #   Attachments ↔ KnowledgeScope
+│   │   └── attachments.ts            #   Attachments ↔ RetrievalScope
 │   ├── components/                   # UI components
 │   │   ├── chat/                     #   Chat views
 │   │   │   ├── ChatView.tsx          #     Message list container
@@ -195,6 +194,7 @@ orynode-local-ai/
 │   ├── hooks/                        # Custom hooks
 │   │   ├── useChat.ts                #   Streaming; turn attachments → scope
 │   │   ├── useConversations.ts       #   Conversation CRUD
+│   │   ├── useConversationFiles.ts   #   Conversation file CRUD
 │   │   ├── useKnowledge.ts           #   Library CRUD (no sticky selection)
 │   │   └── useSettings.ts            #   Settings read/write
 │   └── api/                          # API routes (Next.js convention)
@@ -232,7 +232,8 @@ orynode-local-ai/
 │
 ├── .orynode/                         # Runtime data (gitignored)
 │   ├── data/orynode.db
-│   ├── knowledge/files/
+│   ├── knowledge/files/              #   Library originals
+│   ├── attachments/{conversationId}/ #   Conversation file originals
 │   └── models/
 │
 ├── .env.example
@@ -334,7 +335,7 @@ Current implementation: **SQLite BLOB column + JavaScript cosine similarity**.
 ```typescript
 interface VectorStore {
   insert(vectors: VectorDocument[]): Promise<void>;
-  search(queryVector: Float32Array, options?: { topK?: number; scope?: KnowledgeScope }): Promise<SearchResult[]>;
+  search(queryVector: Float32Array, options?: { topK?: number; scope?: RetrievalScope }): Promise<SearchResult[]>;
 }
 ```
 
@@ -352,8 +353,8 @@ interface VectorStore {
 **File**: `services/knowledge/retriever.ts`
 
 - Unique entry: `retrieve(query, scope)`
-- Scope: `none | documents[] | all` (compat: `knowledgeDocumentId`)
-- UI derives `knowledgeScope` at send time from the turn’s draft attachments via `scopeFromAttachments` (then persists a display snapshot on `message.attachments`); no auto-scope from older messages in the thread
+- Scope: `RetrievalScope` (`none` | `sources` with library + conversationFiles); compat maps old `knowledgeScope` / `knowledgeDocumentId`
+- UI derives `retrievalScope` at send time from the turn’s draft attachments via `scopeFromAttachments` (then persists a display snapshot on `message.attachments`); no auto-scope from older messages in the thread
 - Keyword always; hybrid when Embedder + vectors exist
 - RRF uses rank + chunk id
 
@@ -520,13 +521,22 @@ Normal chat:
 | GET | `/knowledge/embed/status` | Whether ONNX embedder is available |
 | POST | `/knowledge/embed` | Compute vectors for text batch |
 | DELETE | `/knowledge/:id` | Delete document and its index |
+| GET | `/knowledge/by-hash/:hash` | Lookup library doc by content hash |
+| PATCH | `/knowledge/:id` | Rename display name only |
+| GET/POST | `/conversation-files` | List / upload conversation files (existing conversationId required) |
+| GET/DELETE | `/conversation-files/:id` | Conversation file meta / delete |
+| PUT | `/conversation-files/:id/chunks` | Commit conversation-file chunks |
+| PUT | `/conversation-files/:id/status` | Update conversation-file index status |
+| POST | `/conversation-files/vectors` | Batch write conversation-file embeddings |
+| POST | `/retrieval/chunks/query` | Unified chunk export (library + conversationFiles; requires conversationId for files) |
 
 App-layer reindex (not data-service):
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/knowledge/:id/reindex` | Rebuild one doc vectors |
-| POST | `/api/knowledge/reindex` | Rebuild all doc vectors |
+| POST | `/api/knowledge/:id/reindex` | Rebuild one library doc vectors |
+| POST | `/api/knowledge/reindex` | Rebuild all library doc vectors |
+| POST | `/api/conversations/:id/files/:fileId/reindex` | Rebuild one conversation-file vectors |
 
 ### Database Schema
 
@@ -538,18 +548,24 @@ CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, ...);
 CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL,
   role TEXT CHECK (role IN ('user','assistant')), content TEXT NOT NULL,
   duration_ms INTEGER,
-  attachments TEXT,  -- optional JSON: per-message display scope (document | all)
+  attachments TEXT,  -- optional JSON: library | library_all | conversation_file
   FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE);
 
--- Knowledge documents
-CREATE TABLE knowledge_documents (id TEXT PRIMARY KEY, name TEXT NOT NULL,
-  stored_path TEXT NOT NULL, size INTEGER, page_count INTEGER, chunk_count INTEGER, ...);
-
--- Text chunks (with vector embedding)
-CREATE TABLE knowledge_chunks (id TEXT PRIMARY KEY, document_id TEXT NOT NULL,
-  page_number INTEGER, position INTEGER, content TEXT NOT NULL,
-  embedding BLOB,  -- Serialized Float32Array
+-- Durable library (identity = content_hash; name is display metadata)
+CREATE TABLE knowledge_documents (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, original_name TEXT,
+  content_hash TEXT UNIQUE, stored_path TEXT NOT NULL, ...);
+CREATE TABLE knowledge_chunks (
+  id TEXT PRIMARY KEY, document_id TEXT NOT NULL, ..., embedding BLOB,
   FOREIGN KEY (document_id) REFERENCES knowledge_documents(id) ON DELETE CASCADE);
+
+-- Conversation files (scoped to one chat; cascade with conversation)
+CREATE TABLE conversation_files (
+  id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, name TEXT NOT NULL, ...,
+  FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE);
+CREATE TABLE conversation_file_chunks (
+  id TEXT PRIMARY KEY, file_id TEXT NOT NULL, ..., embedding BLOB,
+  FOREIGN KEY (file_id) REFERENCES conversation_files(id) ON DELETE CASCADE);
 ```
 
 ### SQLite Optimizations

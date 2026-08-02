@@ -46,11 +46,18 @@ layout introduced in V1. See the [roadmap](docs/ROADMAP.md).
 
 ## Local documents and retrieval
 
-After you upload a document:
+Files live in two namespaces (same mental model as common chat products):
 
-1. **Parse** — extract text (PDF / TXT / Markdown)
-2. **Chunk** — split into searchable passages and store in local SQLite
-3. **Retrieve** — for **that turn’s message**, pull relevant excerpts from the attached document scope into the chat context (attachments apply only to that message and clear after send; opening history does not restore composer attachments). To retrieve the same PDF on a later turn, attach it again; files remain in the local library.
+| Entry | Storage | Lifecycle |
+|------|---------|-----------|
+| Chat “Attach to this chat” / drag-drop | Conversation files | Deleted with the chat; retrieval is scoped by `conversationId` |
+| “Import to library” or Knowledge page | Durable library | Kept long-term; **content-hash deduplicated** (display name is metadata) |
+
+Shared pipeline for both entries:
+
+1. **Parse** — extract text (PDF / TXT / Markdown); library import short-circuits on content hash when a complete document already exists
+2. **Chunk** — split into searchable passages and store in local SQLite (separate tables)
+3. **Retrieve** — for **that turn’s message**, pull excerpts from the selected scope (conversation files and/or library). Draft selection clears after send; opening history does not restore the previous draft, but conversation files stay on the thread for re-selection. “Attach to chat” does **not** write the durable library; use “Import to library” when you need persistence. Display names can be set at import or renamed later without re-parsing.
 
 **Keyword retrieval is the default.** No embedding model is loaded, so there is no extra RAM cost out of the box. If keywords miss, nothing is injected into the prompt.
 

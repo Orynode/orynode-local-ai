@@ -1,5 +1,7 @@
 /**
- * /api/knowledge — 入库唯一管线（PDF / TXT / Markdown）
+ * /api/knowledge — 持久资料库唯一入库管线（PDF / TXT / Markdown）
+ *
+ * 身份 = content hash；显示名可选，不参与去重。
  */
 
 import {
@@ -9,29 +11,9 @@ import {
   SEARCH_CONFIG,
   EMBEDDING_CONFIG,
 } from "../../../config/defaults";
-import {
-  parseDocument,
-  detectKnowledgeKind,
-  mimeForKind,
-  extensionForKind,
-  createChunker,
-  assignChunkIds,
-  commitDocumentChunks,
-  indexDocumentEmbeddings,
-} from "../../../services/knowledge";
-import type { KnowledgeDocument } from "../../../services/types";
+import { ingestDocument } from "../../../services/knowledge";
 
 const dataUrl = ORYNODE_DATA_URL;
-
-function decodeFileName(value: string | null, fallbackExt: string): string {
-  const fallback = `未命名.${fallbackExt}`;
-  if (!value) return fallback;
-  try {
-    return decodeURIComponent(value).replace(/[/\\]/g, "_").slice(0, 180);
-  } catch {
-    return fallback;
-  }
-}
 
 export async function GET() {
   try {
@@ -60,7 +42,6 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  let storedId: string | null = null;
   try {
     const contentLength = Number(request.headers.get("content-length") ?? 0);
     if (contentLength > MAX_KNOWLEDGE_FILE_SIZE) {
@@ -77,99 +58,35 @@ export async function POST(request: Request) {
         { status: 413 },
       );
     }
-    if (buffer.byteLength === 0) {
-      return Response.json({ error: "文件为空" }, { status: 400 });
-    }
-    const headerName = request.headers.get("x-file-name");
-    const kind = detectKnowledgeKind({
-      fileName: headerName ? decodeURIComponent(headerName) : null,
+
+    const result = await ingestDocument({
+      bytes: buffer,
+      fileName: request.headers.get("x-file-name"),
+      displayName: request.headers.get("x-display-name"),
       contentType: request.headers.get("content-type"),
-      buffer,
+      target: { namespace: "library" },
     });
-    if (!kind) {
-      return Response.json(
-        { error: "目前只支持 PDF、TXT、Markdown（.md）文件" },
-        { status: 415 },
-      );
+    if (result.namespace !== "library") {
+      return Response.json({ error: "资料导入失败" }, { status: 500 });
     }
 
-    const name = decodeFileName(headerName, extensionForKind(kind));
-    // parsePdf 内部会拷贝 buffer，调用方的 ArrayBuffer 可安全继续用于落盘
-    const doc = await parseDocument(buffer, kind);
-    const chunker = createChunker();
-    const rawChunks = chunker.chunkDocument(doc.pages);
-    if (rawChunks.length === 0) {
-      return Response.json(
-        {
-          error:
-            kind === "pdf"
-              ? "这个 PDF 没有可提取的文字，扫描版 PDF 暂不支持"
-              : "文件没有可提取的文字",
-        },
-        { status: 422 },
-      );
-    }
-    const chunks = assignChunkIds(rawChunks);
-
-    const storeResponse = await fetch(`${dataUrl}/knowledge`, {
-      method: "POST",
-      headers: {
-        "content-type": mimeForKind(kind),
-        "x-file-name": encodeURIComponent(name),
-        "x-file-kind": kind,
-      },
-      body: buffer,
-      signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledgeImport),
-    });
-    const storeResult = await storeResponse.json();
-    if (!storeResponse.ok) {
-      throw new Error(storeResult.error || "资料存储失败");
-    }
-    storedId = storeResult.document.id as string;
-
-    const document: KnowledgeDocument = await commitDocumentChunks(
-      storedId,
-      doc.pageCount,
-      chunks,
-    );
-
-    // Workers 可能掐断 fire-and-forget；语义开时必须等向量写完。
-    // 未开启语义时 indexDocumentEmbeddings 会立刻 skipped。
-    const indexResult = await indexDocumentEmbeddings(storedId, chunks);
-    const withIndex: KnowledgeDocument = {
-      ...document,
-      status:
-        indexResult.status === "indexed"
-          ? "indexed"
-          : indexResult.status === "error"
-            ? "error"
-            : document.status,
-      errorMessage:
-        indexResult.status === "error"
-          ? indexResult.reason ?? "向量索引失败"
-          : document.errorMessage ?? null,
-    };
-
-    return Response.json({ document: withIndex }, { status: 201 });
-  } catch (error) {
-    if (storedId) {
-      try {
-        await fetch(`${dataUrl}/knowledge/${encodeURIComponent(storedId)}`, {
-          method: "DELETE",
-          signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
-        });
-      } catch {
-        // ignore cleanup failure
-      }
-    }
     return Response.json(
       {
-        error:
-          error instanceof Error
-            ? error.message
-            : "资料导入失败，请确认本地资料库服务正在运行",
+        document: result.document,
+        deduplicated: result.deduplicated,
       },
-      { status: 503 },
+      { status: result.deduplicated ? 200 : 201 },
     );
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "资料导入失败，请确认本地资料库服务正在运行";
+    const status =
+      message.includes("只支持") ? 415
+      : message.includes("没有可提取") || message.includes("扫描版") ? 422
+      : message.includes("为空") ? 400
+      : 503;
+    return Response.json({ error: message }, { status });
   }
 }

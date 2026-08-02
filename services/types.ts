@@ -4,13 +4,11 @@
 
 export type MessageRole = "user" | "assistant";
 
-/** 用户消息上展示的资料附件（对话内可见，类似 ChatGPT） */
-export interface MessageAttachment {
-  id: string;
-  name: string;
-  /** document = 单篇资料；all = 全部资料库 */
-  kind: "document" | "all";
-}
+/** 用户消息上展示的附件引用（资料库或本会话文件） */
+export type MessageAttachment =
+  | { kind: "library"; id: string; name: string }
+  | { kind: "library_all"; id: "all"; name: string }
+  | { kind: "conversation_file"; id: string; name: string };
 
 export interface Message {
   id: string;
@@ -38,6 +36,26 @@ export type KnowledgeDocumentStatus =
 
 export interface KnowledgeDocument {
   id: string;
+  /** 显示名（可改，不参与去重） */
+  name: string;
+  /** 原始文件名（只读溯源） */
+  originalName?: string;
+  /** 内容身份 SHA-256 hex；资料库全局唯一 */
+  contentHash?: string;
+  size: number;
+  pageCount: number;
+  chunkCount: number;
+  createdAt: string;
+  status?: KnowledgeDocumentStatus;
+  embeddingModel?: string | null;
+  embeddingDim?: number | null;
+  errorMessage?: string | null;
+}
+
+/** 绑会话的临时附件；持久保存请走资料库导入 */
+export interface ConversationFile {
+  id: string;
+  conversationId: string;
   name: string;
   size: number;
   pageCount: number;

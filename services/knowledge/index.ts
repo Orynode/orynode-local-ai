@@ -3,7 +3,7 @@
  *
  * 客户端组件不要从本文件 import 运行时符号：
  * - UI 状态文案：`./status`
- * - 类型：`./types`（含 KnowledgeScope）
+ * - 类型：`./types`（含 RetrievalScope）
  * 否则会把 embedder/pdfjs 等打进浏览器包。
  *
  * Embedder / VectorStore 接口仅在 types.ts；实现见对应文件。
@@ -22,7 +22,7 @@ export type { KnowledgeFileKind } from "./formats";
 export { createChunker } from "./chunker";
 export {
   HybridRetriever,
-  normalizeKnowledgeScope,
+  normalizeRetrievalScope,
 } from "./retriever";
 export {
   assignChunkIds,
@@ -31,3 +31,11 @@ export {
   reindexDocument,
   reindexAllDocuments,
 } from "./indexer";
+export { ingestDocument } from "./ingest";
+export type { IngestTarget, IngestResult } from "./ingest";
+export {
+  hashContent,
+  resolveDisplayName,
+  isUsableLibraryDocument,
+} from "./hash";
+export type { RetrievalScope, DocumentNamespace } from "./types";

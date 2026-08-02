@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../ui/Icon";
 import type {
+  ConversationFile,
   KnowledgeDocument,
   MessageAttachment,
   RuntimeSettings,
@@ -10,11 +11,14 @@ import type {
 import type { KnowledgeUploadState } from "../../hooks/useKnowledge";
 import {
   allDocumentsAttachment,
+  isLibraryAll,
   removeDraftAttachment,
+  toggleDraftConversationFile,
   toggleDraftDocument,
 } from "../../lib/attachments";
 
 type PanelMode = "closed" | "actions" | "library" | "params";
+type FilePickMode = "attach" | "import";
 
 type HotSettings = Pick<
   RuntimeSettings,
@@ -66,11 +70,19 @@ interface ComposerProps {
   sending: boolean;
   onStop: () => void;
   documents: KnowledgeDocument[];
+  conversationFiles: ConversationFile[];
   draftAttachments: MessageAttachment[];
   onDraftAttachmentsChange: (next: MessageAttachment[]) => void;
   uploading: boolean;
   uploadState?: KnowledgeUploadState | null;
-  onFileSelect: (file: File) => void;
+  /** 附到本对话（会话附件） */
+  onAttachFileSelect: (file: File) => void;
+  /** 导入资料库（持久） */
+  onImportLibrarySelect: (file: File) => void;
+  /** 删除本会话附件（落盘 + 索引） */
+  onRemoveConversationFile?: (fileId: string) => void;
+  /** 重建本会话附件向量 */
+  onReindexConversationFile?: (fileId: string) => void;
   hotSettings: HotSettings;
   onPatchHotSettings: (
     patch: Partial<HotSettings>,
@@ -84,16 +96,21 @@ export function Composer({
   sending,
   onStop,
   documents,
+  conversationFiles,
   draftAttachments,
   onDraftAttachmentsChange,
   uploading,
   uploadState = null,
-  onFileSelect,
+  onAttachFileSelect,
+  onImportLibrarySelect,
+  onRemoveConversationFile,
+  onReindexConversationFile,
   hotSettings,
   onPatchHotSettings,
 }: ComposerProps) {
   const composer = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const filePickMode = useRef<FilePickMode>("attach");
   const panelRef = useRef<HTMLDivElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragDepth = useRef(0);
@@ -149,7 +166,7 @@ export function Composer({
       const file = event.dataTransfer?.files?.[0];
       if (file) {
         setPanel("closed");
-        onFileSelect(file);
+        onAttachFileSelect(file);
       }
     }
 
@@ -163,7 +180,7 @@ export function Composer({
       window.removeEventListener("dragover", onDragOver);
       window.removeEventListener("drop", onDrop);
     };
-  }, [onFileSelect, uploading]);
+  }, [onAttachFileSelect, uploading]);
 
   function openAttachMenu() {
     setPanel("actions");
@@ -237,15 +254,19 @@ export function Composer({
     onSubmit(draft);
   }
 
-  function openFilePicker() {
+  function openFilePicker(mode: FilePickMode) {
+    filePickMode.current = mode;
     setPanel("closed");
     fileInput.current?.click();
   }
 
   const pendingAttachments = uploadState ? [] : draftAttachments;
-  const useAllDocuments = draftAttachments.some((item) => item.kind === "all");
-  const selectedIds = draftAttachments
-    .filter((item) => item.kind === "document")
+  const useAllDocuments = draftAttachments.some(isLibraryAll);
+  const selectedLibraryIds = draftAttachments
+    .filter((item) => item.kind === "library")
+    .map((item) => item.id);
+  const selectedFileIds = draftAttachments
+    .filter((item) => item.kind === "conversation_file")
     .map((item) => item.id);
   const plusActive =
     panel === "actions" ||
@@ -259,8 +280,8 @@ export function Composer({
       {draggingFile ? (
         <div className="composer-drop-overlay" role="status" aria-live="polite">
           <div className="composer-drop-card">
-            <strong>松开以上传资料</strong>
-            <p>支持 PDF、TXT、Markdown</p>
+            <strong>松开以附到本对话</strong>
+            <p>支持 PDF、TXT、Markdown（不会写入资料库）</p>
           </div>
         </div>
       ) : null}
@@ -282,23 +303,27 @@ export function Composer({
             <small>
               {uploadState.phase === "uploading"
                 ? `上传中 ${uploadState.percent}%`
-                : "正在解析入库…"}
+                : "正在解析…"}
             </small>
           </span>
         </div>
       ) : pendingAttachments.length > 0 ? (
         <div className="composer-attachments" aria-label="下次发送附带的资料">
           {pendingAttachments.map((item) => (
-            <div key={item.id} className="composer-attachment">
+            <div key={`${item.kind}:${item.id}`} className="composer-attachment">
               <span className="composer-attachment-icon" aria-hidden>
-                <Icon name={item.kind === "all" ? "database" : "attach"} />
+                <Icon
+                  name={item.kind === "library_all" ? "database" : "attach"}
+                />
               </span>
               <span className="composer-attachment-name">
-                {item.kind === "all"
+                {item.kind === "library_all"
                   ? documents.length > 0
                     ? `全部资料（${documents.length}）`
                     : "全部资料"
-                  : item.name}
+                  : item.kind === "conversation_file"
+                    ? `${item.name}（本对话）`
+                    : item.name}
               </span>
               <button
                 type="button"
@@ -323,14 +348,28 @@ export function Composer({
               type="button"
               role="menuitem"
               disabled={uploading}
-              onClick={openFilePicker}
+              onClick={() => openFilePicker("attach")}
             >
               <span className="composer-action-icon" aria-hidden>
                 <Icon name="attach" />
               </span>
               <span className="composer-action-copy">
-                <strong>导入本地文件</strong>
-                <small>PDF / TXT / Markdown，写入资料库</small>
+                <strong>附到本对话</strong>
+                <small>仅本会话可用，不写入资料库</small>
+              </span>
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              disabled={uploading}
+              onClick={() => openFilePicker("import")}
+            >
+              <span className="composer-action-icon" aria-hidden>
+                <Icon name="database" />
+              </span>
+              <span className="composer-action-copy">
+                <strong>导入资料库</strong>
+                <small>PDF / TXT / Markdown，永久保存</small>
               </span>
             </button>
             <button
@@ -342,8 +381,8 @@ export function Composer({
                 <Icon name="database" />
               </span>
               <span className="composer-action-copy">
-                <strong>从资料库选择</strong>
-                <small>设定下次发送要检索的资料</small>
+                <strong>选择检索范围</strong>
+                <small>本对话附件或资料库，仅作用于下次发送</small>
               </span>
             </button>
           </div>
@@ -352,55 +391,130 @@ export function Composer({
         {panel === "library" ? (
           <div className="composer-picker" role="dialog" aria-label="选择本条消息的检索资料">
             <div className="composer-picker-head">
-              <strong>本条消息检索资料</strong>
+              <strong>本条消息检索范围</strong>
               <button type="button" onClick={() => setPanel("closed")}>
                 完成
               </button>
             </div>
-            {documents.length === 0 ? (
+            {conversationFiles.length > 0 ? (
+              <>
+                <p className="composer-picker-section">本对话附件</p>
+                <ul className="composer-picker-list">
+                  {conversationFiles.map((file) => {
+                    const active = selectedFileIds.includes(file.id);
+                    const needsReindex =
+                      file.status === "error" ||
+                      file.status === "ready" ||
+                      file.status === "embedding";
+                    return (
+                      <li key={file.id} className="composer-picker-row">
+                        <button
+                          type="button"
+                          className={active ? "active" : ""}
+                          onClick={() =>
+                            onDraftAttachmentsChange(
+                              toggleDraftConversationFile(
+                                draftAttachments,
+                                file,
+                              ),
+                            )
+                          }
+                        >
+                          <span>{file.name}</span>
+                          <small>
+                            {active
+                              ? "已选"
+                              : file.status === "error"
+                                ? "索引失败"
+                                : `${file.chunkCount} 片段`}
+                          </small>
+                        </button>
+                        <div className="composer-picker-row-actions">
+                          {needsReindex && onReindexConversationFile ? (
+                            <button
+                              type="button"
+                              className="composer-picker-icon-btn"
+                              title="重建向量索引"
+                              aria-label={`重建索引 ${file.name}`}
+                              onClick={() =>
+                                onReindexConversationFile(file.id)
+                              }
+                            >
+                              重建
+                            </button>
+                          ) : null}
+                          {onRemoveConversationFile ? (
+                            <button
+                              type="button"
+                              className="composer-picker-icon-btn"
+                              title="删除本对话附件"
+                              aria-label={`删除 ${file.name}`}
+                              onClick={() =>
+                                onRemoveConversationFile(file.id)
+                              }
+                            >
+                              删除
+                            </button>
+                          ) : null}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            ) : null}
+            {documents.length === 0 && conversationFiles.length === 0 ? (
               <p className="composer-picker-empty">
-                还没有资料。可先「导入本地文件」，或到「本地资料库」管理。
+                还没有可检索内容。可「附到本对话」，或「导入资料库」。
               </p>
-            ) : (
-              <ul className="composer-picker-list">
-                <li>
-                  <button
-                    type="button"
-                    className={useAllDocuments ? "active" : ""}
-                    onClick={() => {
-                      onDraftAttachmentsChange([
-                        allDocumentsAttachment(),
-                      ]);
-                    }}
-                  >
-                    <span>全部资料</span>
-                    <small>{documents.length} 篇</small>
-                  </button>
-                </li>
-                {documents.map((doc) => {
-                  const active =
-                    !useAllDocuments && selectedIds.includes(doc.id);
-                  return (
-                    <li key={doc.id}>
-                      <button
-                        type="button"
-                        className={active ? "active" : ""}
-                        onClick={() =>
-                          onDraftAttachmentsChange(
-                            toggleDraftDocument(draftAttachments, doc),
-                          )
-                        }
-                      >
-                        <span>{doc.name}</span>
-                        <small>
-                          {active ? "已选" : `${doc.chunkCount} 片段`}
-                        </small>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
+            ) : documents.length > 0 ? (
+              <>
+                <p className="composer-picker-section">资料库</p>
+                <ul className="composer-picker-list">
+                  <li>
+                    <button
+                      type="button"
+                      className={useAllDocuments ? "active" : ""}
+                      onClick={() => {
+                        // 保留已选会话附件；仅替换资料库侧选中为「全部」
+                        const conversationOnly = draftAttachments.filter(
+                          (item) => item.kind === "conversation_file",
+                        );
+                        onDraftAttachmentsChange([
+                          ...conversationOnly,
+                          allDocumentsAttachment(),
+                        ]);
+                      }}
+                    >
+                      <span>全部资料</span>
+                      <small>{documents.length} 篇</small>
+                    </button>
+                  </li>
+                  {documents.map((doc) => {
+                    const active =
+                      !useAllDocuments && selectedLibraryIds.includes(doc.id);
+                    return (
+                      <li key={doc.id}>
+                        <button
+                          type="button"
+                          className={active ? "active" : ""}
+                          onClick={() =>
+                            onDraftAttachmentsChange(
+                              toggleDraftDocument(draftAttachments, doc),
+                            )
+                          }
+                        >
+                          <span>{doc.name}</span>
+                          <small>
+                            {active ? "已选" : `${doc.chunkCount} 片段`}
+                          </small>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            ) : null}
             {draftAttachments.length > 0 && (
               <button
                 type="button"
@@ -531,7 +645,13 @@ export function Composer({
             accept="application/pdf,.pdf,text/plain,.txt,text/markdown,.md,.markdown"
             onChange={(event) => {
               const file = event.target.files?.[0];
-              if (file) onFileSelect(file);
+              if (file) {
+                if (filePickMode.current === "import") {
+                  onImportLibrarySelect(file);
+                } else {
+                  onAttachFileSelect(file);
+                }
+              }
               if (fileInput.current) fileInput.current.value = "";
             }}
           />

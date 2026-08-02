@@ -13,6 +13,7 @@ export function useChat() {
   const [connected, setConnected] = useState<boolean | null>(null);
   const [modelName, setModelName] = useState("Gemma 4 26B A4B IT");
   const abortController = useRef<AbortController | null>(null);
+  const cancelledRef = useRef(false);
 
   const checkStatus = useCallback(async () => {
     try {
@@ -26,6 +27,7 @@ export function useChat() {
   }, []);
 
   const stopGeneration = useCallback(() => {
+    cancelledRef.current = true;
     abortController.current?.abort();
   }, []);
 
@@ -51,7 +53,6 @@ export function useChat() {
         id: string | null,
       ) => Promise<{ id: string; title: string }>,
     ) => {
-      const knowledgeScope = scopeFromAttachments(attachments);
       const userMessage: Message = {
         id: crypto.randomUUID(),
         role: "user",
@@ -63,7 +64,10 @@ export function useChat() {
       const nextTitle =
         conversationTitle || content.replace(/\s+/g, " ").slice(0, 32);
 
+      // 推理成功/停止后再持久化用户消息，避免失败留下幽灵气泡
       let activeId = conversationId;
+      const retrievalScope = scopeFromAttachments(attachments, activeId);
+      cancelledRef.current = false;
       const controller = new AbortController();
       abortController.current = controller;
 
@@ -81,17 +85,6 @@ export function useChat() {
       setError("");
 
       try {
-        try {
-          const saved = await onConversationSaved(
-            nextMessages,
-            nextTitle,
-            activeId,
-          );
-          activeId = saved.id;
-        } catch {
-          // Continue even if save fails
-        }
-
         const response = await fetch("/api/chat", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -100,7 +93,8 @@ export function useChat() {
               role,
               content: text,
             })),
-            knowledgeScope,
+            conversationId: activeId,
+            retrievalScope,
             temperature,
             topP,
             topK,
@@ -147,11 +141,9 @@ export function useChat() {
             if (done) break;
           }
         } finally {
-          try {
-            reader.cancel();
-          } catch {
-            // ignore
-          }
+          reader.cancel().catch(() => {
+            // reader may already be cancelled/errored after abort
+          });
         }
 
         const completed: Message[] = answer
@@ -166,11 +158,23 @@ export function useChat() {
           : nextMessages;
 
         setMessages(completed);
-        void onConversationSaved(completed, nextTitle, activeId);
+        try {
+          const saved = await onConversationSaved(
+            completed,
+            nextTitle,
+            activeId,
+          );
+          activeId = saved.id;
+        } catch {
+          // UI 已更新；持久化失败不回滚本轮可见回复
+        }
 
         return { id: activeId ?? "", title: nextTitle };
       } catch (e) {
-        if (e instanceof DOMException && e.name === "AbortError") {
+        if (
+          cancelledRef.current ||
+          (e instanceof DOMException && e.name === "AbortError")
+        ) {
           const completed: Message[] = answer
             ? [
                 ...nextMessages,
@@ -182,14 +186,25 @@ export function useChat() {
               ]
             : nextMessages;
           setMessages(completed);
-          void onConversationSaved(completed, nextTitle, activeId);
+          try {
+            const saved = await onConversationSaved(
+              completed,
+              nextTitle,
+              activeId,
+            );
+            activeId = saved.id;
+          } catch {
+            // ignore
+          }
           return { id: activeId ?? "", title: nextTitle };
         }
+        // 推理失败：仅回滚 UI；DB 未写入本轮用户消息
         setMessages(messages);
         setConnected(false);
         setError(e instanceof Error ? e.message : "无法连接本地模型");
         return null;
       } finally {
+        cancelledRef.current = false;
         abortController.current = null;
         setSending(false);
       }

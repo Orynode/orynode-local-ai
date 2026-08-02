@@ -2,14 +2,13 @@
  * 向量存储客户端
  *
  * 经 data-service HTTP 读写 SQLite BLOB；本类不直接打开数据库。
- * - insert：写入 chunk embedding
- * - search：按 scope 拉取带向量的 chunks，JS 余弦 Top-K
- *
- * 删除文档时由 data-service CASCADE 处理，不在此封装。
+ * - insert：写入 chunk embedding（按 namespace）
+ * - search：按 RetrievalScope 拉取带向量的 chunks，JS 余弦 Top-K
  */
 
 import type {
-  KnowledgeScope,
+  DocumentNamespace,
+  RetrievalScope,
   SearchResult,
   VectorDocument,
   VectorStore,
@@ -30,21 +29,35 @@ export class SQLiteVectorStore implements VectorStore {
   async insert(vectors: VectorDocument[]): Promise<void> {
     if (vectors.length === 0) return;
 
-    const response = await fetch(`${this.dataUrl}/knowledge/vectors`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        vectors: vectors.map((item) => ({
-          id: item.id,
-          documentId: item.documentId,
-          vector: float32ToNumberArray(item.vector),
-        })),
-      }),
-      signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledgeImport),
-    });
+    const byNamespace = new Map<DocumentNamespace, VectorDocument[]>();
+    for (const item of vectors) {
+      const ns = item.namespace ?? "library";
+      const list = byNamespace.get(ns) ?? [];
+      list.push(item);
+      byNamespace.set(ns, list);
+    }
 
-    if (!response.ok) {
-      throw new Error("向量存储失败");
+    for (const [namespace, items] of byNamespace) {
+      const path =
+        namespace === "conversation"
+          ? `${this.dataUrl}/conversation-files/vectors`
+          : `${this.dataUrl}/knowledge/vectors`;
+      const response = await fetch(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          vectors: items.map((item) => ({
+            id: item.id,
+            documentId: item.documentId,
+            vector: float32ToNumberArray(item.vector),
+          })),
+        }),
+        signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledgeImport),
+      });
+
+      if (!response.ok) {
+        throw new Error("向量存储失败");
+      }
     }
   }
 
@@ -52,18 +65,31 @@ export class SQLiteVectorStore implements VectorStore {
     queryVector: Float32Array,
     options: {
       topK?: number;
-      scope?: Exclude<KnowledgeScope, { mode: "none" }>;
+      scope?: Exclude<RetrievalScope, { mode: "none" }>;
     } = {},
   ): Promise<SearchResult[]> {
     const topK = options.topK ?? 8;
-    const scope = options.scope ?? { mode: "all" as const };
+    const scope = options.scope ?? {
+      mode: "sources" as const,
+      library: "all" as const,
+    };
 
-    const response = await fetch(`${this.dataUrl}/knowledge/chunks/query`, {
+    const response = await fetch(`${this.dataUrl}/retrieval/chunks/query`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        mode: scope.mode,
-        documentIds: scope.mode === "documents" ? scope.documentIds : undefined,
+        library:
+          scope.library === "all"
+            ? { mode: "all" }
+            : scope.library
+              ? { mode: "documents", documentIds: scope.library.documentIds }
+              : undefined,
+        conversationFiles: scope.conversationFiles
+          ? {
+              conversationId: scope.conversationFiles.conversationId,
+              fileIds: scope.conversationFiles.fileIds,
+            }
+          : undefined,
         withVectors: true,
       }),
       signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
@@ -82,6 +108,7 @@ export class SQLiteVectorStore implements VectorStore {
       position: number;
       content: string;
       embedding: number[] | null;
+      source?: "library" | "conversation_file";
     }> = result.chunks ?? [];
 
     const scored = chunks
@@ -94,6 +121,7 @@ export class SQLiteVectorStore implements VectorStore {
           pageNumber: chunk.pageNumber,
           position: chunk.position,
           content: chunk.content,
+          source: chunk.source ?? "library",
         },
         score: cosineSimilarity(
           queryVector,

@@ -28,24 +28,40 @@ export function buildSystemPrompt(knowledgeContext = ""): string {
   return base;
 }
 
+type PromptChunk = {
+  documentName: string;
+  pageNumber: number;
+  content: string;
+  source?: "library" | "conversation_file";
+};
+
 /**
- * 构建知识库上下文字符串，用于注入 system prompt
+ * 构建知识上下文字符串，用于注入 system prompt。
+ * 按来源区分「本地资料库」与「本对话附件」，避免模型误称来源。
  */
-export function buildKnowledgePrompt(
-  chunks: Array<{
-    documentName: string;
-    pageNumber: number;
-    content: string;
-  }>,
-): string {
+export function buildKnowledgePrompt(chunks: PromptChunk[]): string {
   if (chunks.length === 0) return "";
 
+  const hasLibrary = chunks.some(
+    (chunk) => chunk.source !== "conversation_file",
+  );
+  const hasConversation = chunks.some(
+    (chunk) => chunk.source === "conversation_file",
+  );
+  const originLabel =
+    hasLibrary && hasConversation
+      ? "本地资料库与本对话附件"
+      : hasConversation
+        ? "本对话附件"
+        : "本地资料库";
+
   const excerpts = chunks
-    .map(
-      (chunk) =>
-        `[${chunk.documentName}，第 ${chunk.pageNumber} 页]\n${chunk.content}`,
-    )
+    .map((chunk) => {
+      const tag =
+        chunk.source === "conversation_file" ? "本对话附件" : "资料库";
+      return `[${tag} · ${chunk.documentName}，第 ${chunk.pageNumber} 页]\n${chunk.content}`;
+    })
     .join("\n\n");
 
-  return `\n\n以下是从本地资料库按当前检索范围取出的内容。回答应优先依据这些内容；无法从资料确认时请明确说明。引用资料时使用"[文件名，第 N 页]"格式。\n\n${excerpts}`;
+  return `\n\n以下是从${originLabel}按当前检索范围取出的内容。回答应优先依据这些内容；无法从资料确认时请明确说明。引用资料时使用"[文件名，第 N 页]"格式。\n\n${excerpts}`;
 }
