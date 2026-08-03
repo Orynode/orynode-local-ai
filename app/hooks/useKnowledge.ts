@@ -18,12 +18,14 @@ export interface KnowledgeMeta {
 export type KnowledgeUploadState = {
   fileName: string;
   percent: number;
-  phase: "uploading" | "processing";
+  phase: "uploading" | "processing" | "ocr";
+  detail?: string;
 };
 
 export type KnowledgeUploadResult = {
   document: KnowledgeDocument;
   deduplicated: boolean;
+  jobId?: string | null;
 };
 
 function summarizeReindex(
@@ -110,16 +112,26 @@ export function useKnowledge() {
   const refresh = useCallback(async () => {
     try {
       const response = await fetch("/api/knowledge", { cache: "no-store" });
-      if (!response.ok) throw new Error();
+      if (!response.ok) throw new Error("无法读取本地资料库");
       const result = await response.json();
       const next: KnowledgeDocument[] = result.documents ?? [];
       setDocuments(next);
       if (result.meta) {
         setMeta(result.meta as KnowledgeMeta);
+        if (result.meta.semanticSearchEnabled) {
+          // 触发节流补建；失败不影响列表
+          void fetch("/api/knowledge/vector-backfill", { method: "POST" }).catch(
+            () => undefined,
+          );
+        }
       }
       return next;
     } catch (e) {
-      setError(e instanceof Error ? e.message : "无法读取本地资料库");
+      setError(
+        e instanceof Error && e.message
+          ? e.message
+          : "无法读取本地资料库",
+      );
       return [] as KnowledgeDocument[];
     }
   }, []);
@@ -132,14 +144,66 @@ export function useKnowledge() {
       void refresh().then((docs) => {
         const pending = docs.some(
           (doc) =>
-            doc.status === "embedding" || doc.status === "awaiting_chunks",
+            doc.status === "embedding" ||
+            doc.status === "awaiting_chunks" ||
+            doc.status === "stored" ||
+            doc.status === "processing",
         );
-        if (!pending || ticks >= 40) {
+        if (!pending || ticks >= 120) {
           stopPolling();
         }
       });
     }, 1500);
   }, [refresh, stopPolling]);
+
+  const pollJobProgress = useCallback(
+    (jobId: string, fileName: string) => {
+      let ticks = 0;
+      const timer = setInterval(() => {
+        ticks += 1;
+        void fetch(`/api/knowledge/v1/jobs/${encodeURIComponent(jobId)}`, {
+          cache: "no-store",
+        })
+          .then(async (response) => {
+            if (!response.ok) return;
+            const body = await response.json().catch(() => ({}));
+            const job = body.job ?? body;
+            const progress = job?.progress;
+            if (progress?.phase === "analyzing") {
+              setNotice(`正在分析 PDF：${fileName}`);
+            } else if (
+              progress?.phase === "ocr" &&
+              typeof progress.ocrPagesCompleted === "number" &&
+              typeof progress.ocrPagesTotal === "number"
+            ) {
+              setNotice(
+                `正在识别扫描页 ${progress.ocrPagesCompleted}/${progress.ocrPagesTotal}：${fileName}`,
+              );
+            } else if (
+              job?.status === "succeeded" ||
+              progress?.phase === "keyword_index"
+            ) {
+              setNotice(`已完成，可关键词检索：${fileName}`);
+              clearInterval(timer);
+              void refresh();
+            } else if (job?.status === "failed") {
+              const err = String(job.error || "");
+              setError(
+                err.includes("OCR_UNAVAILABLE")
+                  ? `OCR 不可用，原文件已保留：${fileName}`
+                  : `识别失败：${fileName}`,
+              );
+              setNotice("");
+              clearInterval(timer);
+              void refresh();
+            }
+          })
+          .catch(() => undefined);
+        if (ticks >= 120) clearInterval(timer);
+      }, 1200);
+    },
+    [refresh],
+  );
 
   const upload = useCallback(
     async (
@@ -209,6 +273,7 @@ export function useKnowledge() {
                 resolve({
                   document: body.document as KnowledgeDocument,
                   deduplicated: Boolean(body.deduplicated),
+                  jobId: typeof body.jobId === "string" ? body.jobId : null,
                 });
                 return;
               }
@@ -227,6 +292,16 @@ export function useKnowledge() {
         await refresh();
         if (!result.deduplicated) {
           startStatusPolling();
+          if (result.jobId) {
+            flash(`正在分析 PDF：${label}`);
+            pollJobProgress(result.jobId, label);
+          } else if (
+            result.document.status === "ready" ||
+            result.document.status === "indexed" ||
+            !result.document.status
+          ) {
+            flash(`已完成，可关键词检索：${label}`);
+          }
         }
         // 去重提示由页面弹窗展示（顶部 notice 在对话页不可见）
         return result;
@@ -238,7 +313,7 @@ export function useKnowledge() {
         setUploadState(null);
       }
     },
-    [refresh, startStatusPolling],
+    [flash, pollJobProgress, refresh, startStatusPolling],
   );
 
   const rename = useCallback(
@@ -277,15 +352,16 @@ export function useKnowledge() {
   );
 
   const remove = useCallback(
-    async (id: string) => {
+    async (id: string): Promise<boolean> => {
       const response = await fetch(`/api/knowledge/${encodeURIComponent(id)}`, {
         method: "DELETE",
       });
       if (!response.ok) {
         setError("删除失败");
-        return;
+        return false;
       }
       await refresh();
+      return true;
     },
     [refresh],
   );
@@ -322,6 +398,38 @@ export function useKnowledge() {
     [flash, refresh, startStatusPolling],
   );
 
+  const reprocess = useCallback(
+    async (id: string) => {
+      setReindexing(true);
+      setError("");
+      setNotice("");
+      try {
+        const response = await fetch(
+          `/api/knowledge/${encodeURIComponent(id)}/reprocess`,
+          { method: "POST" },
+        );
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(
+            typeof result.error === "string" ? result.error : "重试识别失败",
+          );
+        }
+        flash("正在重新识别扫描页…");
+        if (typeof result.jobId === "string") {
+          const doc = documents.find((d) => d.id === id);
+          pollJobProgress(result.jobId, doc?.name || id);
+        }
+        await refresh();
+        startStatusPolling();
+      } catch (e) {
+        flash(e instanceof Error ? e.message : "重试识别失败", true);
+      } finally {
+        setReindexing(false);
+      }
+    },
+    [documents, flash, pollJobProgress, refresh, startStatusPolling],
+  );
+
   const reindexAll = useCallback(async () => {
     setReindexing(true);
     setError("");
@@ -343,6 +451,73 @@ export function useKnowledge() {
     }
   }, [flash, refresh, startStatusPolling]);
 
+  const importWeb = useCallback(
+    async (url: string) => {
+      setUploading(true);
+      setError("");
+      setNotice("");
+      try {
+        const response = await fetch("/api/knowledge/sources", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ type: "web", url }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "网页导入失败");
+        const sync = result.result;
+        flash(
+          `网页已同步：新增 ${sync.imported}，更新 ${sync.updated}，不变 ${sync.unchanged}` +
+            (sync.errors?.length ? `，失败 ${sync.errors.length}` : ""),
+          Boolean(sync.errors?.length),
+        );
+        await refresh();
+        startStatusPolling();
+      } catch (e) {
+        flash(e instanceof Error ? e.message : "网页导入失败", true);
+      } finally {
+        setUploading(false);
+      }
+    },
+    [flash, refresh, startStatusPolling],
+  );
+
+  const importGitHub = useCallback(
+    async (input: {
+      owner: string;
+      repo: string;
+      ref?: string;
+      pathPrefix?: string;
+      token?: string;
+    }) => {
+      setUploading(true);
+      setError("");
+      setNotice("");
+      try {
+        const response = await fetch("/api/knowledge/sources", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ type: "github", ...input }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "GitHub 同步失败");
+        const sync = result.result;
+        flash(
+          `GitHub 已同步：新增 ${sync.imported}，更新 ${sync.updated}，不变 ${sync.unchanged}` +
+            (sync.tombstoned ? `，标记删除 ${sync.tombstoned}` : "") +
+            (sync.errors?.length ? `，失败 ${sync.errors.length}` : ""),
+          Boolean(sync.errors?.length),
+        );
+        await refresh();
+        startStatusPolling();
+      } catch (e) {
+        flash(e instanceof Error ? e.message : "GitHub 同步失败", true);
+      } finally {
+        setUploading(false);
+      }
+    },
+    [flash, refresh, startStatusPolling],
+  );
+
   return {
     documents,
     meta,
@@ -356,6 +531,9 @@ export function useKnowledge() {
     rename,
     remove,
     reindex,
+    reprocess,
     reindexAll,
+    importWeb,
+    importGitHub,
   };
 }

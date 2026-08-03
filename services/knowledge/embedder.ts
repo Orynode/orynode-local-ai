@@ -6,7 +6,8 @@
  *   GET  /knowledge/embed/status
  *   POST /knowledge/embed
  *
- * 默认关闭；开启 ORYNODE_SEMANTIC_SEARCH 且 data-service 能加载模型后可用。
+ * 主机资源开关：ORYNODE_SEMANTIC_SEARCH。用户策略看 knowledgeTier；
+ * Balanced/Quality 仅在本开关开启且模型可用时走 hybrid。
  */
 
 import type { Embedder } from "./types";
@@ -46,12 +47,21 @@ class DataServiceEmbedder implements Embedder {
         available?: boolean;
         reason?: string;
         model?: string;
+        artifactId?: string;
         dimension?: number;
+        role?: string;
       };
       if (!result.available) {
         this.lastError =
           result.reason ||
           "向量模型不可用。请确认 data-service 已启动且能访问模型缓存";
+        return false;
+      }
+      if (
+        typeof result.dimension === "number" &&
+        result.dimension !== EMBEDDING_CONFIG.dimension
+      ) {
+        this.lastError = `向量维度不匹配：runtime=${result.dimension} config=${EMBEDDING_CONFIG.dimension}`;
         return false;
       }
       this.lastError = null;
@@ -78,7 +88,7 @@ class DataServiceEmbedder implements Embedder {
       const response = await fetch(`${this.dataUrl}/knowledge/embed`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ texts: slice }),
+        body: JSON.stringify({ texts: slice, mode: "query" }),
         signal: AbortSignal.timeout(HTTP_TIMEOUT.embedding),
       });
       const result = await response.json().catch(() => ({}));

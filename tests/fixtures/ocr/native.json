@@ -1,0 +1,10 @@
+{
+  "name": "native",
+  "pages": [
+    {
+      "pageNumber": 1,
+      "text": "这是一段足够长的原生 PDF 文本，用于验证不会触发 OCR 路径一二三四五六七八九十。",
+      "hasLargeRasterImage": false
+    }
+  ]
+}

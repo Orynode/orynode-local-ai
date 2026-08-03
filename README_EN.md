@@ -16,6 +16,10 @@ can work with a local model without using the original command-line chat.
 
 ![Chat](docs/images/chat.png)
 
+### Knowledge library
+
+![Knowledge library](docs/images/local-docs.png)
+
 ### Settings
 
 ![Settings](docs/images/settings.png)
@@ -32,17 +36,31 @@ layout introduced in V1. See the [roadmap](docs/ROADMAP.md).
 
 ## Current features
 
-- Local web chat with streaming, stop generation, and auto-scroll
-- TurboFieldfare connection status and current model display
-- OpenAI-compatible chat proxy
-- Reproducible TurboFieldfare installer
-- Resumable Gemma 4 model installation
-- One command to start the model and web interface
-- Automatic local SQLite conversation history
-- Local PDF / TXT / Markdown import and document-grounded answers (keyword retrieval by default; optional semantic vectors)
-- Settings and chat composer for sampling parameters (context length requires restart)
+- Local web chat (streaming, stop, Orynode SSE v1 + structured citations)
+- **RAG / Knowledge Engine** (1.1.0): Scope auth, hybrid retrieval, citations, ProcessingBuild, workspace Search preview
+- TurboFieldfare status via ModelRuntime (not direct coupling)
+- OpenAI-compatible chat proxy; resumable Gemma 4 install; one-command local start
+- SQLite history; conversation attachments vs durable library namespaces
+- PDF / TXT / Markdown; scanned PDFs via **Apple Vision OCR**
+- Settings: sampling, knowledge tier (auto / lite / quality), OCR mode, Trusted-LAN pairing
+- Keyword retrieval by default; optional semantic vectors (`multilingual-e5-small`, opt-in)
 - No account, analytics, or cloud conversation storage
-- Responsive desktop/mobile UI and trusted LAN sharing
+- **Windows**: architecture stubs only; full experience targets Apple Silicon Mac
+
+## Models and technology
+
+| Category | Tech | Notes |
+|----------|------|-------|
+| Chat LLM | Gemma 4 26B A4B IT (4-bit) | Local generation via TurboFieldfare (Metal) |
+| Runtime | TurboFieldfare | `:8080/v1`; loopback only |
+| Default retrieval | SQLite FTS5 + Chinese bigram | No embedding model required |
+| Optional vector backend | blob_scan (BLOB + JS cosine) | Production default; sqlite-vec reserved for **large-scale** bottlenecks only |
+| Optional embedding | multilingual-e5-small (recommended) | ONNX / `@xenova/transformers` |
+| Compat embedding | bge-small-zh-v1.5 | Legacy / Chinese baseline; do not mix with E5 |
+| OCR | Apple Vision (`orynode-ocr`) | macOS; Windows PP-OCR/ONNX stub reserved |
+| App stack | Next.js · React · vinext · TypeScript · SQLite | Web + Data Service `:4318` |
+
+Full inventory: [CHANGELOG 1.1.0](CHANGELOG.md#110--2026-08-03).
 
 ## Local documents and retrieval
 
@@ -53,26 +71,27 @@ Files live in two namespaces (same mental model as common chat products):
 | Chat “Attach to this chat” / drag-drop | Conversation files | Deleted with the chat; retrieval is scoped by `conversationId` |
 | “Import to library” or Knowledge page | Durable library | Kept long-term; **content-hash deduplicated** (display name is metadata) |
 
-Shared pipeline for both entries:
+Shared pipeline (**Knowledge Engine**):
 
-1. **Parse** — extract text (PDF / TXT / Markdown); library import short-circuits on content hash when a complete document already exists
-2. **Chunk** — split into searchable passages and store in local SQLite (separate tables)
-3. **Retrieve** — for **that turn’s message**, pull excerpts from the selected scope (conversation files and/or library). Draft selection clears after send; opening history does not restore the previous draft, but conversation files stay on the thread for re-selection. “Attach to chat” does **not** write the durable library; use “Import to library” when you need persistence. Display names can be set at import or renamed later without re-parsing.
+1. **Parse** — PDF / TXT / Markdown; scanned/hybrid PDFs may use Apple Vision OCR (`process_revision`)
+2. **Chunk / index** — passages in SQLite; library content-hash dedupe
+3. **Retrieve** — per-message scope → `HybridRetriever` (FTS default; optional vectors + RRF) → context + structured citations
+4. Draft selection clears after send; history does not restore the previous draft, but conversation files stay selectable
 
-**Keyword retrieval is the default.** No embedding model is loaded, so there is no extra RAM cost out of the box. If keywords miss, nothing is injected into the prompt.
+**Keyword (FTS5) is default.** If sources are selected but nothing hits, an honest system note is injected instead of stuffing unrelated chunks.
 
-To enable **semantic vector search** (hybrid keyword + vectors with RRF):
+To enable **semantic vectors** (ONNX on the data-service host):
 
-1. Copy `.env.example` to `.env.local` if needed
-2. Set `ORYNODE_SEMANTIC_SEARCH=1`
-3. Restart `npm run local` (the local data-service loads ONNX `bge-small-zh-v1.5`; `@xenova/transformers` is already a dependency)
+1. Copy `.env.example` → `.env.local`
+2. Set `ORYNODE_SEMANTIC_SEARCH=1` (optional `ORYNODE_EMBEDDING_ARTIFACT=multilingual-e5-small`)
+3. Optionally `npm run embedding:install`; restart `npm run local`
+4. Use Auto / higher-quality knowledge tier so hybrid runs when the host flag is on
 
-After enabling:
+After switching an embedding artifact you **must rebuild** the vector index—never mix spaces.
 
-- New uploads are embedded asynchronously (`ready` → `embedding` → `indexed`; `error` still allows keyword search)
-- Documents uploaded before enabling can be reindexed in the UI, or via `POST /api/knowledge/reindex`
+> **Eval note:** CI `test:retrieval-eval` gates on keyword retrieval; real embedding quality evals are a later milestone.
 
-See the [Architecture Reference](docs/ARCHITECTURE.md) for the full RAG design, status model, and extension points.
+See [Architecture](docs/ARCHITECTURE.md), [Knowledge Engine docs](docs/knowledge-engine/README.md), and [CHANGELOG](CHANGELOG.md).
 
 ## Requirements
 
@@ -113,19 +132,17 @@ can also run `npm run turbo:install` and `npm run model:install` separately.
 npm run local
 ```
 
-The terminal prints two kinds of addresses:
+After start, the terminal shows `http://localhost:3000` for this Mac. With
+`ORYNODE_ACCESS_MODE=trusted_lan`, it also shows LAN URLs and requires device
+pairing (Settings → Trusted-LAN pairing, or `POST /api/lan/pairing`).
 
-- use `http://localhost:3000` on the server Mac;
-- use the displayed `http://host-ip:3000` address on another computer on the
-  same local network.
+Only the web entry point listens on the LAN. TurboFieldfare and the SQLite data
+service remain bound to `127.0.0.1`.
 
-All clients share the conversations, document library, and local model stored on
-the server Mac. Only the web entry point listens on the LAN. TurboFieldfare and
-the SQLite data service remain bound to `127.0.0.1`.
-
-V1 has no user accounts or access control. Use it only on a trusted network and
-do not expose port 3000 to the public internet. Press `Control+C` to stop the
-services.
+Trusted-LAN uses a one-time pairing code and revocable sessions.
+`ORYNODE_TRUSTED_LAN_UNSAFE=1` is an **unauthenticated preview only**—not a
+secure sharing mode. Do not expose port 3000 to the public internet. Press
+`Control+C` to stop the services.
 
 If TurboFieldfare is managed separately, run `npm run dev` to start only the
 web interface. Copy `.env.example` to `.env.local` to use a different local API
@@ -158,7 +175,8 @@ orynode-local-ai/
 │   ├── knowledge/files/          #   Uploaded docs (PDF / TXT / MD)
 │   └── models/                   #   Gemma 4 model
 └── docs/                         # Documentation
-    └── ARCHITECTURE.md           #   Full architecture reference
+    ├── ARCHITECTURE.md           #   Current architecture
+    └── knowledge-engine/         #   KE design notes (zh-CN, since 1.1.0)
 ```
 
 ### Three-tier service design
@@ -197,6 +215,7 @@ Before distributing a build, read:
 - [Privacy policy](PRIVACY.md)
 - [Security policy](SECURITY.md)
 - [Architecture Reference](docs/ARCHITECTURE.md)
+- [Knowledge Engine docs index](docs/knowledge-engine/README.md) (zh-CN)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 ## Contributing

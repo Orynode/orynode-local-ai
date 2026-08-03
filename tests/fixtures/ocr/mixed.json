@@ -1,0 +1,20 @@
+{
+  "name": "mixed",
+  "pages": [
+    {
+      "pageNumber": 1,
+      "text": "首页是可提取的原生正文，长度足够判定为 native 决策路径一二三四五六七八。",
+      "hasLargeRasterImage": false
+    },
+    {
+      "pageNumber": 2,
+      "text": "",
+      "hasLargeRasterImage": true
+    },
+    {
+      "pageNumber": 3,
+      "text": "",
+      "hasLargeRasterImage": false
+    }
+  ]
+}

@@ -1,9 +1,8 @@
 /**
  * 混合检索器（唯一检索入口）
  *
- * - keyword：始终可用
- * - hybrid：Embedder 可用且库中有向量时，RRF 融合
- * - scope：RetrievalScope（资料库 + 会话附件）
+ * 经 KeywordIndex / VectorIndex adapters（默认 FTS5 + BLOB），
+ * 不再在本文件直接拼 data-service HTTP。
  */
 
 import type {
@@ -13,15 +12,17 @@ import type {
   RetrievalResult,
   RetrievalScope,
   Retriever,
-  VectorStore,
 } from "./types";
 import { resolveEmbedder } from "./embedder";
-import { SQLiteVectorStore } from "./vector-store";
+import { SEARCH_CONFIG, ORYNODE_DATA_URL, HTTP_TIMEOUT } from "../../config/defaults";
 import {
-  SEARCH_CONFIG,
-  ORYNODE_DATA_URL,
-  HTTP_TIMEOUT,
-} from "../../config/defaults";
+  extractSearchTerms,
+  keywordScore,
+  rrfFusion,
+} from "./retrieval/keyword";
+import { Fts5KeywordIndex } from "./adapters/keyword-fts5";
+import { BlobScanVectorIndex } from "./adapters/vector-blob-scan";
+import type { IndexCandidate, KeywordQuery } from "./ports/indexes";
 
 type ChunkRow = {
   id: string;
@@ -31,55 +32,24 @@ type ChunkRow = {
   position: number;
   content: string;
   source: "library" | "conversation_file";
+  score?: number;
+  revisionId?: string;
+  processingBuildId?: string;
 };
 
-function extractSearchTerms(query: string): string[] {
-  const normalized = query.toLocaleLowerCase().replace(/\s+/g, " ").trim();
-  const terms = new Set<string>();
-
-  for (const match of normalized.matchAll(/[a-z0-9_]{2,}/g)) {
-    terms.add(match[0]);
-  }
-  for (const match of normalized.matchAll(/[\p{Script=Han}]{2,}/gu)) {
-    const run = match[0];
-    for (let i = 0; i < run.length - 1; i += 1) {
-      terms.add(run.slice(i, i + 2));
-    }
-  }
-  for (const match of normalized.matchAll(/[\p{Script=Han}]{3,}/gu)) {
-    terms.add(match[0]);
-  }
-
-  return [...terms]
-    .filter((term) => term.length >= 2)
-    .slice(0, SEARCH_CONFIG.maxSearchTerms);
-}
-
-function keywordScore(chunkContent: string, terms: string[]): number {
-  const content = chunkContent.toLocaleLowerCase();
-  let score = 0;
-  for (const term of terms) {
-    let pos = content.indexOf(term);
-    while (pos !== -1) {
-      score += term.length;
-      pos = content.indexOf(term, pos + term.length);
-    }
-  }
-  return score;
-}
-
-/** RRF：按排名 rank（从 0 起）加权，而不是 chunk 下标 */
-function rrfFusion(
-  rankedIdLists: string[][],
-  k = 60,
-): Map<string, number> {
-  const scores = new Map<string, number>();
-  for (const ranked of rankedIdLists) {
-    ranked.forEach((id, rank) => {
-      scores.set(id, (scores.get(id) ?? 0) + 1 / (k + rank + 1));
-    });
-  }
-  return scores;
+function candidateToChunk(c: IndexCandidate): ChunkRow {
+  return {
+    id: c.chunkId,
+    documentId: c.documentId,
+    documentName: c.documentName ?? c.documentId,
+    pageNumber: c.pageNumber ?? 0,
+    position: c.position ?? 0,
+    content: c.content ?? "",
+    source: c.source ?? "library",
+    score: c.score,
+    revisionId: c.revisionId,
+    processingBuildId: c.processingBuildId,
+  };
 }
 
 function legacyToRetrievalScope(scope: KnowledgeScope): RetrievalScope {
@@ -188,42 +158,88 @@ function scopeHasSources(
   );
 }
 
+function scopeToKeywordOptions(
+  scope: Exclude<RetrievalScope, { mode: "none" }>,
+  topK: number,
+) {
+  const documentIds =
+    scope.library && typeof scope.library === "object"
+      ? scope.library.documentIds
+      : undefined;
+  return {
+    topK,
+    documentIds,
+    libraryMode:
+      scope.library === "all"
+        ? ("all" as const)
+        : documentIds
+          ? ("documents" as const)
+          : undefined,
+    conversationFiles: scope.conversationFiles,
+  };
+}
+
+export type HybridRetrieverOptions = {
+  keywordIndex?: Fts5KeywordIndex;
+  vectorIndex?: BlobScanVectorIndex;
+};
+
 export class HybridRetriever implements Retriever {
   private embedder: Embedder | null | undefined;
-  private readonly vectorStore: VectorStore;
+  private readonly keywordIndex: Fts5KeywordIndex;
+  private readonly vectorIndex: BlobScanVectorIndex;
 
   constructor(
     embedder?: Embedder | null,
-    vectorStore?: VectorStore,
+    options: HybridRetrieverOptions = {},
   ) {
     this.embedder = embedder;
-    this.vectorStore = vectorStore ?? new SQLiteVectorStore();
+    this.keywordIndex = options.keywordIndex ?? new Fts5KeywordIndex();
+    this.vectorIndex = options.vectorIndex ?? new BlobScanVectorIndex();
   }
 
   async retrieve(
     query: string,
     scope: RetrievalScope,
-    options: { topK?: number } = {},
+    options: {
+      topK?: number;
+      preferKeyword?: boolean;
+      keywordQuery?: KeywordQuery;
+    } = {},
   ): Promise<RetrievalResult> {
     if (scope.mode === "none" || !scopeHasSources(scope)) {
       return { chunks: [], strategy: "keyword" };
     }
 
     const topK = options.topK ?? SEARCH_CONFIG.topK;
+    const ftsQuery = options.keywordQuery ?? { text: query };
+    const fts = await this.searchFts(ftsQuery, scope, Math.max(topK * 3, 24));
+
+    if (!options.preferKeyword) {
+      const embedder = await this.getEmbedder();
+      if (embedder) {
+        try {
+          return await this.hybridSearch(query, scope, fts, embedder, topK);
+        } catch (error) {
+          console.warn("语义检索失败，降级到关键词匹配", error);
+        }
+      }
+    }
+
+    if (fts.available) {
+      return {
+        chunks: fts.chunks.slice(0, topK).map((chunk) => ({
+          ...chunk,
+          score: chunk.score ?? 0,
+        })),
+        strategy: "keyword",
+      };
+    }
+
     const chunks = await this.fetchChunks(scope);
     if (chunks.length === 0) {
       return { chunks: [], strategy: "keyword" };
     }
-
-    const embedder = await this.getEmbedder();
-    if (embedder) {
-      try {
-        return await this.hybridSearch(query, scope, chunks, embedder, topK);
-      } catch (error) {
-        console.warn("语义检索失败，降级到关键词匹配", error);
-      }
-    }
-
     return this.keywordSearch(query, chunks, topK);
   }
 
@@ -233,6 +249,25 @@ export class HybridRetriever implements Retriever {
     }
     this.embedder = await resolveEmbedder();
     return this.embedder;
+  }
+
+  private async searchFts(
+    query: string | KeywordQuery,
+    scope: Exclude<RetrievalScope, { mode: "none" }>,
+    topK: number,
+  ): Promise<{ available: boolean; chunks: ChunkRow[]; strategy?: string }> {
+    // 无 library 仅有会话附件时，不要传 library:all
+    const opts = scopeToKeywordOptions(scope, topK);
+    if (!scope.library && scope.conversationFiles) {
+      opts.libraryMode = undefined;
+      opts.documentIds = undefined;
+    }
+    const detailed = await this.keywordIndex.searchDetailed(query, opts);
+    return {
+      available: detailed.available,
+      chunks: detailed.candidates.map(candidateToChunk),
+      strategy: detailed.strategy,
+    };
   }
 
   private async fetchChunks(
@@ -271,6 +306,8 @@ export class HybridRetriever implements Retriever {
         position: number;
         content: string;
         source?: "library" | "conversation_file";
+        revisionId?: string;
+        processingBuildId?: string;
       }) => ({
         id: chunk.id,
         documentId: chunk.documentId,
@@ -279,6 +316,8 @@ export class HybridRetriever implements Retriever {
         position: chunk.position,
         content: chunk.content,
         source: chunk.source ?? "library",
+        revisionId: chunk.revisionId,
+        processingBuildId: chunk.processingBuildId,
       }),
     );
   }
@@ -309,37 +348,94 @@ export class HybridRetriever implements Retriever {
   private async hybridSearch(
     query: string,
     scope: Exclude<RetrievalScope, { mode: "none" }>,
-    chunks: ChunkRow[],
+    fts: { available: boolean; chunks: ChunkRow[]; strategy?: string },
     embedder: Embedder,
     topK: number,
   ): Promise<RetrievalResult> {
+    let keywordRanked: string[] = [];
+    let byId = new Map<string, ChunkRow>();
     const terms = extractSearchTerms(query);
-    const keywordRanked = [...chunks]
-      .map((chunk) => ({
-        id: chunk.id,
-        score: keywordScore(chunk.content, terms),
-      }))
-      .filter((item) => item.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .map((item) => item.id);
 
-    const queryVector = await embedder.embed(query);
-    const semanticResults = await this.vectorStore.search(queryVector, {
-      scope,
-      topK: topK * 2,
-    });
-    const semanticRanked = semanticResults.map((item) => item.chunk.id);
-
-    if (semanticRanked.length === 0) {
-      return this.keywordSearch(query, chunks, topK);
+    // 完整短语是最高等级的正文证据。已有 phrase 命中时不再混入向量近邻，
+    // 否则会把一个精确结果扩散成固定数量的语义噪声。
+    if (fts.strategy === "fts5_phrase" && fts.chunks.length > 0) {
+      return {
+        chunks: fts.chunks.slice(0, topK).map((chunk) => ({
+          ...chunk,
+          score: chunk.score ?? 0,
+        })),
+        strategy: "keyword",
+      };
     }
 
-    const lists =
-      keywordRanked.length > 0
-        ? [keywordRanked, semanticRanked]
-        : [semanticRanked];
+    if (fts.available) {
+      keywordRanked = fts.chunks.map((chunk) => chunk.id);
+      byId = new Map(fts.chunks.map((chunk) => [chunk.id, chunk]));
+    } else {
+      const chunks = await this.fetchChunks(scope);
+      keywordRanked = [...chunks]
+        .map((chunk) => ({
+          id: chunk.id,
+          score: keywordScore(chunk.content, terms),
+        }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .map((item) => item.id);
+      byId = new Map(chunks.map((chunk) => [chunk.id, chunk]));
+    }
+
+    const queryVector = await embedder.embed(query);
+    const semanticResults = await this.vectorIndex.search(queryVector, {
+      topK: topK * 2,
+      scope,
+    });
+    for (const item of semanticResults) {
+      if (!byId.has(item.chunkId)) {
+        byId.set(item.chunkId, candidateToChunk(item));
+      }
+    }
+
+    // 关键词 0 命中：只接受正文向量本身足够强的候选。
+    // documentName/displayName 只是展示元数据，不参与召回，也不提供阈值豁免。
+    if (keywordRanked.length === 0) {
+      const strongVector = semanticResults.filter(
+        (item) => item.score >= SEARCH_CONFIG.minVectorCosineSolo,
+      );
+      if (strongVector.length === 0) {
+        return { chunks: [], strategy: "hybrid" };
+      }
+
+      // 这里只有一条排名列表，无需 RRF；保留真实余弦分数供诊断/UI 展示。
+      const merged: RetrievalHit[] = strongVector
+        .map((candidate) => {
+          const chunk = byId.get(candidate.chunkId);
+          if (!chunk) return null;
+          return { ...chunk, score: candidate.score };
+        })
+        .filter((item): item is RetrievalHit => item !== null)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, topK);
+
+      return { chunks: merged, strategy: "hybrid" };
+    }
+
+    const semanticRanked = semanticResults.map((item) => item.chunkId);
+
+    if (semanticRanked.length === 0) {
+      if (fts.available) {
+        return {
+          chunks: fts.chunks.slice(0, topK).map((chunk) => ({
+            ...chunk,
+            score: chunk.score ?? 0,
+          })),
+          strategy: "keyword",
+        };
+      }
+      return this.keywordSearch(query, [...byId.values()], topK);
+    }
+
+    const lists = [keywordRanked, semanticRanked];
     const fused = rrfFusion(lists);
-    const byId = new Map(chunks.map((chunk) => [chunk.id, chunk]));
 
     const merged: RetrievalHit[] = [...fused.entries()]
       .map(([id, score]) => {

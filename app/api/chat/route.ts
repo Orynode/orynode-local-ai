@@ -1,7 +1,8 @@
 /**
- * /api/chat — 知识检索唯一走 HybridRetriever；推理唯一走 inferenceService
+ * /api/chat — 知识能力只经 KnowledgeEngine；推理经 ModelRuntime port
  */
 
+import { randomUUID } from "node:crypto";
 import {
   EXPECTED_MODEL_ID,
   HTTP_TIMEOUT,
@@ -10,14 +11,26 @@ import {
 } from "../../../config/defaults";
 import {
   buildSystemPrompt,
-  buildKnowledgePrompt,
+  extractReferencedCitationIds,
 } from "../../../services/chat/prompt";
-import { trimChatHistory } from "../../../services/chat/context";
+import { wrapChatStreamWithMetadata } from "../../../services/chat/sse";
 import {
-  HybridRetriever,
-  normalizeRetrievalScope,
+  estimateTokens,
+  resolveContextBudget,
+  trimChatHistoryToTokenBudget,
+} from "../../../services/chat/context";
+import {
+  buildChatKnowledgeContext,
+  createKnowledgeEngine,
 } from "../../../services/knowledge";
-import { inferenceService } from "../../../services/inference/turbo-fieldfare";
+import {
+  markChatResourceActive,
+  markChatResourceIdle,
+} from "../../../services/knowledge/resource";
+import {
+  createRuntimeServices,
+  requireLanAccess,
+} from "../../../services/platform";
 import type { ChatMessage } from "../../../services/types";
 
 function clampNumber(
@@ -33,6 +46,14 @@ function clampNumber(
 
 export async function POST(request: Request) {
   try {
+    const access = requireLanAccess(request);
+    if (!access.ok) {
+      return Response.json(
+        { error: access.error, code: access.code },
+        { status: access.status },
+      );
+    }
+
     const body = await request.json();
     if (!Array.isArray(body.messages) || body.messages.length === 0) {
       return Response.json({ error: "消息不能为空" }, { status: 400 });
@@ -53,70 +74,58 @@ export async function POST(request: Request) {
       ),
     );
 
-    let knowledgePrompt = "";
     const conversationId =
       typeof body.conversationId === "string" && body.conversationId.trim()
         ? body.conversationId.trim()
         : null;
-    let scope = normalizeRetrievalScope(body);
-    // 会话附件必须绑定 conversationId；用请求顶层 id 收紧归属，禁止跨会话 fileId
-    const incomingFileIds = Array.isArray(
-      body?.retrievalScope?.conversationFiles?.fileIds,
-    )
-      ? body.retrievalScope.conversationFiles.fileIds.filter(
-          (id: unknown): id is string => typeof id === "string" && Boolean(id),
-        )
-      : scope.mode === "sources" && scope.conversationFiles
-        ? scope.conversationFiles.fileIds
-        : [];
-    if (conversationId && incomingFileIds.length > 0) {
-      const library = scope.mode === "sources" ? scope.library : undefined;
-      scope = {
-        mode: "sources",
-        ...(library ? { library } : {}),
-        conversationFiles: { conversationId, fileIds: incomingFileIds },
-      };
-    } else if (scope.mode === "sources" && scope.conversationFiles) {
-      scope = scope.library
-        ? { mode: "sources", library: scope.library }
-        : { mode: "none" };
-    }
-    if (scope.mode !== "none") {
-      try {
-        const lastUserMessage = [...body.messages]
-          .reverse()
-          .find((message: { role: string }) => message?.role === "user");
-        const query = lastUserMessage?.content ?? "";
-        if (query) {
-          const result = await new HybridRetriever().retrieve(query, scope, {
-            topK: SEARCH_CONFIG.topK,
-          });
-          if (result.chunks.length > 0) {
-            knowledgePrompt = buildKnowledgePrompt(
-              result.chunks.map((chunk) => ({
-                documentName: chunk.documentName,
-                pageNumber: chunk.pageNumber,
-                content: chunk.content,
-                source: chunk.source,
-              })),
-            );
-          }
-        }
-      } catch {
-        // 选了资料却检索失败：诚实告知模型，勿假装已引用资料
-        knowledgePrompt =
-          "\n\n（系统：用户已选择本地资料，但本轮检索失败。请正常回答，并说明未能引用所选资料。）\n";
-      }
+
+    const engine = createKnowledgeEngine();
+    let knowledgeTier =
+      body.knowledgeTier === "auto" ||
+      body.knowledgeTier === "balanced" ||
+      body.knowledgeTier === "quality" ||
+      body.knowledgeTier === "lite"
+        ? body.knowledgeTier
+        : undefined;
+    if (!knowledgeTier) {
+      const { readKnowledgeTierSetting } = await import(
+        "../../../services/knowledge/application/capabilities"
+      );
+      knowledgeTier = await readKnowledgeTierSetting();
     }
 
-    const systemContent = buildSystemPrompt(knowledgePrompt);
     const history = (body.messages as ChatMessage[]).map((message) => ({
       role: message.role,
       content: String(message.content ?? ""),
     }));
-    const trimmedHistory = trimChatHistory(systemContent, history, maxContext, {
-      maxTokens,
+    const systemBase = buildSystemPrompt("");
+    const outputReserve =
+      maxTokens > 0
+        ? Math.min(maxTokens, Math.floor(maxContext * 0.4))
+        : Math.max(512, Math.floor(maxContext * 0.15));
+    const budget = resolveContextBudget({
+      modelContextTokens: maxContext,
+      systemBaseTokens: estimateTokens(systemBase) + 8,
+      outputReserveTokens: outputReserve,
     });
+    const trimmedHistory = trimChatHistoryToTokenBudget(
+      history,
+      budget.historyBudgetTokens,
+    );
+
+    const { knowledgePrompt, retrieval, context } =
+      await buildChatKnowledgeContext(engine, {
+        messages: body.messages,
+        retrievalScope: body.retrievalScope,
+        knowledgeScope: body.knowledgeScope,
+        knowledgeDocumentId: body.knowledgeDocumentId,
+        conversationId,
+        topK: SEARCH_CONFIG.topK,
+        knowledgeTier,
+        knowledgeBudgetTokens: budget.knowledgeBudgetTokens,
+      });
+
+    const systemContent = buildSystemPrompt(knowledgePrompt);
 
     const messages: ChatMessage[] = [
       { role: "system", content: systemContent },
@@ -134,13 +143,51 @@ export async function POST(request: Request) {
           ? request.signal
           : AbortSignal.timeout(HTTP_TIMEOUT.chat);
 
-    const stream = await inferenceService.chatCompletions(messages, {
-      temperature,
-      topP,
-      topK,
-      maxTokens,
-      signal,
-    });
+    await markChatResourceActive(HTTP_TIMEOUT.chat);
+
+    const runtime = createRuntimeServices();
+    let upstream: ReadableStream<Uint8Array>;
+    try {
+      upstream = await runtime.model.chat(messages, {
+        temperature,
+        topP,
+        topK,
+        maxTokens,
+        signal,
+      });
+    } catch (error) {
+      await markChatResourceIdle();
+      throw error;
+    }
+
+    const providedCitations = context?.citations ?? [];
+    const retrievalTraceId = randomUUID();
+    const stream = wrapChatStreamWithMetadata(
+      upstream,
+      {
+        type: "metadata",
+        providedCitations,
+        retrievalTraceId,
+        diagnostics: retrieval?.diagnostics ?? null,
+        capabilities: {
+          approximateTokens: context?.approximateTokens !== false,
+          knowledgeBudgetTokens: budget.knowledgeBudgetTokens,
+          sseVersion: 1,
+        },
+      },
+      {
+        onComplete: (fullText) => ({
+          type: "done",
+          referencedCitationIds: extractReferencedCitationIds(
+            fullText,
+            providedCitations.map((item) => item.id),
+          ),
+        }),
+        onFinally: () => {
+          void markChatResourceIdle();
+        },
+      },
+    );
 
     return new Response(stream, {
       headers: {

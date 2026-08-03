@@ -45,3 +45,7 @@ next-env.d.ts
 # local AI runtime and model weights
 /.orynode/
 tsconfig.tsbuildinfo
+
+# native helpers (track Sources + Package.swift; ignore SPM build output)
+native/**/.build/
+native/**/.swiftpm/

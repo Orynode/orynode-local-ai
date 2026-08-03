@@ -4,6 +4,8 @@
 
 本文档详细描述 Orynode Local AI 的**服务架构、数据流、模块分层、扩展接口**以及**知识库/RAG 系统**设计。
 
+本文以**当前实现**为准。面向 Chat、Agent、多数据源与可版本化索引的长期目标设计，请参阅 [AI Knowledge Engine 长期架构](knowledge-engine/KNOWLEDGE_ENGINE_ARCHITECTURE_zh-CN.md)；当前代码与目标架构的差距、整改顺序及验收标准见 [架构符合性审计与整改实施计划](knowledge-engine/KNOWLEDGE_ENGINE_IMPLEMENTATION_PLAN_zh-CN.md)。Knowledge Engine 文档目录见 [knowledge-engine/](knowledge-engine/README.md)。
+
 面向：想要理解内部实现、复用模块或扩展功能的开发者。
 
 ---
@@ -14,6 +16,7 @@
 - [服务分层](#服务分层)
 - [数据流](#数据流)
 - [目录结构](#目录结构)
+- [模型与技术](#模型与技术)
 - [知识库 / RAG 系统](#知识库--rag-系统)
   - [解析 (Parser)](#1-解析-parser)
   - [分块 (Chunker)](#2-分块-chunker)
@@ -27,6 +30,7 @@
 - [配置管理](#配置管理)
 - [低配 Mac 的内存策略](#低配-mac-的内存策略)
 - [本地数据服务 API](#本地数据服务-api)
+- [Windows 兼容预留](#windows-兼容预留)
 
 ---
 
@@ -48,38 +52,38 @@
                        ▼
 ┌──────────────────────────────────────────────────────────┐
 │             Next.js API 路由 (app/api/)                    │
-│  /api/chat   /api/conversations   /api/knowledge          │
-│  /api/status   /api/settings                              │
+│  /api/chat  /api/conversations  /api/knowledge(/v1)       │
+│  /api/status  /api/settings  /api/lan                     │
 │                                                           │
-│  对接 services/ 层进行业务逻辑处理                           │
+│  → services/platform (ModelRuntime)                       │
+│  → services/knowledge (KnowledgeEngine / ingest / OCR)    │
 └──────────┬──────────────────────┬────────────────────────┘
            │                      │
-    ① 推理请求               ② 数据请求
+    ① ModelRuntime.chat      ② Data Service / Jobs
            │                      │
            ▼                      ▼
 ┌──────────────────┐   ┌──────────────────────────────────┐
 │ TurboFieldfare   │   │  Orynode 本地数据服务 (:4318)      │
-│ (:8080/v1)       │   │  scripts/local-data-service.mjs  │
-│                  │   │                                  │
-│ Swift + Metal    │   │  SQLite + 纯 HTTP 薄层            │
-│ Gemma 4 26B      │   │  · 对话 CRUD                     │
-│ ~2GB 内存        │   │  · 资料原件存储（PDF/TXT/MD）    │
-│                  │   │  · 文本 chunks 存储               │
-│  接口:           │   │  · 向量 embedding 存储 (BLOB)     │
-│  POST /chat/     │   │  · 文档状态（ready/indexed/...）  │
-│  completions     │   │  · 设置读写                      │
-│  GET /models     │   │                                  │
-│  GET /health     │   │  仅监听 127.0.0.1                 │
-│                  │   │  不做解析/分块/检索业务逻辑         │
-│  仅监听 127.0.0.1│   │                                  │
+│ (:8080/v1)       │   │  SQLite + FTS5 + Jobs + 可选 ONNX │
+│ Swift + Metal    │   │  · 对话 / 资料 / chunks / vectors │
+│ Gemma 4 26B      │   │  · process_revision / embed       │
+│                  │   │  · LAN pairing store              │
+│ 仅 127.0.0.1     │   │  仅 127.0.0.1                     │
 └──────────────────┘   └──────────────────────────────────┘
+         ▲
+         │ macOS OCR helper（可选）
+┌──────────────────┐
+│ orynode-ocr      │  Apple Vision → DocumentBlock
+│ .orynode/bin/    │
+└──────────────────┘
 ```
 
 **安全设计原则**：
 
-- 只有 Web 入口 (:3000) 监听 `0.0.0.0`，支持局域网共享
-- TurboFieldfare (:8080) 和数据服务 (:4318) 始终绑定 `127.0.0.1`
-- 局域网设备通过浏览器使用本机 AI，但无法直接访问推理服务和数据库
+- 只有 Web 入口 (:3000) 可按模式绑局域网；TurboFieldfare (:8080) 和数据服务 (:4318) 始终 `127.0.0.1`
+- Chat / Status 经 `ModelRuntime`；TurboFieldfare 仅存在于 **macOS adapter**
+- Trusted-LAN：配对码 + 可撤销 session；配对管理走 loopback Data Service
+- Knowledge Engine **不写 OS 分支**；Windows 通过 stub adapter 预留
 
 ---
 
@@ -96,9 +100,10 @@ API 网关层 (Gateway)
      ↓
 业务服务层 (Services)
   services/
-  ├── chat/        - System prompt、对话上下文管理
-  ├── inference/   - 推理后端适配器（TurboFieldfare 可替换）
-  ├── knowledge/   - PDF解析、分块、向量化、检索（唯一智能）
+  ├── chat/        - Prompt、SSE、上下文预算
+  ├── platform/   - Host / ModelRuntime / LAN 认证 / composition root
+  ├── knowledge/   - 解析、分块、向量化、检索（唯一智能）
+  ├── agent/       - 受控知识工具与 Agent space
   └── settings/    - 运行时设置读写
      ↓
 数据持久层 (Persistence)
@@ -114,7 +119,7 @@ API 网关层 (Gateway)
 2. **服务层是唯一智能**：解析 / 分块 / Embedder / Retriever 只存在于 `services/knowledge`
 3. **Embedder 可缺省**：默认无向量模型；Keyword 是 Retriever 策略，不是假 Embedder
 4. **检索唯一入口**：`HybridRetriever.retrieve(query, scope)`；chat 不得旁路查库
-5. **不做 sqlite-vec 硬依赖**：向量以 BLOB 存 SQLite，JS 余弦即可；规模不够再考虑 ANN
+5. **不做 sqlite-vec 硬依赖 / 默认路径**：向量以 BLOB 存 SQLite，JS 余弦扫描即可；**仅当资料量很大、评测证明扫描成为瓶颈时**再考虑 ANN（如 sqlite-vec adapter），不作开箱默认
 6. **双命名空间**：会话附件（`conversation_files`）与持久资料库（`knowledge_documents`）分表分目录；共享 `ingestDocument`，禁止上传时隐式串库
 
 ---
@@ -225,10 +230,9 @@ orynode-local-ai/
 │
 ├── services/                         # 核心业务逻辑 (纯 TypeScript)
 │   ├── types.ts                      #   全局共享类型
-│   ├── chat/prompt.ts                #   System prompt
-│   ├── inference/                    #   推理（chat/status 共用）
-│   │   ├── types.ts                  #     InferenceService 接口
-│   │   └── turbo-fieldfare.ts        #     TurboFieldfare 适配器
+│   ├── chat/                         #   Prompt / Context / SSE
+│   ├── platform/                     #   Host / ModelRuntime / LAN 认证 / composition root
+│   ├── agent/                        #   受控知识工具与 Agent space
 │   ├── knowledge/                    #   知识库（唯一智能层）
 │   │   ├── types.ts                  #     Embedder/VectorStore/Retriever
 │   │   ├── parser.ts / chunker.ts
@@ -255,35 +259,63 @@ orynode-local-ai/
 │
 ├── .env.example
 ├── package.json
-└── docs/ARCHITECTURE_zh-CN.md
+└── docs/
+    ├── ARCHITECTURE_zh-CN.md
+    └── knowledge-engine/             # KE 设计 / 标准 / 实施（见 README）
 ```
 
 ---
 
+## 模型与技术
+
+| 类别 | 技术 | 角色 |
+|------|------|------|
+| 对话 LLM | Gemma 4 26B A4B IT（4-bit） | 本机生成 |
+| 推理运行时 | TurboFieldfare（Swift/Metal，OpenAI 兼容 `:8080/v1`） | 仅 macOS ModelRuntime adapter |
+| 默认检索 | SQLite FTS5 + 中文 bigram / search_text | 开箱关键词 |
+| 可选向量后端 | **blob_scan**（生产固定） | sqlite-vec 仅占位；**大量数据且评测证明瓶颈时**再评估 |
+| 可选 Embedding | multilingual-e5-small（384 维，默认推荐） | 语义召回；`@xenova/transformers` ONNX |
+| Embedding 兼容 | bge-small-zh-v1.5（512 维） | 旧索引 / 对照；勿与 E5 混用 |
+| Embedding 实验 | bge-m3（1024 维） | 非默认 |
+| OCR（生产） | Apple Vision via `orynode-ocr` | 扫描 PDF → DocumentBlock |
+| OCR（预留） | PP-OCR mobile + ONNX artifact 元数据 | Windows stub，`OCR_UNAVAILABLE` |
+| PDF 文本 | pdfjs-dist | 原生文本页 |
+| 融合策略 | RRF、lexical rerank（Quality 档） | Lite / Balanced / Quality / Auto |
+| 存储 / 任务 | SQLite + Job Worker | Data Service `:4318` |
+| 前端 | Next.js + React + vinext | `/api` 网关 |
+
+登记与切换规则见 `config/embedding-artifacts.ts`；发布清单见根目录 [CHANGELOG 1.1.0](../CHANGELOG.md)。
+
 ## 知识库 / RAG 系统
 
+> **1.1.0**：RAG 主链路已升级为 Knowledge Engine（Phase 0～3 首批）。工作台走 **Search**；Chat 走 **Retrieve + buildContext**；共用唯一 `HybridRetriever`。完成度与未闭环项见 [knowledge-engine/](knowledge-engine/README.md)。
+
 ```
-上传 PDF / TXT / MD
-  → parser → chunker →（分配 chunk id）
-  → data-service 存原件 + chunks
-  →（可选）Embedder → vector-store(BLOB)
-对话
-  → Retriever(scope) → keyword 和/或 hybrid → LLM
+上传 PDF / TXT / MD（或 Web/GitHub Connector）
+  → ingest（detect → 可选 OCR process_revision → parse → chunk）
+  → ProcessingBuild activate → data-service 存原件 / chunks / blocks
+  →（可选）embed Job → vector_entries
+对话 / 工作台
+  → KnowledgeEngine.retrieve|search(scope, tier)
+  → HybridRetriever（FTS 和/或 vector + RRF）
+  → Context packing + Citations → LLM（Chat）或预览 UI（Search）
 ```
 
 | 模块 | 职责 |
 |------|------|
-| `formats` / `parser` | 识别种类；PDF / TXT / MD → 统一文本页 |
-| `chunker` | 唯一分块 |
-| `embedder` | 可选语义向量；`resolveEmbedder()` 可能返回 `null` |
-| `indexer` | 入库后异步写向量并更新 status |
-| `vector-store` | insert + search（BLOB + JS 余弦）；删除靠 SQLite CASCADE |
-| `retriever` | **唯一检索入口**；scope = RetrievalScope（library + conversationFiles） |
+| `application/engine` | KnowledgeEngine：search / retrieve / buildContext |
+| `ingest` / `processing/*` | 摄取；PDF OCR 路由；ProcessingBuild |
+| `formats` / `parser` / `chunker` | 种类识别、解析、分块 |
+| `retrieval/*` + `retriever` | FTS / hybrid / planner / tier / diagnostics |
+| `embedder` + `vector-store` | 可选语义；BLOB / vector_entries |
+| `connectors/*` | Web / GitHub + SSRF |
+| `context/*` | token packing、citation 定位 |
 
 ### Embedder（诚实模型）
 
-- **默认**：无 Embedder，检索 = keyword（开箱零额外依赖）
-- **可选**：`.env.local` 设 `ORYNODE_SEMANTIC_SEARCH=1` 并重启 → data-service 加载 ONNX `bge-small-zh-v1.5`（`@xenova/transformers` 已在 package.json）
+- **默认**：无 Embedder，检索 = FTS 关键词（开箱零额外 RAM）
+- **可选**：`ORYNODE_SEMANTIC_SEARCH=1` → data-service 加载 ONNX（默认 **`multilingual-e5-small`**，384 维）
+- **兼容基线**：`bge-small-zh-v1.5`（512 维）；**实验**：`bge-m3`；切换须重建 IndexBuild，禁止混用
 - **禁止**：把 keyword 伪装成 Embedder
 
 ### Scope
@@ -310,8 +342,9 @@ type MessageAttachment =
 
 ### 向量存储
 
-- SQLite `knowledge_chunks.embedding BLOB` + 文档级 `embedding_model` / `embedding_dim`
-- **不加 sqlite-vec** 作为必装依赖；个人规模 JS 扫描足够
+- SQLite `knowledge_chunks.embedding BLOB` / `vector_entries` + 文档级 `embedding_model` / `embedding_dim`
+- **生产向量后端固定 `blob_scan`**（JS 余弦）；**不加 sqlite-vec 必装依赖，也不作默认**
+- **sqlite-vec**：仅 `VectorIndex` port 占位；**资料量很大且基准/评测证明 BLOB 扫描成为 P95/内存瓶颈时**再评估接入
 - status：`awaiting_chunks` → `ready` → `embedding` → `indexed`（或 `error`）
 - `embedding` 超过约 20 分钟未结束：列表时自动降为 `error`（可重建索引；keyword 仍可用）
 
@@ -367,11 +400,11 @@ const chunks = chunker.chunkDocument(doc.pages);
 
 ### 3. 向量化 (Embedder)
 
-**文件**: `services/knowledge/embedder.ts`
+**文件**: `services/knowledge/embedder.ts`、`config/embedding-artifacts.ts`
 
 - `resolveEmbedder()`：未开启或不满足依赖时返回 `null`
-- 开启方式：`.env.local` 中 `ORYNODE_SEMANTIC_SEARCH=1`（包已依赖 `@xenova/transformers`）
-- 模型：`Xenova/bge-small-zh-v1.5`（512 维；由本地 data-service 计算，因 vinext Workers 无法直接加载 ONNX）
+- 开启：`ORYNODE_SEMANTIC_SEARCH=1`；artifact 由 `ORYNODE_EMBEDDING_ARTIFACT` 选择（默认 `multilingual-e5-small`）
+- 由本地 data-service 计算（vinext Workers 无法直接加载 ONNX）
 - Keyword **不是** Embedder
 
 ### 4. 向量存储 (VectorStore)
@@ -379,7 +412,7 @@ const chunks = chunker.chunkDocument(doc.pages);
 **文件**: `services/knowledge/vector-store.ts`
 
 - SQLite BLOB + JS 余弦；`search` 接受 `RetrievalScope`（双命名空间）
-- 不加 sqlite-vec 必装依赖
+- 生产固定 `blob_scan`；不加 sqlite-vec 必装/默认依赖（大量数据瓶颈时再评估）
 
 ### 5. 检索 (Retriever)
 
@@ -471,29 +504,17 @@ const retriever = new HybridRetriever(await resolveEmbedder(), new QdrantVectorS
 
 ### 替换推理后端
 
-`services/inference/` 提供了 `InferenceService` 接口：
+推理通过 `services/platform` 的 `ModelRuntime` port 接入（`createRuntimeServices()`），Chat / Status 不得直接依赖具体后端：
 
 ```typescript
-interface InferenceService {
-  chatCompletions(messages, options): Promise<ReadableStream>;
-  listModels(): Promise<string[]>;
+interface ModelRuntime {
+  chat(messages, options): Promise<ReadableStream<Uint8Array>>;
+  listModels(): Promise<ModelInfo[]>;
+  health(): Promise<RuntimeHealth>;
 }
 ```
 
-要接入 Ollama、vLLM 或其他后端：
-
-```typescript
-// services/inference/ollama.ts
-class OllamaService implements InferenceService {
-  async chatCompletions(messages, options) {
-    const res = await fetch("http://localhost:11434/v1/chat/completions", { ... });
-    return res.body;
-  }
-}
-
-// 在 API 路由中使用
-const inference = new OllamaService();
-```
+要接入 Ollama、vLLM 或其他后端：在对应 Host Profile 下新增 adapter，并在 `composition-root.ts` 装配；不要恢复已删除的 `services/inference` 直连路径。
 
 ---
 
@@ -551,7 +572,7 @@ ORYNODE_SEMANTIC_SEARCH=1                        # 可选语义向量；包已�
 |------|------|
 | **零额外开销（默认）** | 无 Embedder，仅 keyword |
 | **按需加载** | 开启语义后才加载 ONNX；失败回退 keyword |
-| **不加 sqlite-vec** | 避免原生扩展成为开源安装负担 |
+| **不加 sqlite-vec 默认** | 避免原生扩展成为开源安装负担；个人/中小规模 `blob_scan` 足够，**大量数据瓶颈时再评估** |
 
 ---
 
@@ -658,3 +679,17 @@ CREATE TABLE conversation_file_chunks (
 - `PRAGMA journal_mode = WAL` — 提高并发读写性能
 - `PRAGMA foreign_keys = ON` — 保证数据完整性
 - `PRAGMA busy_timeout = 5000` — 避免并发锁冲突
+
+---
+
+## Windows 兼容预留
+
+当前**完整体验仅 Apple Silicon Mac**。跨平台边界在 `services/platform`：
+
+- **ModelRuntime**：Windows stub 返回诚实 `CAPABILITY_UNAVAILABLE`；Chat/SSE 契约不绑定 TurboFieldfare
+- **OCR**：同一 `OcrEngine` 契约；Windows 为 `OCR_UNAVAILABLE` + PP-OCR/ONNX artifact 元数据（KE-034，本版不跑推理）
+- **Knowledge Engine**：无 `if (windows)` 业务分支；未来换 adapter 即可
+- **路径 / 导出**：相对路径与跨平台 fixture，避免 Mac 绝对路径假设
+
+详见 [实施计划 §16.10](knowledge-engine/KNOWLEDGE_ENGINE_IMPLEMENTATION_PLAN_zh-CN.md) 与 [CHANGELOG Windows 节](../CHANGELOG.md#110--2026-08-03)。
+

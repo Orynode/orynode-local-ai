@@ -8,13 +8,42 @@ import {
   existsSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
+import { migrateDatabase } from "./data-service/migrations/index.mjs";
+import {
+  deleteFtsForDocument,
+  searchKeywordIndex,
+  upsertFtsChunks,
+} from "./data-service/fts-index.mjs";
+import { createJobRepository } from "./data-service/jobs.mjs";
+import {
+  CHUNK_STRATEGY_VERSION,
+  createIndexBuildStore,
+} from "./data-service/index-builds.mjs";
+import { createResourceCoordinator } from "./data-service/resource-coordinator.mjs";
+import { startIndexWorker } from "./data-service/worker.mjs";
+import { createSourcesRepository } from "./data-service/sources.mjs";
+import { createVectorEntryStore } from "./data-service/vector-entries.mjs";
+import { createStorageStagingStore } from "./data-service/storage-staging.mjs";
+import { createAgentSpaceStore } from "./data-service/agent-spaces.mjs";
+import { createLanAuthStore } from "./data-service/lan-auth-store.mjs";
+import { createProcessingBuildStore } from "./data-service/processing-builds.mjs";
+import { createDocumentBlockStore } from "./data-service/document-blocks.mjs";
+import {
+  EMBEDDING_CONFIG,
+  applyEmbeddingTemplate,
+  embeddingConfigFingerprint,
+  getActiveEmbeddingArtifact,
+} from "./data-service/embed-config.mjs";
+import { exportKnowledgePackage } from "./data-service/export-package.mjs";
 
 // Knowledge parsing/chunking/retrieval orchestration live in services/knowledge.
 // This process stores files/SQLite/BLOBs. Optional ONNX embedding also runs here
 // (real Node), because vinext API Workers cannot load @xenova/transformers.
 // Dual namespace: knowledge_documents (library) + conversation_files (chat attachments).
+// Web/GitHub connectors (jsdom/octokit) also run here — Workers cannot require() CJS.
 
 const projectRoot = resolve(new URL("..", import.meta.url).pathname);
 const databasePath =
@@ -35,6 +64,17 @@ const allowedOrigins = new Set([
   "http://localhost:3001",
   "http://127.0.0.1:3001",
 ]);
+
+/** 本机浏览器任意端口（vinext 可能不用 3000） */
+function isLoopbackOrigin(origin) {
+  if (!origin) return false;
+  try {
+    const hostname = new URL(origin).hostname.toLowerCase();
+    return hostname === "127.0.0.1" || hostname === "localhost";
+  } catch {
+    return false;
+  }
+}
 
 function loadRuntimeDefaults() {
   try {
@@ -58,6 +98,13 @@ const DEFAULT_RUNTIME_SETTINGS = {
   topK: runtimeDefaults.topK,
   maxContext: runtimeDefaults.maxContext,
   maxTokens: runtimeDefaults.maxTokens,
+  knowledgeTier: runtimeDefaults.knowledgeTier === "auto" ||
+    runtimeDefaults.knowledgeTier === "balanced" ||
+    runtimeDefaults.knowledgeTier === "quality" ||
+    runtimeDefaults.knowledgeTier === "lite"
+    ? runtimeDefaults.knowledgeTier
+    : "auto",
+  ocrMode: runtimeDefaults.ocrMode === "disabled" ? "disabled" : "auto",
 };
 const ALLOWED_MAX_CONTEXT = new Set(runtimeDefaults.allowedMaxContext ?? []);
 
@@ -69,138 +116,402 @@ const database = new DatabaseSync(databasePath);
 database.exec("PRAGMA journal_mode = WAL");
 database.exec("PRAGMA foreign_keys = ON");
 database.exec("PRAGMA busy_timeout = 5000");
-database.exec(`
-  CREATE TABLE IF NOT EXISTS conversations (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
+migrateDatabase(database);
 
-  CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    conversation_id TEXT NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
-    content TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    position INTEGER NOT NULL,
-    duration_ms INTEGER,
-    attachments TEXT,
-    FOREIGN KEY (conversation_id)
-      REFERENCES conversations(id)
-      ON DELETE CASCADE
-  );
+const jobRepository = createJobRepository(database);
+const indexBuildStore = createIndexBuildStore(database);
+const vectorEntryStore = createVectorEntryStore(database);
+const resourceCoordinator = createResourceCoordinator();
+const sourcesRepository = createSourcesRepository(database);
+const agentSpaceStore = createAgentSpaceStore(database);
+const lanAuthStore = createLanAuthStore({ projectRoot });
+const processingBuildStore = createProcessingBuildStore(database);
+const documentBlockStore = createDocumentBlockStore(database);
+const storageStaging = createStorageStagingStore(database);
+storageStaging.reconcileOnStartup({
+  knowledgeFilesPath,
+  attachmentFilesPath: attachmentsRootPath,
+  log: console,
+});
 
-  CREATE INDEX IF NOT EXISTS idx_conversations_updated
-    ON conversations(updated_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_messages_conversation
-    ON messages(conversation_id, position);
-
-  CREATE TABLE IF NOT EXISTS knowledge_documents (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    original_name TEXT,
-    content_hash TEXT,
-    stored_path TEXT NOT NULL,
-    size INTEGER NOT NULL,
-    page_count INTEGER NOT NULL,
-    chunk_count INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'ready',
-    embedding_model TEXT,
-    embedding_dim INTEGER,
-    error_message TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS knowledge_chunks (
-    id TEXT PRIMARY KEY,
-    document_id TEXT NOT NULL,
-    page_number INTEGER NOT NULL,
-    position INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    embedding BLOB,
-    FOREIGN KEY (document_id)
-      REFERENCES knowledge_documents(id)
-      ON DELETE CASCADE
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_document
-    ON knowledge_chunks(document_id, page_number, position);
-
-  CREATE TABLE IF NOT EXISTS conversation_files (
-    id TEXT PRIMARY KEY,
-    conversation_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    stored_path TEXT NOT NULL,
-    size INTEGER NOT NULL,
-    page_count INTEGER NOT NULL,
-    chunk_count INTEGER NOT NULL,
-    created_at TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'ready',
-    embedding_model TEXT,
-    embedding_dim INTEGER,
-    error_message TEXT,
-    status_updated_at TEXT,
-    FOREIGN KEY (conversation_id)
-      REFERENCES conversations(id)
-      ON DELETE CASCADE
-  );
-
-  CREATE TABLE IF NOT EXISTS conversation_file_chunks (
-    id TEXT PRIMARY KEY,
-    file_id TEXT NOT NULL,
-    page_number INTEGER NOT NULL,
-    position INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    embedding BLOB,
-    FOREIGN KEY (file_id)
-      REFERENCES conversation_files(id)
-      ON DELETE CASCADE
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_conversation_files_conversation
-    ON conversation_files(conversation_id, created_at DESC);
-  CREATE INDEX IF NOT EXISTS idx_conversation_file_chunks_file
-    ON conversation_file_chunks(file_id, page_number, position);
-`);
-
-try {
-  database.exec("ALTER TABLE messages ADD COLUMN duration_ms INTEGER");
-} catch {
-  // Column already exists on upgraded local databases.
+/** Lazy-load TS connectors via tsx (jsdom/octokit stay out of vinext Workers). */
+let syncModulePromise = null;
+async function loadSyncModule() {
+  if (!syncModulePromise) {
+    const { register } = await import("tsx/esm/api");
+    register();
+    syncModulePromise = import(
+      pathToFileURL(
+        resolve(projectRoot, "services/knowledge/application/sync-source.ts"),
+      ).href,
+    );
+  }
+  return syncModulePromise;
 }
 
-try {
-  database.exec("ALTER TABLE messages ADD COLUMN attachments TEXT");
-} catch {
-  // Column already exists on upgraded local databases.
+async function runSyncSourceJob(payload) {
+  const sync = await loadSyncModule();
+  if (payload?.create?.type === "web") {
+    return sync.createAndSyncWebSource(payload.create);
+  }
+  if (payload?.create?.type === "github") {
+    return sync.createAndSyncGitHubSource(payload.create);
+  }
+  if (typeof payload?.sourceId === "string") {
+    return sync.syncSource(payload.sourceId, payload.config);
+  }
+  throw new Error("sync_source payload 无效");
 }
 
-for (const statement of [
-  "ALTER TABLE knowledge_chunks ADD COLUMN embedding BLOB",
-  "ALTER TABLE knowledge_documents ADD COLUMN status TEXT NOT NULL DEFAULT 'ready'",
-  "ALTER TABLE knowledge_documents ADD COLUMN embedding_model TEXT",
-  "ALTER TABLE knowledge_documents ADD COLUMN embedding_dim INTEGER",
-  "ALTER TABLE knowledge_documents ADD COLUMN error_message TEXT",
-  "ALTER TABLE knowledge_documents ADD COLUMN status_updated_at TEXT",
-  "ALTER TABLE knowledge_documents ADD COLUMN content_hash TEXT",
-  "ALTER TABLE knowledge_documents ADD COLUMN original_name TEXT",
-]) {
+let processRevisionModulePromise = null;
+async function loadProcessRevisionModules() {
+  if (!processRevisionModulePromise) {
+    const { register } = await import("tsx/esm/api");
+    register();
+    processRevisionModulePromise = Promise.all([
+      import(
+        pathToFileURL(
+          resolve(
+            projectRoot,
+            "services/knowledge/processing/run-process-revision.ts",
+          ),
+        ).href,
+      ),
+      import(
+        pathToFileURL(
+          resolve(projectRoot, "services/knowledge/processing/analyze-pdf.ts"),
+        ).href,
+      ),
+      import(
+        pathToFileURL(
+          resolve(
+            projectRoot,
+            "services/knowledge/processing/page-quality.ts",
+          ),
+        ).href,
+      ),
+      import(
+        pathToFileURL(
+          resolve(projectRoot, "services/knowledge/processing/pdf-render.ts"),
+        ).href,
+      ),
+      import(
+        pathToFileURL(resolve(projectRoot, "services/knowledge/chunker.ts"))
+          .href,
+      ),
+      import(
+        pathToFileURL(resolve(projectRoot, "services/knowledge/indexer.ts"))
+          .href,
+      ),
+      import(
+        pathToFileURL(
+          resolve(projectRoot, "services/platform/macos/apple-vision-ocr.ts"),
+        ).href,
+      ),
+      import(
+        pathToFileURL(resolve(projectRoot, "services/platform/ocr/fake-ocr.ts"))
+          .href,
+      ),
+    ]);
+  }
+  return processRevisionModulePromise;
+}
+
+function getDocumentMetaForProcess(namespace, documentId) {
+  if (namespace === "conversation") {
+    const row = getConversationFile.get(documentId);
+    return row
+      ? { storedPath: row.storedPath, contentHash: row.contentHash }
+      : null;
+  }
+  const row = getKnowledgeDocument.get(documentId);
+  return row
+    ? { storedPath: row.storedPath, contentHash: row.contentHash }
+    : null;
+}
+
+/**
+ * 入队前 / Worker 启动时确保 ProcessRevisionJobV1 含 revisionId + processingBuildId
+ * @param {Record<string, unknown>} payload
+ * @param {{ ocrMode?: string, resolveOcrEngine?: () => Promise<any> }} [options]
+ */
+/**
+ * @param {Record<string, unknown>} payload
+ * @param {{
+ *   ocrMode?: string,
+ *   resolveOcrEngine?: () => Promise<any>,
+ *   forceNewBuild?: boolean,
+ * }} [options]
+ */
+async function ensureProcessRevisionPayload(payload, options = {}) {
+  const namespace =
+    payload?.namespace === "conversation" ? "conversation" : "library";
+  const documentId = String(payload?.documentId || "");
+  if (!documentId) throw new Error("process_revision 缺少 documentId");
+  const meta = getDocumentMetaForProcess(namespace, documentId);
+  if (!meta) throw new Error("文档不存在");
+
+  const ocrMode =
+    payload?.ocrMode === "disabled" || options.ocrMode === "disabled"
+      ? "disabled"
+      : "auto";
+
+  let revisionId =
+    typeof payload?.revisionId === "string" ? payload.revisionId : null;
+  let processingBuildId =
+    options.forceNewBuild === true
+      ? null
+      : typeof payload?.processingBuildId === "string"
+        ? payload.processingBuildId
+        : null;
+
+  if (!revisionId) {
+    const revision = indexBuildStore.ensureRevision(
+      namespace,
+      documentId,
+      meta.contentHash,
+    );
+    revisionId = revision.id;
+  }
+
+  // 已激活 ready 的 build 只读；不可续跑/就地修改
+  if (processingBuildId) {
+    const existing = processingBuildStore.get(processingBuildId);
+    if (
+      !existing ||
+      (existing.isActive && existing.status === "ready")
+    ) {
+      processingBuildId = null;
+    }
+  }
+
+  if (!processingBuildId) {
+    let ocrEngine = null;
+    let ocrVersion = null;
+    if (ocrMode !== "disabled" && typeof options.resolveOcrEngine === "function") {
+      const engine = await options.resolveOcrEngine();
+      const cap = engine ? await engine.capabilities() : null;
+      ocrEngine = cap?.engine ?? null;
+      ocrVersion = cap?.engineVersion ?? null;
+    }
+    const build = processingBuildStore.beginBuild({
+      revisionId,
+      ocrEngine,
+      ocrVersion,
+      configHash: `ocr:${ocrMode}:v1`,
+    });
+    processingBuildId = build.id;
+  }
+
+  return {
+    version: 1,
+    ...payload,
+    namespace,
+    documentId,
+    revisionId,
+    processingBuildId,
+    ocrMode,
+  };
+}
+
+/**
+ * reprocess / 终端态重入队：failed 未激活可续跑；succeeded 必须新 build
+ */
+async function prepareReprocessJob(existing, { documentId, ocrMode }) {
+  const status = existing.status;
+  if (["queued", "running", "retry_wait"].includes(status)) {
+    const pbId = existing.payload?.processingBuildId;
+    const build = pbId ? processingBuildStore.get(pbId) : null;
+    if (build?.isActive && build.status === "ready") {
+      const enriched = await ensureProcessRevisionPayload(
+        { ...existing.payload, documentId, ocrMode, namespace: "library" },
+        { ocrMode, forceNewBuild: true },
+      );
+      return jobRepository.mergePayload(existing.id, {
+        version: 1,
+        namespace: "library",
+        documentId,
+        revisionId: enriched.revisionId,
+        processingBuildId: enriched.processingBuildId,
+        ocrMode: enriched.ocrMode,
+      });
+    }
+    return existing;
+  }
+
+  if (status === "succeeded") {
+    const enriched = await ensureProcessRevisionPayload(
+      { ...existing.payload, documentId, ocrMode, namespace: "library" },
+      { ocrMode, forceNewBuild: true },
+    );
+    jobRepository.mergePayload(existing.id, {
+      version: 1,
+      namespace: "library",
+      documentId,
+      revisionId: enriched.revisionId,
+      processingBuildId: enriched.processingBuildId,
+      ocrMode: enriched.ocrMode,
+    });
+    return jobRepository.requeueFromTerminal(existing.id);
+  }
+
+  if (status === "failed" || status === "cancelled") {
+    const pbId = existing.payload?.processingBuildId;
+    const build = pbId ? processingBuildStore.get(pbId) : null;
+    const resumable =
+      build &&
+      !build.isActive &&
+      build.status !== "ready" &&
+      build.status !== "superseded";
+    if (resumable) {
+      jobRepository.mergePayload(existing.id, {
+        ocrMode,
+        namespace: "library",
+        documentId,
+      });
+      return jobRepository.requeueFromTerminal(existing.id);
+    }
+    const enriched = await ensureProcessRevisionPayload(
+      { ...existing.payload, documentId, ocrMode, namespace: "library" },
+      { ocrMode, forceNewBuild: true },
+    );
+    jobRepository.mergePayload(existing.id, {
+      version: 1,
+      namespace: "library",
+      documentId,
+      revisionId: enriched.revisionId,
+      processingBuildId: enriched.processingBuildId,
+      ocrMode: enriched.ocrMode,
+    });
+    return jobRepository.requeueFromTerminal(existing.id);
+  }
+
+  return existing;
+}
+
+async function runProcessRevisionJob(payload, hooks = {}) {
+  const [
+    runMod,
+    analyzeMod,
+    qualityMod,
+    renderMod,
+    chunkerMod,
+    indexerMod,
+    ocrMod,
+    fakeOcrMod,
+  ] = await loadProcessRevisionModules();
+
+  const settings = readRuntimeSettings();
+  const ocrMode =
+    payload?.ocrMode === "disabled" || settings.ocrMode === "disabled"
+      ? "disabled"
+      : "auto";
+
+  const resolveOcrEngine = async () => {
+    if (process.env.ORYNODE_OCR_FAKE === "1") {
+      return fakeOcrMod.createFakeOcrEngine();
+    }
+    const engine = ocrMod.createAppleVisionOcrEngine({ projectRoot });
+    const cap = await engine.capabilities();
+    if (!cap.available) return null;
+    return engine;
+  };
+
+  let ocrLeaseId = null;
   try {
-    database.exec(statement);
-  } catch {
-    // Column already exists on upgraded local databases.
+    const enriched = await ensureProcessRevisionPayload(payload, {
+      ocrMode,
+      resolveOcrEngine,
+    });
+
+    // 写回 Job payload，重试时复用同一 processingBuildId / checkpoint
+    if (typeof hooks.jobId === "string" && hooks.jobId) {
+      jobRepository.mergePayload(hooks.jobId, {
+        version: 1,
+        namespace: enriched.namespace,
+        documentId: enriched.documentId,
+        revisionId: enriched.revisionId,
+        processingBuildId: enriched.processingBuildId,
+        ocrMode: enriched.ocrMode,
+      });
+    }
+
+    return await runMod.runProcessRevisionJob({
+      payload: enriched,
+      ocrMode,
+      onProgress: hooks.onProgress,
+      heartbeat: () => {
+        // worker 侧 interval 已覆盖
+      },
+      tryAcquireOcr: () => {
+        const acquire = resourceCoordinator.tryAcquire({
+          kind: "ocr",
+          owner: `process-revision:${enriched.documentId || ""}`,
+          attemptId: String(enriched.processingBuildId || randomUUID()),
+        });
+        if (acquire.ok) ocrLeaseId = acquire.leaseId;
+        return acquire;
+      },
+      releaseOcr: (leaseId) => {
+        resourceCoordinator.release(leaseId || ocrLeaseId);
+        ocrLeaseId = null;
+      },
+      resolveOcrEngine,
+      analyzePdfPages: analyzeMod.analyzePdfPages,
+      summarizePageQualities: qualityMod.summarizePageQualities,
+      renderPdfPageToPng: renderMod.renderPdfPageToPng,
+      cleanupRenderTemp: renderMod.cleanupRenderTemp,
+      createChunker: chunkerMod.createChunker,
+      assignChunkIds: indexerMod.assignChunkIds,
+      commitChunks: async (
+        namespace,
+        documentId,
+        pageCount,
+        chunks,
+        options = {},
+      ) => {
+        if (namespace === "conversation") {
+          return commitConversationFileChunks(
+            documentId,
+            pageCount,
+            chunks,
+            options,
+          );
+        }
+        return commitKnowledgeChunks(documentId, pageCount, chunks, options);
+      },
+      setDocumentStatus: setDocumentStatusForWorker,
+      processingBuilds: processingBuildStore,
+      documentBlocks: documentBlockStore,
+      getDocumentMeta: getDocumentMetaForProcess,
+    });
+  } catch (error) {
+    if (String(error?.message || "").startsWith("OCR_LEASE_BUSY")) {
+      return { deferred: true, reason: "ocr_busy" };
+    }
+    throw error;
   }
 }
 
-try {
-  database.exec(`
-    UPDATE knowledge_documents
-    SET status_updated_at = created_at
-    WHERE status_updated_at IS NULL OR status_updated_at = ''
-  `);
-} catch {
-  // ignore
+async function waitForJob(jobId, timeoutMs = 120_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const job = jobRepository.get(jobId);
+    if (!job) throw new Error("任务不存在");
+    if (job.status === "succeeded") return job;
+    if (job.status === "failed" || job.status === "cancelled") {
+      throw new Error(job.error || `任务 ${job.status}`);
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 350));
+  }
+  throw new Error("同步任务超时");
+}
+
+function semanticSearchEnabled() {
+  return (
+    process.env.ORYNODE_SEMANTIC_SEARCH === "1" ||
+    process.env.ORYNODE_SEMANTIC_SEARCH === "true"
+  );
 }
 
 /** embedding 状态超过此时长视为中断，自动降为 error 以便 keyword + 可重建 */
@@ -235,7 +546,10 @@ const getMessages = database.prepare(`
     content,
     created_at AS createdAt,
     duration_ms AS durationMs,
-    attachments
+    attachments,
+    citations,
+    referenced_citation_ids AS referencedCitationIds,
+    retrieval_trace_id AS retrievalTraceId
   FROM messages
   WHERE conversation_id = ?
   ORDER BY position ASC
@@ -252,8 +566,9 @@ const deleteMessages = database.prepare(
 );
 const insertMessage = database.prepare(`
   INSERT INTO messages (
-    id, conversation_id, role, content, created_at, position, duration_ms, attachments
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    id, conversation_id, role, content, created_at, position, duration_ms,
+    attachments, citations, referenced_citation_ids, retrieval_trace_id
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const deleteConversation = database.prepare(
   "DELETE FROM conversations WHERE id = ?",
@@ -346,6 +661,33 @@ const getKnowledgeChunks = database.prepare(`
   WHERE document_id = ?
   ORDER BY page_number, position
 `);
+const getLibraryChunkById = database.prepare(`
+  SELECT
+    knowledge_chunks.id,
+    knowledge_chunks.document_id AS documentId,
+    knowledge_documents.name AS documentName,
+    knowledge_chunks.page_number AS pageNumber,
+    knowledge_chunks.position,
+    knowledge_chunks.content
+  FROM knowledge_chunks
+  INNER JOIN knowledge_documents
+    ON knowledge_documents.id = knowledge_chunks.document_id
+  WHERE knowledge_chunks.id = ?
+`);
+const getConversationChunkById = database.prepare(`
+  SELECT
+    conversation_file_chunks.id,
+    conversation_file_chunks.file_id AS documentId,
+    conversation_files.name AS documentName,
+    conversation_files.conversation_id AS conversationId,
+    conversation_file_chunks.page_number AS pageNumber,
+    conversation_file_chunks.position,
+    conversation_file_chunks.content
+  FROM conversation_file_chunks
+  INNER JOIN conversation_files
+    ON conversation_files.id = conversation_file_chunks.file_id
+  WHERE conversation_file_chunks.id = ?
+`);
 const listKnowledgeChunksByDocuments = database.prepare(`
   SELECT
     knowledge_chunks.id,
@@ -359,6 +701,9 @@ const listKnowledgeChunksByDocuments = database.prepare(`
     ON knowledge_documents.id = knowledge_chunks.document_id
   WHERE knowledge_chunks.document_id IN (SELECT value FROM json_each(?))
     AND knowledge_documents.status IN ('ready', 'embedding', 'indexed', 'error')
+    AND knowledge_chunks.document_id NOT IN (
+      SELECT document_id FROM library_search_exclusions
+    )
   ORDER BY knowledge_documents.name, knowledge_chunks.page_number, knowledge_chunks.position
 `);
 const listAllKnowledgeChunks = database.prepare(`
@@ -373,6 +718,9 @@ const listAllKnowledgeChunks = database.prepare(`
   INNER JOIN knowledge_documents
     ON knowledge_documents.id = knowledge_chunks.document_id
   WHERE knowledge_documents.status IN ('ready', 'embedding', 'indexed', 'error')
+    AND knowledge_chunks.document_id NOT IN (
+      SELECT document_id FROM library_search_exclusions
+    )
   ORDER BY knowledge_documents.name, knowledge_chunks.page_number, knowledge_chunks.position
 `);
 const listChunksWithVectorsByDocuments = database.prepare(`
@@ -383,12 +731,25 @@ const listChunksWithVectorsByDocuments = database.prepare(`
     knowledge_chunks.page_number AS pageNumber,
     knowledge_chunks.position,
     knowledge_chunks.content,
-    knowledge_chunks.embedding
+    COALESCE(vector_entries.embedding, knowledge_chunks.embedding) AS embedding
   FROM knowledge_chunks
   INNER JOIN knowledge_documents
     ON knowledge_documents.id = knowledge_chunks.document_id
+  LEFT JOIN index_builds
+    ON index_builds.namespace = 'library'
+    AND index_builds.document_id = knowledge_chunks.document_id
+    AND index_builds.kind = 'vector'
+    AND index_builds.is_active = 1
+    AND index_builds.status = 'ready'
+  LEFT JOIN vector_entries
+    ON vector_entries.index_build_id = index_builds.id
+    AND vector_entries.chunk_id = knowledge_chunks.id
   WHERE knowledge_chunks.document_id IN (SELECT value FROM json_each(?))
     AND knowledge_documents.status IN ('ready', 'embedding', 'indexed', 'error')
+    AND knowledge_chunks.document_id NOT IN (
+      SELECT document_id FROM library_search_exclusions
+    )
+    AND COALESCE(vector_entries.embedding, knowledge_chunks.embedding) IS NOT NULL
   ORDER BY knowledge_documents.name, knowledge_chunks.page_number, knowledge_chunks.position
 `);
 const listAllChunksWithVectors = database.prepare(`
@@ -399,11 +760,24 @@ const listAllChunksWithVectors = database.prepare(`
     knowledge_chunks.page_number AS pageNumber,
     knowledge_chunks.position,
     knowledge_chunks.content,
-    knowledge_chunks.embedding
+    COALESCE(vector_entries.embedding, knowledge_chunks.embedding) AS embedding
   FROM knowledge_chunks
   INNER JOIN knowledge_documents
     ON knowledge_documents.id = knowledge_chunks.document_id
+  LEFT JOIN index_builds
+    ON index_builds.namespace = 'library'
+    AND index_builds.document_id = knowledge_chunks.document_id
+    AND index_builds.kind = 'vector'
+    AND index_builds.is_active = 1
+    AND index_builds.status = 'ready'
+  LEFT JOIN vector_entries
+    ON vector_entries.index_build_id = index_builds.id
+    AND vector_entries.chunk_id = knowledge_chunks.id
   WHERE knowledge_documents.status IN ('ready', 'embedding', 'indexed', 'error')
+    AND knowledge_chunks.document_id NOT IN (
+      SELECT document_id FROM library_search_exclusions
+    )
+    AND COALESCE(vector_entries.embedding, knowledge_chunks.embedding) IS NOT NULL
   ORDER BY knowledge_documents.name, knowledge_chunks.page_number, knowledge_chunks.position
 `);
 const updateChunkEmbedding = database.prepare(`
@@ -524,13 +898,23 @@ const listConversationChunksWithVectorsByFiles = database.prepare(`
     conversation_file_chunks.page_number AS pageNumber,
     conversation_file_chunks.position,
     conversation_file_chunks.content,
-    conversation_file_chunks.embedding
+    COALESCE(vector_entries.embedding, conversation_file_chunks.embedding) AS embedding
   FROM conversation_file_chunks
   INNER JOIN conversation_files
     ON conversation_files.id = conversation_file_chunks.file_id
+  LEFT JOIN index_builds
+    ON index_builds.namespace = 'conversation'
+    AND index_builds.document_id = conversation_file_chunks.file_id
+    AND index_builds.kind = 'vector'
+    AND index_builds.is_active = 1
+    AND index_builds.status = 'ready'
+  LEFT JOIN vector_entries
+    ON vector_entries.index_build_id = index_builds.id
+    AND vector_entries.chunk_id = conversation_file_chunks.id
   WHERE conversation_file_chunks.file_id IN (SELECT value FROM json_each(?))
     AND conversation_files.conversation_id = ?
     AND conversation_files.status IN ('ready', 'embedding', 'indexed', 'error')
+    AND COALESCE(vector_entries.embedding, conversation_file_chunks.embedding) IS NOT NULL
   ORDER BY conversation_files.name, conversation_file_chunks.page_number,
     conversation_file_chunks.position
 `);
@@ -643,6 +1027,7 @@ function backfillKnowledgeContentHashes() {
     if (seen.has(hash)) {
       try {
         database.exec("BEGIN IMMEDIATE");
+        deleteFtsForDocument(database, "library", row.id);
         deleteKnowledgeDocument.run(row.id);
         database.exec("COMMIT");
         try {
@@ -748,12 +1133,29 @@ function clearAllConversations() {
   }
 }
 
+function corsHeaders(request) {
+  const origin = request?.headers?.origin;
+  if (!origin) return {};
+  if (!allowedOrigins.has(origin) && !isLoopbackOrigin(origin)) return {};
+  return {
+    "access-control-allow-origin": origin,
+    "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
+    "access-control-allow-headers": "content-type,authorization",
+    "access-control-allow-credentials": "true",
+    vary: "Origin",
+  };
+}
+
+/** 请求处理期间设置，便于 json() 回写 CORS */
+let currentHttpRequest = null;
+
 function json(response, status, body) {
   const payload = JSON.stringify(body);
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "content-length": Buffer.byteLength(payload),
+    ...corsHeaders(currentHttpRequest),
   });
   response.end(payload);
 }
@@ -904,7 +1306,13 @@ function storeKnowledgeFile(
   const id = randomUUID();
   const storedPath = resolve(knowledgeFilesPath, `${id}.${ext}`);
   const createdAt = new Date().toISOString();
-  writeFileSync(storedPath, buffer, { flag: "wx" });
+  const staged = storageStaging.writeAtomicFile({
+    namespace: "library",
+    documentId: id,
+    finalPath: storedPath,
+    buffer,
+    contentHash: hash,
+  });
 
   try {
     insertKnowledgeDocument.run(
@@ -923,7 +1331,9 @@ function storeKnowledgeFile(
       null,
       createdAt,
     );
+    storageStaging.markCommitted(staged.stagingId, id);
   } catch (error) {
+    storageStaging.abort(staged.stagingId);
     try {
       unlinkSync(storedPath);
     } catch {}
@@ -955,16 +1365,41 @@ function renameKnowledgeDocument(documentId, nextName) {
 }
 
 /** Phase 2: persist chunks produced by services/knowledge. */
-function commitKnowledgeChunks(documentId, pageCount, chunks) {
+function commitKnowledgeChunks(
+  documentId,
+  pageCount,
+  chunks,
+  {
+    processingBuildId = null,
+    activateProcessing = true,
+    /** @type {Array<{ chunkId: string, refs: Array<{ blockId: string, startOffset?: number|null, endOffset?: number|null, bboxDegraded?: boolean }> }> | null} */
+    chunkBlockRefs = null,
+    /** @type {Array<{ chunkId: string, pageNumber: number, bboxDegraded?: boolean }> | null} */
+    chunkLocators = null,
+    __failAfterProcessingActivate = false,
+  } = {},
+) {
   const document = getKnowledgeDocument.get(documentId);
   if (!document) throw new Error("资料不存在");
   if (!Array.isArray(chunks) || chunks.length === 0) {
     throw new Error("chunks 不能为空");
   }
 
+  const atomicActivate =
+    Boolean(processingBuildId) &&
+    activateProcessing &&
+    Array.isArray(chunkBlockRefs);
+
+  /** @type {Array<{ id: string, content: string, pageNumber: number }>} */
+  let storedChunks = [];
+  /** @type {{ revisionId: string, processingBuildId: string, chunkSetId: string, keywordBuildId: string, vectorBuildId: string | null } | null} */
+  let versioning = null;
+
   database.exec("BEGIN IMMEDIATE");
   try {
     deleteChunksForDocument.run(documentId);
+    deleteFtsForDocument(database, "library", documentId);
+    storedChunks = [];
     for (const chunk of chunks) {
       if (
         typeof chunk.pageNumber !== "number" ||
@@ -974,15 +1409,23 @@ function commitKnowledgeChunks(documentId, pageCount, chunks) {
       ) {
         throw new Error("chunk 格式无效");
       }
+      const chunkId =
+        typeof chunk.id === "string" && chunk.id ? chunk.id : randomUUID();
       insertKnowledgeChunk.run(
-        typeof chunk.id === "string" && chunk.id ? chunk.id : randomUUID(),
+        chunkId,
         documentId,
         chunk.pageNumber,
         chunk.position,
         chunk.content,
         null,
       );
+      storedChunks.push({
+        id: chunkId,
+        content: chunk.content,
+        pageNumber: chunk.pageNumber,
+      });
     }
+    upsertFtsChunks(database, "library", documentId, storedChunks);
     commitDocumentChunksMeta.run(
       pageCount,
       chunks.length,
@@ -990,13 +1433,94 @@ function commitKnowledgeChunks(documentId, pageCount, chunks) {
       new Date().toISOString(),
       documentId,
     );
+
+    if (Array.isArray(chunkLocators)) {
+      documentBlockStore.replaceChunkLocatorsBatch("library", chunkLocators);
+    }
+    if (atomicActivate) {
+      documentBlockStore.replaceChunkBlockRefsBatch("library", chunkBlockRefs);
+    }
+
+    const refreshed = getKnowledgeDocument.get(documentId);
+    versioning = indexBuildStore.recordKeywordReady({
+      namespace: "library",
+      documentId,
+      contentHash: refreshed.contentHash || `legacy:${documentId}`,
+      strategyVersion: CHUNK_STRATEGY_VERSION,
+      enqueueVector: semanticSearchEnabled(),
+      vectorModel: EMBEDDING_CONFIG.modelName,
+      vectorDim: EMBEDDING_CONFIG.dimension,
+      processingBuildId,
+      activateProcessing,
+      inTransaction: true,
+      __failAfterProcessingActivate,
+    });
     database.exec("COMMIT");
   } catch (error) {
     database.exec("ROLLBACK");
     throw error;
   }
 
+  // 同步 native 路径：补齐 DocumentBlock（OCR 路径已有 blocks/refs 则跳过）
+  if (!atomicActivate) {
+    ensureNativeBlocksForChunks(
+      versioning.processingBuildId,
+      "library",
+      storedChunks,
+    );
+  }
+  // embed 入队在事务外：失败不影响已激活的 ProcessingBuild / keyword
+  if (versioning.vectorBuildId) {
+    try {
+      jobRepository.enqueue({
+        type: "embed_document",
+        idempotencyKey: `embed:library:${documentId}:${versioning.vectorBuildId}`,
+        payload: {
+          namespace: "library",
+          documentId,
+          indexBuildId: versioning.vectorBuildId,
+          chunkSetId: versioning.chunkSetId,
+          revisionId: versioning.revisionId,
+        },
+      });
+    } catch {
+      // best-effort；可由后续 reconcile / 手动重试补齐
+    }
+  }
+
   return mapDocumentRow(getKnowledgeDocument.get(documentId));
+}
+
+/**
+ * 若 ProcessingBuild 尚无 blocks，按 chunk 写入 native_text DocumentBlock + refs
+ * @param {string | null | undefined} processingBuildId
+ * @param {'library'|'conversation'} namespace
+ * @param {Array<{ id: string, content: string, pageNumber: number }>} storedChunks
+ */
+function ensureNativeBlocksForChunks(processingBuildId, namespace, storedChunks) {
+  if (!processingBuildId || !Array.isArray(storedChunks) || storedChunks.length === 0) {
+    return;
+  }
+  try {
+    const existing = documentBlockStore.listBlocks(processingBuildId);
+    if (existing.length > 0) return;
+    const blocks = storedChunks.map((chunk, index) => ({
+      id: randomUUID(),
+      pageNumber: chunk.pageNumber,
+      readingOrder: index,
+      text: chunk.content,
+      origin: "native_text",
+      bbox: null,
+    }));
+    documentBlockStore.replaceBlocksForBuild(processingBuildId, blocks);
+    for (let i = 0; i < storedChunks.length; i += 1) {
+      documentBlockStore.setChunkBlockRefs(namespace, storedChunks[i].id, [
+        { blockId: blocks[i].id },
+      ]);
+    }
+  } catch {
+    // migration 未应用时忽略
+  }
 }
 
 function setDocumentIndexStatus(
@@ -1006,9 +1530,17 @@ function setDocumentIndexStatus(
 ) {
   const document = getKnowledgeDocument.get(documentId);
   if (!document) throw new Error("资料不存在");
-  // embedding / error：清空旧向量，避免 status 与 BLOB 不一致
-  if (status === "embedding" || status === "error") {
-    clearDocumentEmbeddings.run(documentId);
+  // Phase 2：embedding 期间保留旧向量，供检索继续服务；新向量在 writeVectors 事务内替换。
+  // 仅当 error 且没有仍可用的 active vector IndexBuild 时清空。
+  if (status === "error") {
+    const active = indexBuildStore.getActiveBuild(
+      "library",
+      documentId,
+      "vector",
+    );
+    if (!active) {
+      clearDocumentEmbeddings.run(documentId);
+    }
   }
   updateDocumentStatus.run(
     status,
@@ -1053,6 +1585,86 @@ function recoverStaleEmbeddings() {
       // best-effort
     }
   }
+}
+
+/**
+ * 资料库向量覆盖：有分块且可检索的文档中，已完成向量的比例。
+ * 空库视为 vectorIndexReady=true（不阻塞 Auto→Balanced）。
+ */
+function getLibraryVectorCoverage() {
+  recoverStaleEmbeddings();
+  const docs = listKnowledgeDocuments.all().map(mapDocumentRow);
+  const searchable = docs.filter(
+    (doc) =>
+      (doc.chunkCount ?? 0) > 0 &&
+      ["ready", "embedding", "indexed", "error"].includes(doc.status),
+  );
+  const indexed = searchable.filter((doc) => doc.status === "indexed");
+  const total = searchable.length;
+  const indexedDocuments = indexed.length;
+  return {
+    totalDocuments: total,
+    indexedDocuments,
+    pendingDocuments: Math.max(0, total - indexedDocuments),
+    vectorIndexReady: total === 0 || indexedDocuments > 0,
+  };
+}
+
+/**
+ * 语义开启时为缺少向量的文档补建 embed_document Job（幂等）。
+ */
+function reconcileLibraryVectorBackfill() {
+  if (!semanticSearchEnabled()) {
+    return { enqueued: 0, pending: 0 };
+  }
+  const coverage = getLibraryVectorCoverage();
+  let enqueued = 0;
+  for (const row of listKnowledgeDocuments.all()) {
+    const doc = mapDocumentRow(row);
+    if ((doc.chunkCount ?? 0) < 1) continue;
+    if (doc.status === "indexed" || doc.status === "awaiting_chunks") continue;
+    if (!["ready", "embedding", "error"].includes(doc.status)) continue;
+    try {
+      const key = `backfill:library:${doc.id}`;
+      const existing = jobRepository.getByIdempotencyKey(key);
+      if (existing) {
+        if (
+          existing.status === "failed" ||
+          existing.status === "cancelled"
+        ) {
+          jobRepository.requeueFromTerminal(existing.id);
+          enqueued += 1;
+        } else if (
+          existing.status === "succeeded" &&
+          doc.status !== "indexed"
+        ) {
+          jobRepository.enqueue({
+            type: "embed_document",
+            idempotencyKey: `backfill:retry:library:${doc.id}:${Date.now()}`,
+            payload: { namespace: "library", documentId: doc.id },
+          });
+          enqueued += 1;
+        }
+        continue;
+      }
+      jobRepository.enqueue({
+        type: "embed_document",
+        idempotencyKey: key,
+        payload: { namespace: "library", documentId: doc.id },
+      });
+      enqueued += 1;
+      if (doc.status === "ready" || doc.status === "error") {
+        try {
+          setDocumentIndexStatus(doc.id, "embedding", {});
+        } catch {
+          // ignore
+        }
+      }
+    } catch {
+      // best-effort
+    }
+  }
+  return { enqueued, pending: coverage.pendingDocuments };
 }
 
 function normalizeAttachments(value) {
@@ -1114,7 +1726,14 @@ function storeConversationFile(buffer, name, kindHint, conversationId) {
   mkdirSync(dir, { recursive: true });
   const storedPath = resolve(dir, `${id}.${ext}`);
   const createdAt = new Date().toISOString();
-  writeFileSync(storedPath, buffer, { flag: "wx" });
+  const contentHash = createHash("sha256").update(buffer).digest("hex");
+  const staged = storageStaging.writeAtomicFile({
+    namespace: "conversation",
+    documentId: id,
+    finalPath: storedPath,
+    buffer,
+    contentHash,
+  });
 
   try {
     insertConversationFile.run(
@@ -1132,7 +1751,9 @@ function storeConversationFile(buffer, name, kindHint, conversationId) {
       null,
       createdAt,
     );
+    storageStaging.markCommitted(staged.stagingId, id);
   } catch (error) {
+    storageStaging.abort(staged.stagingId);
     try {
       unlinkSync(storedPath);
     } catch {}
@@ -1142,16 +1763,38 @@ function storeConversationFile(buffer, name, kindHint, conversationId) {
   return mapConversationFileRow(getConversationFile.get(id));
 }
 
-function commitConversationFileChunks(fileId, pageCount, chunks) {
+function commitConversationFileChunks(
+  fileId,
+  pageCount,
+  chunks,
+  {
+    processingBuildId = null,
+    activateProcessing = true,
+    chunkBlockRefs = null,
+    chunkLocators = null,
+  } = {},
+) {
   const file = getConversationFile.get(fileId);
   if (!file) throw new Error("会话附件不存在");
   if (!Array.isArray(chunks) || chunks.length === 0) {
     throw new Error("chunks 不能为空");
   }
 
+  const atomicActivate =
+    Boolean(processingBuildId) &&
+    activateProcessing &&
+    Array.isArray(chunkBlockRefs);
+
+  /** @type {Array<{ id: string, content: string, pageNumber: number }>} */
+  let storedChunks = [];
+  /** @type {{ revisionId: string, processingBuildId: string, chunkSetId: string, keywordBuildId: string, vectorBuildId: string | null } | null} */
+  let versioning = null;
+
   database.exec("BEGIN IMMEDIATE");
   try {
     deleteChunksForConversationFile.run(fileId);
+    deleteFtsForDocument(database, "conversation", fileId);
+    storedChunks = [];
     for (const chunk of chunks) {
       if (
         typeof chunk.pageNumber !== "number" ||
@@ -1161,15 +1804,23 @@ function commitConversationFileChunks(fileId, pageCount, chunks) {
       ) {
         throw new Error("chunk 格式无效");
       }
+      const chunkId =
+        typeof chunk.id === "string" && chunk.id ? chunk.id : randomUUID();
       insertConversationFileChunk.run(
-        typeof chunk.id === "string" && chunk.id ? chunk.id : randomUUID(),
+        chunkId,
         fileId,
         chunk.pageNumber,
         chunk.position,
         chunk.content,
         null,
       );
+      storedChunks.push({
+        id: chunkId,
+        content: chunk.content,
+        pageNumber: chunk.pageNumber,
+      });
     }
+    upsertFtsChunks(database, "conversation", fileId, storedChunks);
     commitConversationFileChunksMeta.run(
       pageCount,
       chunks.length,
@@ -1177,10 +1828,61 @@ function commitConversationFileChunks(fileId, pageCount, chunks) {
       new Date().toISOString(),
       fileId,
     );
+
+    if (Array.isArray(chunkLocators)) {
+      documentBlockStore.replaceChunkLocatorsBatch(
+        "conversation",
+        chunkLocators,
+      );
+    }
+    if (atomicActivate) {
+      documentBlockStore.replaceChunkBlockRefsBatch(
+        "conversation",
+        chunkBlockRefs,
+      );
+    }
+
+    versioning = indexBuildStore.recordKeywordReady({
+      namespace: "conversation",
+      documentId: fileId,
+      contentHash: `conversation:${fileId}`,
+      strategyVersion: CHUNK_STRATEGY_VERSION,
+      enqueueVector: semanticSearchEnabled(),
+      vectorModel: EMBEDDING_CONFIG.modelName,
+      vectorDim: EMBEDDING_CONFIG.dimension,
+      processingBuildId,
+      activateProcessing,
+      inTransaction: true,
+    });
     database.exec("COMMIT");
   } catch (error) {
     database.exec("ROLLBACK");
     throw error;
+  }
+
+  if (!atomicActivate) {
+    ensureNativeBlocksForChunks(
+      versioning.processingBuildId,
+      "conversation",
+      storedChunks,
+    );
+  }
+  if (versioning.vectorBuildId) {
+    try {
+      jobRepository.enqueue({
+        type: "embed_document",
+        idempotencyKey: `embed:conversation:${fileId}:${versioning.vectorBuildId}`,
+        payload: {
+          namespace: "conversation",
+          documentId: fileId,
+          indexBuildId: versioning.vectorBuildId,
+          chunkSetId: versioning.chunkSetId,
+          revisionId: versioning.revisionId,
+        },
+      });
+    } catch {
+      // best-effort
+    }
   }
 
   return mapConversationFileRow(getConversationFile.get(fileId));
@@ -1193,8 +1895,15 @@ function setConversationFileIndexStatus(
 ) {
   const file = getConversationFile.get(fileId);
   if (!file) throw new Error("会话附件不存在");
-  if (status === "embedding" || status === "error") {
-    clearConversationFileEmbeddings.run(fileId);
+  if (status === "error") {
+    const active = indexBuildStore.getActiveBuild(
+      "conversation",
+      fileId,
+      "vector",
+    );
+    if (!active) {
+      clearConversationFileEmbeddings.run(fileId);
+    }
   }
   updateConversationFileStatus.run(
     status,
@@ -1230,7 +1939,22 @@ function queryRetrievalChunks({ library, conversationFiles, withVectors }) {
         rows = [];
       }
     }
+    const versionCache = new Map();
     for (const row of rows) {
+      if (
+        withVectors &&
+        !indexBuildStore.isLibraryDocumentVectorEligible(row.documentId)
+      ) {
+        // 有 vector IndexBuild 但无 active ready：跳过该文档的向量候选
+        continue;
+      }
+      let version = versionCache.get(row.documentId);
+      if (version === undefined) {
+        version =
+          indexBuildStore.getActiveKeywordVersion("library", row.documentId) ??
+          null;
+        versionCache.set(row.documentId, version);
+      }
       chunks.push({
         id: row.id,
         documentId: row.documentId,
@@ -1239,6 +1963,12 @@ function queryRetrievalChunks({ library, conversationFiles, withVectors }) {
         position: row.position,
         content: row.content,
         source: "library",
+        ...(version
+          ? {
+              revisionId: version.revisionId,
+              processingBuildId: version.processingBuildId,
+            }
+          : {}),
         ...(withVectors
           ? { embedding: embeddingToArray(row.embedding) }
           : {}),
@@ -1263,7 +1993,17 @@ function queryRetrievalChunks({ library, conversationFiles, withVectors }) {
             conversationId,
           )
         : listConversationChunksByFiles.all(idsJson, conversationId);
+      const versionCache = new Map();
       for (const row of rows) {
+        let version = versionCache.get(row.documentId);
+        if (version === undefined) {
+          version =
+            indexBuildStore.getActiveKeywordVersion(
+              "conversation",
+              row.documentId,
+            ) ?? null;
+          versionCache.set(row.documentId, version);
+        }
         chunks.push({
           id: row.id,
           documentId: row.documentId,
@@ -1272,6 +2012,12 @@ function queryRetrievalChunks({ library, conversationFiles, withVectors }) {
           position: row.position,
           content: row.content,
           source: "conversation_file",
+          ...(version
+            ? {
+                revisionId: version.revisionId,
+                processingBuildId: version.processingBuildId,
+              }
+            : {}),
           ...(withVectors
             ? { embedding: embeddingToArray(row.embedding) }
             : {}),
@@ -1293,8 +2039,19 @@ function parseStoredAttachments(raw) {
   }
 }
 
+function parseJsonField(raw) {
+  if (raw == null || raw === "") return undefined;
+  try {
+    return typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch {
+    return undefined;
+  }
+}
+
 function mapMessageRow(row) {
   const attachments = parseStoredAttachments(row.attachments);
+  const citations = parseJsonField(row.citations);
+  const referencedCitationIds = parseJsonField(row.referencedCitationIds);
   return {
     id: row.id,
     role: row.role,
@@ -1302,6 +2059,13 @@ function mapMessageRow(row) {
     createdAt: row.createdAt,
     durationMs: row.durationMs ?? undefined,
     ...(attachments ? { attachments } : {}),
+    ...(Array.isArray(citations) ? { citations } : {}),
+    ...(Array.isArray(referencedCitationIds)
+      ? { referencedCitationIds }
+      : {}),
+    ...(typeof row.retrievalTraceId === "string" && row.retrievalTraceId
+      ? { retrievalTraceId: row.retrievalTraceId }
+      : {}),
   };
 }
 
@@ -1322,6 +2086,19 @@ function validateMessages(messages) {
         ? Math.round(message.durationMs)
         : null;
     const attachments = normalizeAttachments(message.attachments);
+    const citations = Array.isArray(message.citations)
+      ? message.citations
+      : null;
+    const referencedCitationIds = Array.isArray(message.referencedCitationIds)
+      ? message.referencedCitationIds.filter(
+          (id) => typeof id === "string" && id,
+        )
+      : null;
+    const retrievalTraceId =
+      typeof message.retrievalTraceId === "string" &&
+      message.retrievalTraceId.trim()
+        ? message.retrievalTraceId.trim()
+        : null;
     return {
       id: typeof message.id === "string" ? message.id : randomUUID(),
       role: message.role,
@@ -1332,6 +2109,9 @@ function validateMessages(messages) {
           : new Date().toISOString(),
       durationMs,
       attachments,
+      citations,
+      referencedCitationIds,
+      retrievalTraceId,
       position,
     };
   });
@@ -1368,6 +2148,11 @@ function saveConversation(input, id = randomUUID()) {
           message.position,
           message.durationMs,
           message.attachments ? JSON.stringify(message.attachments) : null,
+          message.citations ? JSON.stringify(message.citations) : null,
+          message.referencedCitationIds
+            ? JSON.stringify(message.referencedCitationIds)
+            : null,
+          message.retrievalTraceId,
         );
       }
     }
@@ -1394,6 +2179,16 @@ function clampNumber(value, min, max, fallback) {
 
 function normalizeRuntimeSettings(input = {}) {
   const maxContext = Number(input.maxContext);
+  const tierRaw = String(input.knowledgeTier || "").toLowerCase();
+  const knowledgeTier =
+    tierRaw === "auto" ||
+    tierRaw === "balanced" ||
+    tierRaw === "quality" ||
+    tierRaw === "lite"
+      ? tierRaw
+      : DEFAULT_RUNTIME_SETTINGS.knowledgeTier;
+  const ocrRaw = String(input.ocrMode || "").toLowerCase();
+  const ocrMode = ocrRaw === "disabled" ? "disabled" : "auto";
   return {
     temperature: Number(
       clampNumber(input.temperature, 0, 2, DEFAULT_RUNTIME_SETTINGS.temperature).toFixed(2),
@@ -1408,6 +2203,8 @@ function normalizeRuntimeSettings(input = {}) {
     maxTokens: Math.round(
       clampNumber(input.maxTokens, 0, 65536, DEFAULT_RUNTIME_SETTINGS.maxTokens),
     ),
+    knowledgeTier,
+    ocrMode,
   };
 }
 
@@ -1451,11 +2248,13 @@ function settingsResponsePayload(settings) {
 
 function originAllowed(request) {
   const origin = request.headers.origin;
-  return !origin || allowedOrigins.has(origin);
+  return !origin || allowedOrigins.has(origin) || isLoopbackOrigin(origin);
 }
 
-const EMBED_MODEL = "Xenova/bge-small-zh-v1.5";
-const EMBED_DIM = 512;
+const activeEmbedArtifact = getActiveEmbeddingArtifact();
+const EMBED_MODEL = activeEmbedArtifact.xenovaModelId;
+const EMBED_DIM = activeEmbedArtifact.dimension;
+const EMBED_REVISION = activeEmbedArtifact.revision;
 let embedPipelinePromise = null;
 let embedUnavailableReason = null;
 
@@ -1480,7 +2279,9 @@ async function resolveEmbedPipeline() {
       } catch {
         // older package shapes may not expose env; continue
       }
-      console.log(`Loading embedding model ${EMBED_MODEL}...`);
+      console.log(
+        `Loading embedding artifact ${activeEmbedArtifact.id} (${EMBED_MODEL})...`,
+      );
       const extractor = await pipeline("feature-extraction", EMBED_MODEL);
       console.log("Embedding model ready");
       return extractor;
@@ -1492,49 +2293,244 @@ async function resolveEmbedPipeline() {
   return embedPipelinePromise;
 }
 
+function embedStatusBase(extra = {}) {
+  return {
+    available: false,
+    ready: false,
+    artifactId: activeEmbedArtifact.id,
+    model: activeEmbedArtifact.id,
+    xenovaModelId: EMBED_MODEL,
+    modelRevision: EMBED_REVISION,
+    dimension: EMBED_DIM,
+    role: activeEmbedArtifact.role,
+    queryTemplate: activeEmbedArtifact.queryTemplate,
+    passageTemplate: activeEmbedArtifact.passageTemplate,
+    fingerprint: embeddingConfigFingerprint(activeEmbedArtifact),
+    ...extra,
+  };
+}
+
 async function getEmbedStatus() {
   if (embedUnavailableReason) {
-    return {
-      available: false,
-      model: EMBED_MODEL.replace(/^Xenova\//, ""),
-      dimension: EMBED_DIM,
+    return embedStatusBase({
       reason: embedUnavailableReason,
-    };
+    });
   }
   try {
     await resolveEmbedPipeline();
-    return {
+    return embedStatusBase({
       available: true,
-      model: EMBED_MODEL.replace(/^Xenova\//, ""),
-      dimension: EMBED_DIM,
-    };
+      ready: true,
+    });
   } catch (error) {
     const reason =
       error instanceof Error ? error.message : "向量模型不可用";
-    return {
-      available: false,
-      model: EMBED_MODEL.replace(/^Xenova\//, ""),
-      dimension: EMBED_DIM,
-      reason,
-    };
+    return embedStatusBase({ reason });
   }
 }
 
-async function embedTexts(texts) {
+/**
+ * @param {string[]} texts
+ * @param {"query" | "passage"} [mode]
+ */
+async function embedTexts(texts, mode = "passage") {
   const extractor = await resolveEmbedPipeline();
+  const artifact = getActiveEmbeddingArtifact();
+  const template =
+    mode === "query" ? artifact.queryTemplate : artifact.passageTemplate;
+  const maxChars = artifact.maxInputChars || 8000;
   const vectors = [];
   for (const text of texts) {
-    const input = typeof text === "string" ? text : "";
-    const result = await extractor(input.slice(0, 8000), {
-      pooling: "mean",
-      normalize: true,
+    const prepared = applyEmbeddingTemplate(template, text).slice(0, maxChars);
+    const result = await extractor(prepared, {
+      pooling: artifact.pooling || "mean",
+      normalize: artifact.normalization !== false,
     });
     vectors.push(Array.from(result.data));
   }
   return vectors;
 }
 
+async function setDocumentStatusForWorker(
+  namespace,
+  documentId,
+  status,
+  extra = {},
+) {
+  if (namespace === "conversation") {
+    return setConversationFileIndexStatus(documentId, status, extra);
+  }
+  return setDocumentIndexStatus(documentId, status, extra);
+}
+
+/**
+ * Worker 用：读取 chunks → embed → 写入 vector_entries(index_build_id)
+ * 不触碰旧 active build 的 entries，也不清空 legacy embedding（expand 兼容）。
+ */
+async function writeVectorsForDocument({
+  namespace,
+  documentId,
+  indexBuildId,
+  embedTexts: embedFn,
+  onProgress,
+}) {
+  if (!indexBuildId) {
+    throw new Error("writeVectors 需要 indexBuildId");
+  }
+  const build = indexBuildStore.getBuild(indexBuildId);
+  if (!build || build.kind !== "vector") {
+    throw new Error("vector IndexBuild 不存在");
+  }
+  if (build.documentId !== documentId || build.namespace !== namespace) {
+    throw new Error("IndexBuild 与文档不匹配");
+  }
+
+  const rows =
+    namespace === "conversation"
+      ? getConversationFileChunks.all(documentId)
+      : getKnowledgeChunks.all(documentId);
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error("文档没有可用分块");
+  }
+
+  const batchSize = Math.max(1, EMBEDDING_CONFIG.batchSize);
+  /** @type {Array<{ chunkId: string, embedding: Buffer }>} */
+  const entries = [];
+  for (let offset = 0; offset < rows.length; offset += batchSize) {
+    const slice = rows.slice(offset, offset + batchSize);
+    const embedded = await embedFn(slice.map((row) => row.content));
+    for (let i = 0; i < slice.length; i += 1) {
+      const vector = embedded[i];
+      if (!Array.isArray(vector) && !(vector instanceof Float32Array)) {
+        throw new Error("embedding 返回格式无效");
+      }
+      const floats = Float32Array.from(vector);
+      for (let j = 0; j < floats.length; j += 1) {
+        if (!Number.isFinite(floats[j])) {
+          throw new Error("embedding 含非有限值");
+        }
+      }
+      entries.push({
+        chunkId: slice[i].id,
+        embedding: arrayToEmbeddingBlob(floats),
+      });
+    }
+    onProgress?.({
+      phase: "embedding",
+      done: Math.min(offset + slice.length, rows.length),
+      total: rows.length,
+    });
+  }
+
+  vectorEntryStore.replaceAll(indexBuildId, entries);
+  const expectedDim =
+    typeof build.dimension === "number" && build.dimension > 0
+      ? build.dimension
+      : EMBED_DIM;
+  vectorEntryStore.validateBuild(indexBuildId, {
+    expectedCount: entries.length,
+    expectedDim,
+  });
+
+  // expand：同步 dual-write legacy 列（不在激活前清空；激活后检索优先 vector_entries）
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    for (const entry of entries) {
+      if (namespace === "conversation") {
+        updateConversationChunkEmbedding.run(entry.embedding, entry.chunkId);
+      } else {
+        updateChunkEmbedding.run(entry.embedding, entry.chunkId);
+      }
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    // entries 已写入新 build；legacy dual-write 失败不回滚 entries
+    console.warn("[writeVectors] legacy dual-write failed", error);
+  }
+
+  return {
+    chunkCount: entries.length,
+    model: activeEmbedArtifact.id,
+    modelRevision: EMBED_REVISION,
+    dimension: expectedDim,
+    indexBuildId,
+    artifactId: activeEmbedArtifact.id,
+    role: activeEmbedArtifact.role,
+  };
+}
+
+const indexWorker = startIndexWorker({
+  jobs: jobRepository,
+  indexBuilds: indexBuildStore,
+  vectorEntries: vectorEntryStore,
+  resources: resourceCoordinator,
+  embedEnabled: semanticSearchEnabled,
+  embedTexts,
+  writeVectors: writeVectorsForDocument,
+  setDocumentStatus: setDocumentStatusForWorker,
+  runSyncSource: runSyncSourceJob,
+  runProcessRevision: runProcessRevisionJob,
+  runGarbageCollect: (payload) => {
+    const targets = Array.isArray(payload?.targets)
+      ? payload.targets
+      : ["agent_spaces"];
+    const result = { agentSpacesExpired: 0 };
+    if (targets.includes("agent_spaces")) {
+      const before = database
+        .prepare(
+          `SELECT COUNT(*) AS n FROM knowledge_spaces
+           WHERE kind = 'agent' AND status = 'active'
+             AND expires_at IS NOT NULL AND expires_at < ?`,
+        )
+        .get(new Date().toISOString());
+      agentSpaceStore.gcExpired();
+      result.agentSpacesExpired = Number(before?.n || 0);
+    }
+    return result;
+  },
+  log: console,
+});
+
+// 每日幂等入队一次 agent space GC（启动时立即尝试）
+try {
+  const dayKey = new Date().toISOString().slice(0, 10);
+  jobRepository.enqueue({
+    type: "garbage_collect",
+    idempotencyKey: `gc:agent-spaces:${dayKey}`,
+    payload: { targets: ["agent_spaces"] },
+    maxAttempts: 2,
+  });
+} catch {
+  // ignore duplicate / missing table during early boot
+}
+
+// 语义开启时为已有文档补建向量（Chat 活跃时由 worker defer）
+try {
+  if (semanticSearchEnabled()) {
+    const result = reconcileLibraryVectorBackfill();
+    if (result.enqueued > 0) {
+      console.log(
+        `[vector-backfill] enqueued ${result.enqueued} (pending ${result.pending})`,
+      );
+    }
+  }
+} catch (error) {
+  console.warn("[vector-backfill] startup reconcile failed", error);
+}
+
 const server = createServer(async (request, response) => {
+  currentHttpRequest = request;
+  try {
+  if (request.method === "OPTIONS") {
+    response.writeHead(204, {
+      ...corsHeaders(request),
+      "access-control-max-age": "86400",
+    });
+    response.end();
+    return;
+  }
+
   if (!originAllowed(request)) {
     json(response, 403, { error: "Origin is not allowed" });
     return;
@@ -1550,9 +2546,307 @@ const server = createServer(async (request, response) => {
         service: "orynode-local-data",
         databasePath,
         embed: {
-          model: EMBED_MODEL.replace(/^Xenova\//, ""),
+          model: activeEmbedArtifact.id,
+          artifactId: activeEmbedArtifact.id,
           dimension: EMBED_DIM,
+          role: activeEmbedArtifact.role,
         },
+        worker: { id: indexWorker.workerId },
+        resources: resourceCoordinator.snapshot(),
+      });
+      return;
+    }
+
+    // Trusted-LAN 管理面：仅 loopback Data Service 可达，供本机 Settings 直连
+    if (url.pathname === "/lan-auth/pairing") {
+      if (request.method === "GET") {
+        json(response, 200, {
+          sessions: lanAuthStore.listSessions(),
+          unsafePreview:
+            process.env.ORYNODE_TRUSTED_LAN_UNSAFE === "1" ||
+            process.env.ORYNODE_TRUSTED_LAN_UNSAFE === "true",
+        });
+        return;
+      }
+      if (request.method === "POST") {
+        const body = await readJson(request);
+        const action = body.action === "claim" ? "claim" : "start";
+        if (action === "start") {
+          const challenge = lanAuthStore.startPairing();
+          json(response, 200, {
+            pairing: {
+              code: challenge.code,
+              expiresAt: challenge.expiresAt,
+            },
+          });
+          return;
+        }
+        const claimed = lanAuthStore.claimPairing({
+          code: String(body.code || ""),
+          label: typeof body.label === "string" ? body.label : undefined,
+        });
+        if (!claimed) {
+          json(response, 400, {
+            error: "配对码无效或已过期",
+            code: "PAIRING_INVALID",
+          });
+          return;
+        }
+        json(response, 200, {
+          token: claimed.token,
+          session: {
+            id: claimed.session.id,
+            label: claimed.session.label,
+            expiresAt: claimed.session.expiresAt,
+          },
+        });
+        return;
+      }
+      if (request.method === "DELETE") {
+        const body = await readJson(request);
+        const id = String(body.sessionId || "");
+        if (!id) {
+          json(response, 400, { error: "需要 sessionId" });
+          return;
+        }
+        const ok = lanAuthStore.revokeSession(id);
+        json(response, ok ? 200 : 404, { revoked: ok });
+        return;
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === "/resources/chat") {
+      const body = await readJson(request);
+      if (body.active === false) {
+        const token =
+          typeof body.token === "string" ? body.token : undefined;
+        resourceCoordinator.markChatIdle(token);
+      } else {
+        const ttl = Number(body.ttlMs);
+        const existing =
+          typeof body.token === "string" ? body.token : null;
+        if (
+          existing &&
+          resourceCoordinator.touchChat(
+            existing,
+            Number.isFinite(ttl) && ttl > 0 ? ttl : 120_000,
+          )
+        ) {
+          json(response, 200, {
+            ...resourceCoordinator.snapshot(),
+            token: existing,
+          });
+          return;
+        }
+        const token = resourceCoordinator.markChatActive(
+          Number.isFinite(ttl) && ttl > 0 ? ttl : 120_000,
+        );
+        json(response, 200, { ...resourceCoordinator.snapshot(), token });
+        return;
+      }
+      json(response, 200, resourceCoordinator.snapshot());
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/resources") {
+      json(response, 200, resourceCoordinator.snapshot());
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/jobs") {
+      const body = await readJson(request);
+      if (!body?.type || !body?.idempotencyKey) {
+        json(response, 400, { error: "type 与 idempotencyKey 必填" });
+        return;
+      }
+      const idempotencyKey = String(body.idempotencyKey);
+      const existingJob = jobRepository.getByIdempotencyKey(idempotencyKey);
+      if (existingJob) {
+        // 旧 Job 缺 V1 字段时补齐（不新建 build）
+        if (
+          String(body.type) === "process_revision" &&
+          (!existingJob.payload?.processingBuildId ||
+            !existingJob.payload?.revisionId)
+        ) {
+          try {
+            const enriched = await ensureProcessRevisionPayload(
+              { ...existingJob.payload, ...(body.payload ?? {}) },
+              { ocrMode: body.payload?.ocrMode ?? existingJob.payload?.ocrMode },
+            );
+            jobRepository.mergePayload(existingJob.id, {
+              version: 1,
+              namespace: enriched.namespace,
+              documentId: enriched.documentId,
+              revisionId: enriched.revisionId,
+              processingBuildId: enriched.processingBuildId,
+              ocrMode: enriched.ocrMode,
+            });
+          } catch (error) {
+            json(response, 400, {
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return;
+          }
+        }
+        json(response, 201, { job: jobRepository.get(existingJob.id) });
+        return;
+      }
+
+      let payload = body.payload ?? {};
+      if (String(body.type) === "process_revision") {
+        try {
+          payload = await ensureProcessRevisionPayload(payload, {
+            ocrMode: payload?.ocrMode,
+          });
+        } catch (error) {
+          json(response, 400, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return;
+        }
+      }
+      const job = jobRepository.enqueue({
+        type: String(body.type),
+        payload,
+        idempotencyKey,
+        maxAttempts: body.maxAttempts,
+        availableAt: body.availableAt,
+      });
+      json(response, 201, { job });
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      url.pathname === "/jobs/by-idempotency"
+    ) {
+      const key = String(url.searchParams.get("key") || "").trim();
+      if (!key) {
+        json(response, 400, { error: "key 必填" });
+        return;
+      }
+      const job = jobRepository.getByIdempotencyKey(key);
+      if (!job) {
+        json(response, 404, { error: "任务不存在" });
+        return;
+      }
+      json(response, 200, { job });
+      return;
+    }
+
+    if (request.method === "GET" && parts[0] === "jobs" && parts.length === 2) {
+      const job = jobRepository.get(parts[1]);
+      if (!job) {
+        json(response, 404, { error: "任务不存在" });
+        return;
+      }
+      json(response, 200, { job });
+      return;
+    }
+
+    if (
+      request.method === "POST" &&
+      parts[0] === "jobs" &&
+      parts.length === 3 &&
+      parts[2] === "cancel"
+    ) {
+      const ok = jobRepository.cancel(parts[1]);
+      json(response, ok ? 200 : 409, { cancelled: ok });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/agent-spaces") {
+      const body = await readJson(request);
+      const ownerRef = String(body.ownerRef || "").trim();
+      if (!ownerRef) {
+        json(response, 400, { error: "ownerRef 必填" });
+        return;
+      }
+      const existing = agentSpaceStore.getByOwner(ownerRef);
+      if (existing) {
+        json(response, 200, { space: existing });
+        return;
+      }
+      json(response, 201, {
+        space: agentSpaceStore.create({
+          ownerRef,
+          maxDocuments: body.maxDocuments,
+          maxOpenChunks: body.maxOpenChunks,
+          ttlHours: body.ttlHours,
+        }),
+      });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/agent-spaces") {
+      const ownerRef = String(url.searchParams.get("ownerRef") || "").trim();
+      if (!ownerRef) {
+        json(response, 400, { error: "ownerRef 必填" });
+        return;
+      }
+      const space = agentSpaceStore.getByOwner(ownerRef);
+      if (!space) {
+        json(response, 404, { error: "Agent space 不存在" });
+        return;
+      }
+      json(response, 200, { space });
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      parts[0] === "agent-spaces" &&
+      parts.length === 2
+    ) {
+      const space = agentSpaceStore.get(parts[1]);
+      if (!space) {
+        json(response, 404, { error: "Agent space 不存在" });
+        return;
+      }
+      json(response, 200, { space });
+      return;
+    }
+
+    if (
+      request.method === "POST" &&
+      parts[0] === "agent-spaces" &&
+      parts.length === 3 &&
+      parts[2] === "documents"
+    ) {
+      const body = await readJson(request);
+      const documentId = String(body.documentId || "").trim();
+      if (!documentId) {
+        json(response, 400, { error: "documentId 必填" });
+        return;
+      }
+      try {
+        const space = agentSpaceStore.bindDocument(parts[1], documentId);
+        json(response, 200, { space });
+      } catch (error) {
+        json(response, 409, {
+          error: error instanceof Error ? error.message : "绑定失败",
+        });
+      }
+      return;
+    }
+
+    if (
+      request.method === "GET" &&
+      url.pathname === "/index-builds/active"
+    ) {
+      const namespace =
+        url.searchParams.get("namespace") === "conversation"
+          ? "conversation"
+          : "library";
+      const documentId = String(url.searchParams.get("documentId") || "").trim();
+      const kind =
+        url.searchParams.get("kind") === "keyword" ? "keyword" : "vector";
+      if (!documentId) {
+        json(response, 400, { error: "documentId 不能为空" });
+        return;
+      }
+      json(response, 200, {
+        build: indexBuildStore.getActiveBuild(namespace, documentId, kind),
       });
       return;
     }
@@ -1573,10 +2867,15 @@ const server = createServer(async (request, response) => {
         json(response, 400, { error: "单次最多 64 条文本" });
         return;
       }
-      const vectors = await embedTexts(texts);
+      const mode = body.mode === "query" ? "query" : "passage";
+      const vectors = await embedTexts(texts, mode);
       json(response, 200, {
-        model: EMBED_MODEL.replace(/^Xenova\//, ""),
+        artifactId: activeEmbedArtifact.id,
+        model: activeEmbedArtifact.id,
+        modelRevision: EMBED_REVISION,
         dimension: EMBED_DIM,
+        role: activeEmbedArtifact.role,
+        mode,
         vectors,
       });
       return;
@@ -1609,6 +2908,51 @@ const server = createServer(async (request, response) => {
       json(response, 200, {
         documents: listKnowledgeDocuments.all().map(mapDocumentRow),
       });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/knowledge/vector-coverage") {
+      json(response, 200, getLibraryVectorCoverage());
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/knowledge/vector-backfill") {
+      if (!semanticSearchEnabled()) {
+        json(response, 200, {
+          enqueued: 0,
+          pending: 0,
+          skipped: true,
+          reason: "semantic_search_disabled",
+        });
+        return;
+      }
+      const result = reconcileLibraryVectorBackfill();
+      json(response, 200, { ...result, coverage: getLibraryVectorCoverage() });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/knowledge/export") {
+      const outDir = resolve(
+        projectRoot,
+        `.orynode/exports/knowledge-${Date.now()}`,
+      );
+      try {
+        const result = exportKnowledgePackage({
+          projectRoot,
+          databasePath,
+          knowledgeFilesPath,
+          outDir,
+        });
+        json(response, 200, {
+          exportDir: result.outDir,
+          documentCount: result.documentCount,
+          manifest: result.manifest,
+        });
+      } catch (error) {
+        json(response, 500, {
+          error: error instanceof Error ? error.message : "导出失败",
+        });
+      }
       return;
     }
 
@@ -1697,6 +3041,109 @@ const server = createServer(async (request, response) => {
         return;
       }
       json(response, 200, { document: mapDocumentRow(document) });
+      return;
+    }
+
+    // FTS5 keyword search — returns top candidates only (Phase 1)
+    if (request.method === "POST" && url.pathname === "/retrieval/keyword/search") {
+      const body = await readJson(request);
+      const query = typeof body.query === "string" ? body.query : "";
+      const hasLibrary = Boolean(body.library);
+      const hasFiles = Boolean(body.conversationFiles);
+      if (!hasLibrary && !hasFiles) {
+        json(response, 400, { error: "至少指定 library 或 conversationFiles" });
+        return;
+      }
+      const topK = Number(body.topK);
+      const result = searchKeywordIndex(database, {
+        query,
+        phrase: typeof body.phrase === "string" ? body.phrase : undefined,
+        terms: Array.isArray(body.terms) ? body.terms : undefined,
+        exactTerms: Array.isArray(body.exactTerms) ? body.exactTerms : undefined,
+        preferLegacy: body.preferLegacy === true,
+        library: body.library,
+        conversationFiles: body.conversationFiles,
+        topK: Number.isFinite(topK) && topK > 0 ? topK : 8,
+      });
+      const versionCache = new Map();
+      const chunks = (result.chunks ?? []).map((chunk) => {
+        const ns =
+          chunk.source === "conversation_file" ? "conversation" : "library";
+        const cacheKey = `${ns}:${chunk.documentId}`;
+        let version = versionCache.get(cacheKey);
+        if (version === undefined) {
+          version =
+            indexBuildStore.getActiveKeywordVersion(ns, chunk.documentId) ??
+            null;
+          versionCache.set(cacheKey, version);
+        }
+        return version
+          ? {
+              ...chunk,
+              revisionId: version.revisionId,
+              processingBuildId: version.processingBuildId,
+            }
+          : chunk;
+      });
+      json(response, 200, { ...result, chunks });
+      return;
+    }
+
+    // Open chunk by id (Agent knowledge.open / citation resolve)
+    if (
+      request.method === "GET" &&
+      parts[0] === "retrieval" &&
+      parts[1] === "chunks" &&
+      parts.length === 3
+    ) {
+      const chunkId = String(parts[2] || "").trim();
+      if (!chunkId) {
+        json(response, 400, { error: "chunk id 不能为空" });
+        return;
+      }
+      const library = getLibraryChunkById.get(chunkId);
+      if (library) {
+        const version = indexBuildStore.getActiveKeywordVersion(
+          "library",
+          library.documentId,
+        );
+        json(response, 200, {
+          chunk: {
+            ...library,
+            source: "library",
+            score: 0,
+            ...(version
+              ? {
+                  revisionId: version.revisionId,
+                  processingBuildId: version.processingBuildId,
+                }
+              : {}),
+          },
+        });
+        return;
+      }
+      const conversation = getConversationChunkById.get(chunkId);
+      if (conversation) {
+        const version = indexBuildStore.getActiveKeywordVersion(
+          "conversation",
+          conversation.documentId,
+        );
+        json(response, 200, {
+          chunk: {
+            ...conversation,
+            source: "conversation_file",
+            score: 0,
+            ...(version
+              ? {
+                  revisionId: version.revisionId,
+                  processingBuildId: version.processingBuildId,
+                }
+              : {}),
+          },
+        });
+        return;
+      }
+      json(response, 404, { error: "chunk 不存在", chunk: null });
       return;
     }
 
@@ -1828,23 +3275,58 @@ const server = createServer(async (request, response) => {
         json(response, 400, { error: "vectors 数组不能为空" });
         return;
       }
-      database.exec("BEGIN IMMEDIATE");
-      try {
-        for (const vec of vectors) {
-          if (typeof vec.id !== "string" || !Array.isArray(vec.vector)) {
-            throw new Error("vector 条目格式无效");
-          }
-          updateConversationChunkEmbedding.run(
-            arrayToEmbeddingBlob(vec.vector),
-            vec.id,
-          );
+      const byDocument = new Map();
+      for (const vec of vectors) {
+        if (typeof vec.id !== "string" || !Array.isArray(vec.vector)) {
+          json(response, 400, { error: "vector 条目格式无效" });
+          return;
         }
-        database.exec("COMMIT");
-        json(response, 200, { inserted: vectors.length });
-      } catch (error) {
-        database.exec("ROLLBACK");
-        throw error;
+        const documentId =
+          typeof vec.documentId === "string" ? vec.documentId : "";
+        if (!documentId) {
+          json(response, 400, { error: "vector 需要 documentId" });
+          return;
+        }
+        const list = byDocument.get(documentId) ?? [];
+        list.push(vec);
+        byDocument.set(documentId, list);
       }
+
+      for (const [documentId, items] of byDocument) {
+        const buildId = indexBuildStore.enqueueVectorBuild({
+          namespace: "conversation",
+          documentId,
+          vectorModel: EMBEDDING_CONFIG.modelName,
+          vectorDim: EMBEDDING_CONFIG.dimension,
+        });
+        indexBuildStore.markBuildRunning(buildId);
+        const entries = items.map((item) => ({
+          chunkId: item.id,
+          embedding: arrayToEmbeddingBlob(item.vector),
+        }));
+        vectorEntryStore.replaceAll(buildId, entries);
+        vectorEntryStore.validateBuild(buildId, {
+          expectedCount: entries.length,
+          expectedDim: EMBEDDING_CONFIG.dimension,
+        });
+        indexBuildStore.activateBuild(buildId);
+        vectorEntryStore.pruneSupersededVectorBuilds("conversation", documentId);
+
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          for (const item of items) {
+            updateConversationChunkEmbedding.run(
+              arrayToEmbeddingBlob(item.vector),
+              item.id,
+            );
+          }
+          database.exec("COMMIT");
+        } catch (error) {
+          database.exec("ROLLBACK");
+          throw error;
+        }
+      }
+      json(response, 200, { inserted: vectors.length });
       return;
     }
 
@@ -1871,6 +3353,7 @@ const server = createServer(async (request, response) => {
         }
         database.exec("BEGIN IMMEDIATE");
         try {
+          deleteFtsForDocument(database, "conversation", fileId);
           deleteConversationFile.run(fileId);
           database.exec("COMMIT");
           try {
@@ -1939,6 +3422,9 @@ const server = createServer(async (request, response) => {
         const body = await readJson(request);
         const allowed = new Set([
           "awaiting_chunks",
+          "stored",
+          "processing",
+          "processing_error",
           "ready",
           "embedding",
           "indexed",
@@ -1960,7 +3446,7 @@ const server = createServer(async (request, response) => {
       }
     }
 
-    // Vector batch upsert
+    // Vector batch upsert（同步 indexer 路径：写入 active/新 build 的 vector_entries）
     if (request.method === "POST" && url.pathname === "/knowledge/vectors") {
       const body = await readJson(request);
       const vectors = body.vectors ?? [];
@@ -1968,20 +3454,60 @@ const server = createServer(async (request, response) => {
         json(response, 400, { error: "vectors 数组不能为空" });
         return;
       }
-      database.exec("BEGIN IMMEDIATE");
-      try {
-        for (const vec of vectors) {
-          if (typeof vec.id !== "string" || !Array.isArray(vec.vector)) {
-            throw new Error("vector 条目格式无效");
-          }
-          updateChunkEmbedding.run(arrayToEmbeddingBlob(vec.vector), vec.id);
+      const byDocument = new Map();
+      for (const vec of vectors) {
+        if (typeof vec.id !== "string" || !Array.isArray(vec.vector)) {
+          json(response, 400, { error: "vector 条目格式无效" });
+          return;
         }
-        database.exec("COMMIT");
-        json(response, 200, { inserted: vectors.length });
-      } catch (error) {
-        database.exec("ROLLBACK");
-        throw error;
+        const documentId =
+          typeof vec.documentId === "string" ? vec.documentId : "";
+        if (!documentId) {
+          json(response, 400, { error: "vector 需要 documentId" });
+          return;
+        }
+        const list = byDocument.get(documentId) ?? [];
+        list.push(vec);
+        byDocument.set(documentId, list);
       }
+
+      for (const [documentId, items] of byDocument) {
+        // 同步路径：新建 queued build 写入后立即激活（旧 active 可服务至切换瞬间）
+        const buildId = indexBuildStore.enqueueVectorBuild({
+          namespace: "library",
+          documentId,
+          vectorModel: EMBEDDING_CONFIG.modelName,
+          vectorDim: EMBEDDING_CONFIG.dimension,
+        });
+        indexBuildStore.markBuildRunning(buildId);
+        const entries = items.map((item) => ({
+          chunkId: item.id,
+          embedding: arrayToEmbeddingBlob(item.vector),
+        }));
+        vectorEntryStore.replaceAll(buildId, entries);
+        vectorEntryStore.validateBuild(buildId, {
+          expectedCount: entries.length,
+          expectedDim: EMBEDDING_CONFIG.dimension,
+        });
+        indexBuildStore.activateBuild(buildId);
+        vectorEntryStore.pruneSupersededVectorBuilds("library", documentId);
+
+        // expand dual-write legacy
+        database.exec("BEGIN IMMEDIATE");
+        try {
+          for (const item of items) {
+            updateChunkEmbedding.run(
+              arrayToEmbeddingBlob(item.vector),
+              item.id,
+            );
+          }
+          database.exec("COMMIT");
+        } catch (error) {
+          database.exec("ROLLBACK");
+          throw error;
+        }
+      }
+      json(response, 200, { inserted: vectors.length });
       return;
     }
 
@@ -2017,10 +3543,36 @@ const server = createServer(async (request, response) => {
         return;
       }
 
+      if (action === "status" && request.method === "POST") {
+        const body = await readJson(request);
+        const status = String(body.status || "").trim();
+        if (!status) {
+          json(response, 400, { error: "status 必填" });
+          return;
+        }
+        try {
+          json(response, 200, {
+            document: setDocumentIndexStatus(docId, status, {
+              errorMessage: body.errorMessage ?? null,
+              embeddingModel: body.embeddingModel ?? null,
+              embeddingDim: body.embeddingDim ?? null,
+            }),
+          });
+        } catch (error) {
+          json(response, 404, {
+            error: error instanceof Error ? error.message : "更新失败",
+          });
+        }
+        return;
+      }
+
       if (action === "status" && request.method === "PUT") {
         const body = await readJson(request);
         const allowed = new Set([
           "awaiting_chunks",
+          "stored",
+          "processing",
+          "processing_error",
           "ready",
           "embedding",
           "indexed",
@@ -2040,6 +3592,56 @@ const server = createServer(async (request, response) => {
         });
         return;
       }
+
+      if (action === "reprocess" && request.method === "POST") {
+        const document = getKnowledgeDocument.get(docId);
+        if (!document) {
+          json(response, 404, { error: "资料不存在" });
+          return;
+        }
+        if (!document.storedPath) {
+          json(response, 400, { error: "原件不存在，无法重试" });
+          return;
+        }
+        const settings = readRuntimeSettings();
+        if (settings.ocrMode === "disabled") {
+          json(response, 422, {
+            error: "OCR_DISABLED",
+            code: "OCR_DISABLED",
+          });
+          return;
+        }
+        setDocumentIndexStatus(docId, "processing", { errorMessage: null });
+        const idempotencyKey = `process_revision:library:${docId}`;
+        const existing = jobRepository.getByIdempotencyKey(idempotencyKey);
+        let job = existing;
+        if (existing) {
+          job = await prepareReprocessJob(existing, {
+            documentId: docId,
+            ocrMode: settings.ocrMode,
+          });
+        } else {
+          const payload = await ensureProcessRevisionPayload(
+            {
+              version: 1,
+              namespace: "library",
+              documentId: docId,
+              ocrMode: settings.ocrMode,
+            },
+            { ocrMode: settings.ocrMode },
+          );
+          job = jobRepository.enqueue({
+            type: "process_revision",
+            idempotencyKey,
+            payload,
+          });
+        }
+        json(response, 202, {
+          document: mapDocumentRow(getKnowledgeDocument.get(docId)),
+          jobId: job?.id,
+        });
+        return;
+      }
     }
 
     if (parts[0] === "knowledge" && parts.length === 2) {
@@ -2052,6 +3654,7 @@ const server = createServer(async (request, response) => {
         }
         database.exec("BEGIN IMMEDIATE");
         try {
+          deleteFtsForDocument(database, "library", id);
           deleteKnowledgeDocument.run(id);
           database.exec("COMMIT");
           try {
@@ -2144,6 +3747,209 @@ const server = createServer(async (request, response) => {
       }
     }
 
+    if (
+      request.method === "GET" &&
+      parts[0] === "sources" &&
+      parts[1] === "by-document" &&
+      parts.length === 3
+    ) {
+      json(response, 200, {
+        item: sourcesRepository.getByDocument(parts[2]),
+      });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/sources") {
+      json(response, 200, { sources: sourcesRepository.list() });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/sources/sync") {
+      const body = await readJson(request);
+      const asyncMode =
+        body.async === true || url.searchParams.get("async") === "1";
+      try {
+        let payload;
+        if (body.type === "web" || body.type === "github") {
+          payload = { create: body };
+        } else if (body.type === "sync" && typeof body.sourceId === "string") {
+          payload = { sourceId: body.sourceId, config: body.config };
+        } else {
+          json(response, 400, { error: "type 必须是 web / github / sync" });
+          return;
+        }
+
+        const job = jobRepository.enqueue({
+          type: "sync_source",
+          idempotencyKey: `sync_source:${randomUUID()}`,
+          payload,
+          maxAttempts: 2,
+        });
+
+        if (asyncMode) {
+          json(response, 202, { jobId: job.id, job });
+          return;
+        }
+
+        const done = await waitForJob(job.id, 180_000);
+        const result = done.progress?.sync ?? null;
+        json(response, 201, { result, job: done });
+      } catch (error) {
+        json(response, 502, {
+          error: error instanceof Error ? error.message : "来源同步失败",
+        });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/sources") {
+      const body = await readJson(request);
+      const type = body.type;
+      if (type !== "web" && type !== "github" && type !== "file") {
+        json(response, 400, { error: "type 必须是 web / github / file" });
+        return;
+      }
+      const name = String(body.name || type).slice(0, 180);
+      json(response, 201, {
+        source: sourcesRepository.create({
+          type,
+          name,
+          config: body.config && typeof body.config === "object" ? body.config : {},
+        }),
+      });
+      return;
+    }
+
+    if (parts[0] === "sources" && parts.length >= 2) {
+      const sourceId = parts[1];
+      const source = sourcesRepository.get(sourceId);
+
+      if (parts.length === 2 && request.method === "GET") {
+        if (!source) {
+          json(response, 404, { error: "来源不存在" });
+          return;
+        }
+        json(response, 200, { source });
+        return;
+      }
+
+      if (parts.length === 2 && request.method === "DELETE") {
+        if (!source) {
+          json(response, 404, { error: "来源不存在" });
+          return;
+        }
+        sourcesRepository.remove(sourceId);
+        json(response, 200, { deleted: true });
+        return;
+      }
+
+      if (parts[2] === "status" && request.method === "PUT") {
+        if (!source) {
+          json(response, 404, { error: "来源不存在" });
+          return;
+        }
+        const body = await readJson(request);
+        json(response, 200, {
+          source: sourcesRepository.setStatus(sourceId, {
+            status: body.status || "ready",
+            checkpoint: body.checkpoint ?? null,
+            lastError: body.lastError ?? null,
+          }),
+        });
+        return;
+      }
+
+      if (
+        parts[2] === "sync-generation" &&
+        parts[3] === "begin" &&
+        request.method === "POST"
+      ) {
+        if (!source) {
+          json(response, 404, { error: "来源不存在" });
+          return;
+        }
+        json(response, 200, {
+          source: sourcesRepository.beginSyncGeneration(sourceId),
+        });
+        return;
+      }
+
+      if (
+        parts[2] === "sync-generation" &&
+        parts[3] === "complete" &&
+        request.method === "POST"
+      ) {
+        if (!source) {
+          json(response, 404, { error: "来源不存在" });
+          return;
+        }
+        json(response, 200, {
+          source: sourcesRepository.markEnumerationComplete(sourceId),
+        });
+        return;
+      }
+
+      if (
+        parts[2] === "items" &&
+        parts[3] === "stale" &&
+        request.method === "GET"
+      ) {
+        if (!source) {
+          json(response, 404, { error: "来源不存在" });
+          return;
+        }
+        const generation = Number(url.searchParams.get("generation") || 0);
+        json(response, 200, {
+          externalIds: sourcesRepository.listStaleExternalIds(
+            sourceId,
+            generation,
+          ),
+        });
+        return;
+      }
+
+      if (parts[2] === "items" && request.method === "GET") {
+        if (!source) {
+          json(response, 404, { error: "来源不存在" });
+          return;
+        }
+        json(response, 200, { items: sourcesRepository.listItems(sourceId) });
+        return;
+      }
+
+      if (parts[2] === "item" && request.method === "GET") {
+        if (!source) {
+          json(response, 404, { error: "来源不存在" });
+          return;
+        }
+        const externalId = String(url.searchParams.get("externalId") || "");
+        if (!externalId) {
+          json(response, 400, { error: "externalId 不能为空" });
+          return;
+        }
+        json(response, 200, {
+          item: sourcesRepository.getItem(sourceId, externalId),
+        });
+        return;
+      }
+
+      if (parts[2] === "items" && request.method === "PUT") {
+        if (!source) {
+          json(response, 404, { error: "来源不存在" });
+          return;
+        }
+        const body = await readJson(request);
+        if (!body.externalId || typeof body.externalId !== "string") {
+          json(response, 400, { error: "externalId 必填" });
+          return;
+        }
+        json(response, 200, {
+          item: sourcesRepository.upsertItem(sourceId, body),
+        });
+        return;
+      }
+    }
+
     if (request.method === "DELETE" && url.pathname === "/conversations") {
       clearAllConversations();
       json(response, 200, { deleted: true });
@@ -2156,14 +3962,19 @@ const server = createServer(async (request, response) => {
       error: error instanceof Error ? error.message : "Request failed",
     });
   }
+  } finally {
+    currentHttpRequest = null;
+  }
 });
 
 server.listen(port, host, () => {
   console.log(`Orynode local data service: http://${host}:${port}`);
   console.log(`SQLite database: ${databasePath}`);
+  console.log(`Index worker: ${indexWorker.workerId}`);
 });
 
 function shutdown() {
+  indexWorker.stop();
   server.close(() => {
     database.close();
     process.exit(0);

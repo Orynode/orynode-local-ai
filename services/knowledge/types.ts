@@ -80,6 +80,20 @@ export interface RetrievalHit {
   content: string;
   score: number;
   source: "library" | "conversation_file";
+  /** 有 IndexBuild 时由 data-service 附带；否则 citations 用 legacy */
+  revisionId?: string;
+  processingBuildId?: string;
+  /** 摄取时附带的精确定位；缺省由 Context Builder 推断 */
+  locatorHint?: import("./core/types").CitationLocator;
+  /** OCR block 归一化 bbox：[x, y, width, height]，0..1 */
+  bbox?: [number, number, number, number];
+  /** 跨分散区域时省略 bbox，诊断标记 */
+  bboxDegraded?: boolean;
+  headingPath?: string[];
+  startLine?: number;
+  endLine?: number;
+  startOffset?: number;
+  endOffset?: number;
 }
 
 export interface RetrievalResult {
@@ -91,7 +105,11 @@ export interface Retriever {
   retrieve(
     query: string,
     scope: RetrievalScope,
-    options?: { topK?: number },
+    options?: {
+      topK?: number;
+      preferKeyword?: boolean;
+      keywordQuery?: import("./ports/indexes").KeywordQuery;
+    },
   ): Promise<RetrievalResult>;
 }
 

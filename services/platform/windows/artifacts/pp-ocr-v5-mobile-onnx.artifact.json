@@ -1,0 +1,45 @@
+{
+  "status": "reserved",
+  "engineId": "pp-ocr-v5-mobile-onnx",
+  "displayName": "PP-OCR v5 mobile (ONNX) — Windows reserved",
+  "platform": "windows",
+  "keTask": "KE-034",
+  "implementation": "not_started",
+  "capabilityWhenMissing": "OCR_UNAVAILABLE",
+  "artifacts": {
+    "detector": {
+      "id": "pp-ocrv5-mobile-det",
+      "path": null,
+      "sha256": null,
+      "license": "Apache-2.0 (planned)",
+      "source": "https://www.paddleocr.ai/ (planned install)"
+    },
+    "recognizer": {
+      "id": "pp-ocrv5-mobile-rec",
+      "path": null,
+      "sha256": null,
+      "license": "Apache-2.0 (planned)",
+      "source": "https://www.paddleocr.ai/ (planned install)"
+    },
+    "dictionary": {
+      "id": "pp-ocr-dict",
+      "path": null,
+      "sha256": null,
+      "license": null,
+      "source": null
+    },
+    "runtime": {
+      "id": "onnxruntime",
+      "version": null,
+      "path": null,
+      "sha256": null,
+      "license": "MIT (typical ONNX Runtime)",
+      "source": null
+    }
+  },
+  "notes": [
+    "契约与 Fake adapter 已与 macOS 共用 OcrEngine；本文件仅标记预留，不下载、不实现推理。",
+    "安装后须填充 path/sha256/version，并由 Windows adapter 健康探测后才可将 available 置 true。",
+    "禁止自动调用云 OCR。"
+  ]
+}

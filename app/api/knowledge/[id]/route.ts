@@ -3,6 +3,7 @@
  */
 
 import { ORYNODE_DATA_URL, HTTP_TIMEOUT } from "../../../../config/defaults";
+import { lanDeniedResponse } from "../../../../services/platform";
 
 const dataUrl = ORYNODE_DATA_URL;
 
@@ -10,7 +11,9 @@ type RouteContext = {
   params: Promise<{ id: string }>;
 };
 
-export async function DELETE(_request: Request, context: RouteContext) {
+export async function DELETE(request: Request, context: RouteContext) {
+  const denied = lanDeniedResponse(request);
+  if (denied) return denied;
   try {
     const { id } = await context.params;
     const response = await fetch(
@@ -31,6 +34,8 @@ export async function DELETE(_request: Request, context: RouteContext) {
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
+  const denied = lanDeniedResponse(request);
+  if (denied) return denied;
   try {
     const { id } = await context.params;
     const body = await request.json().catch(() => ({}));

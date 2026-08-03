@@ -1,0 +1,899 @@
+{
+  "version": 1,
+  "generatedAt": "2026-08-03T06:29:55.999Z",
+  "fixtureVersion": 1,
+  "fixtureDescription": "ML-P0 中英多语言检索离线评测集（无隐私、可提交）",
+  "gatesVersion": 2,
+  "strategies": [
+    {
+      "strategy": "keyword_multilingual_fields",
+      "caseCount": 16,
+      "gatedCaseCount": 13,
+      "metrics": {
+        "recallAt5": 1,
+        "recallAt8": 1,
+        "mrrAt10": 0.9615384615384616,
+        "ndcgAt10": 0.9716099810439582,
+        "noAnswerFalseRecall": 0,
+        "exactTop1": 1,
+        "crossLingualRecallAt8": 1,
+        "zhZhRecallAt8": 1,
+        "enEnRecallAt8": 1
+      },
+      "byCategory": {
+        "zh→zh": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "en→en": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "zh→en": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 0.5
+        },
+        "en→zh": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "mixed": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "zh-Hans↔zh-Hant": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "exact": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "paraphrase": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "long_query": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "conflict": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "no_answer": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        }
+      },
+      "cases": [
+        {
+          "caseId": "zh-zh-install",
+          "category": "zh→zh",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "zh-zh-privacy",
+          "category": "zh→zh",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "en-en-hybrid",
+          "category": "en→en",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "en-en-private",
+          "category": "en→en",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "zh-en-access-token",
+          "category": "zh→en",
+          "recallAt8": 1,
+          "mrrAt10": 0.5,
+          "top1Hit": false,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "en-zh-rebuild",
+          "category": "en→zh",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "mixed-nodejs-token",
+          "category": "mixed",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "hans-to-hant-token",
+          "category": "zh-Hans↔zh-Hant",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "hant-to-hans-privacy",
+          "category": "zh-Hans↔zh-Hant",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hant"
+        },
+        {
+          "caseId": "exact-error-code",
+          "category": "exact",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "exact-filename",
+          "category": "exact",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "paraphrase-privacy",
+          "category": "paraphrase",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": false,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "long-query-core-tail",
+          "category": "long_query",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "conflict-topk-default",
+          "category": "conflict",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "no-answer-mars",
+          "category": "no_answer",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": false,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "no-answer-finance",
+          "category": "no_answer",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": false,
+          "queryLanguage": "zh-Hans"
+        }
+      ],
+      "elapsedMsP50": 0.3137079999999912,
+      "elapsedMsP95": 5.744166000000007,
+      "gateFailures": []
+    },
+    {
+      "strategy": "hybrid_rrf_lexical_stub",
+      "caseCount": 16,
+      "gatedCaseCount": 13,
+      "metrics": {
+        "recallAt5": 1,
+        "recallAt8": 1,
+        "mrrAt10": 0.9615384615384616,
+        "ndcgAt10": 0.9716099810439582,
+        "noAnswerFalseRecall": 0,
+        "exactTop1": 1,
+        "crossLingualRecallAt8": 1,
+        "zhZhRecallAt8": 1,
+        "enEnRecallAt8": 1
+      },
+      "byCategory": {
+        "zh→zh": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "en→en": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "zh→en": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "en→zh": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 0.5
+        },
+        "mixed": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "zh-Hans↔zh-Hant": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "exact": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "paraphrase": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "long_query": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "conflict": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "no_answer": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        }
+      },
+      "cases": [
+        {
+          "caseId": "zh-zh-install",
+          "category": "zh→zh",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "zh-zh-privacy",
+          "category": "zh→zh",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "en-en-hybrid",
+          "category": "en→en",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "en-en-private",
+          "category": "en→en",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "zh-en-access-token",
+          "category": "zh→en",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "en-zh-rebuild",
+          "category": "en→zh",
+          "recallAt8": 1,
+          "mrrAt10": 0.5,
+          "top1Hit": false,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "mixed-nodejs-token",
+          "category": "mixed",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "hans-to-hant-token",
+          "category": "zh-Hans↔zh-Hant",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "hant-to-hans-privacy",
+          "category": "zh-Hans↔zh-Hant",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hant"
+        },
+        {
+          "caseId": "exact-error-code",
+          "category": "exact",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "exact-filename",
+          "category": "exact",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "paraphrase-privacy",
+          "category": "paraphrase",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": false,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "long-query-core-tail",
+          "category": "long_query",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "conflict-topk-default",
+          "category": "conflict",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "no-answer-mars",
+          "category": "no_answer",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": false,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "no-answer-finance",
+          "category": "no_answer",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": false,
+          "queryLanguage": "zh-Hans"
+        }
+      ],
+      "elapsedMsP50": 0.6290000000000049,
+      "elapsedMsP95": 1.3547089999999997,
+      "gateFailures": []
+    },
+    {
+      "strategy": "multi_query",
+      "caseCount": 16,
+      "gatedCaseCount": 13,
+      "metrics": {
+        "recallAt5": 1,
+        "recallAt8": 1,
+        "mrrAt10": 0.9615384615384616,
+        "ndcgAt10": 0.9716099810439582,
+        "noAnswerFalseRecall": 0,
+        "exactTop1": 1,
+        "crossLingualRecallAt8": 1,
+        "zhZhRecallAt8": 1,
+        "enEnRecallAt8": 1
+      },
+      "byCategory": {
+        "zh→zh": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "en→en": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "zh→en": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 0.5
+        },
+        "en→zh": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "mixed": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "zh-Hans↔zh-Hant": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "exact": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "paraphrase": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "long_query": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "conflict": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "no_answer": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        }
+      },
+      "cases": [
+        {
+          "caseId": "zh-zh-install",
+          "category": "zh→zh",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "zh-zh-privacy",
+          "category": "zh→zh",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "en-en-hybrid",
+          "category": "en→en",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "en-en-private",
+          "category": "en→en",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "zh-en-access-token",
+          "category": "zh→en",
+          "recallAt8": 1,
+          "mrrAt10": 0.5,
+          "top1Hit": false,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "en-zh-rebuild",
+          "category": "en→zh",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "mixed-nodejs-token",
+          "category": "mixed",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "hans-to-hant-token",
+          "category": "zh-Hans↔zh-Hant",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "hant-to-hans-privacy",
+          "category": "zh-Hans↔zh-Hant",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hant"
+        },
+        {
+          "caseId": "exact-error-code",
+          "category": "exact",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "exact-filename",
+          "category": "exact",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "paraphrase-privacy",
+          "category": "paraphrase",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": false,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "long-query-core-tail",
+          "category": "long_query",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "conflict-topk-default",
+          "category": "conflict",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "no-answer-mars",
+          "category": "no_answer",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": false,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "no-answer-finance",
+          "category": "no_answer",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": false,
+          "queryLanguage": "zh-Hans"
+        }
+      ],
+      "elapsedMsP50": 0.6599170000000072,
+      "elapsedMsP95": 1.4166249999999962,
+      "gateFailures": []
+    },
+    {
+      "strategy": "lexical_rerank",
+      "caseCount": 16,
+      "gatedCaseCount": 13,
+      "metrics": {
+        "recallAt5": 1,
+        "recallAt8": 1,
+        "mrrAt10": 0.9615384615384616,
+        "ndcgAt10": 0.9716099810439582,
+        "noAnswerFalseRecall": 0,
+        "exactTop1": 1,
+        "crossLingualRecallAt8": 1,
+        "zhZhRecallAt8": 1,
+        "enEnRecallAt8": 1
+      },
+      "byCategory": {
+        "zh→zh": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "en→en": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "zh→en": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 0.5
+        },
+        "en→zh": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "mixed": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "zh-Hans↔zh-Hant": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "exact": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "paraphrase": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "long_query": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "conflict": {
+          "count": 1,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        },
+        "no_answer": {
+          "count": 2,
+          "recallAt8": 1,
+          "mrrAt10": 1
+        }
+      },
+      "cases": [
+        {
+          "caseId": "zh-zh-install",
+          "category": "zh→zh",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "zh-zh-privacy",
+          "category": "zh→zh",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "en-en-hybrid",
+          "category": "en→en",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "en-en-private",
+          "category": "en→en",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "zh-en-access-token",
+          "category": "zh→en",
+          "recallAt8": 1,
+          "mrrAt10": 0.5,
+          "top1Hit": false,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "en-zh-rebuild",
+          "category": "en→zh",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "mixed-nodejs-token",
+          "category": "mixed",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "hans-to-hant-token",
+          "category": "zh-Hans↔zh-Hant",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "hant-to-hans-privacy",
+          "category": "zh-Hans↔zh-Hant",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hant"
+        },
+        {
+          "caseId": "exact-error-code",
+          "category": "exact",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "en"
+        },
+        {
+          "caseId": "exact-filename",
+          "category": "exact",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "paraphrase-privacy",
+          "category": "paraphrase",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": false,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "long-query-core-tail",
+          "category": "long_query",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "conflict-topk-default",
+          "category": "conflict",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": true,
+          "queryLanguage": "mixed"
+        },
+        {
+          "caseId": "no-answer-mars",
+          "category": "no_answer",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": false,
+          "queryLanguage": "zh-Hans"
+        },
+        {
+          "caseId": "no-answer-finance",
+          "category": "no_answer",
+          "recallAt8": 1,
+          "mrrAt10": 1,
+          "top1Hit": true,
+          "gated": false,
+          "queryLanguage": "zh-Hans"
+        }
+      ],
+      "elapsedMsP50": 0.21975000000000477,
+      "elapsedMsP95": 0.33808400000000915,
+      "gateFailures": []
+    }
+  ],
+  "passed": true,
+  "failures": []
+}

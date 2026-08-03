@@ -1,7 +1,12 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import type { Message, MessageAttachment } from "../../services/types";
+import type {
+  Message,
+  MessageAttachment,
+  MessageCitation,
+} from "../../services/types";
+import { extractReferencedCitationIds } from "../../services/chat/prompt";
 import { scopeFromAttachments } from "../lib/attachments";
 
 export type { Message };
@@ -14,6 +19,8 @@ export function useChat() {
   const [modelName, setModelName] = useState("Gemma 4 26B A4B IT");
   const abortController = useRef<AbortController | null>(null);
   const cancelledRef = useRef(false);
+  /** 切换会话 / 新对话时递增，丢弃过期流式更新与落库 */
+  const runIdRef = useRef(0);
 
   const checkStatus = useCallback(async () => {
     try {
@@ -31,10 +38,20 @@ export function useChat() {
     abortController.current?.abort();
   }, []);
 
-  const clearChat = useCallback(() => {
-    setMessages([]);
+  /** 中止当前生成并作废 run，不改 messages（切历史 / 删会话用） */
+  const discardActiveRun = useCallback(() => {
+    runIdRef.current += 1;
+    cancelledRef.current = true;
+    abortController.current?.abort();
+    abortController.current = null;
+    setSending(false);
     setError("");
   }, []);
+
+  const clearChat = useCallback(() => {
+    discardActiveRun();
+    setMessages([]);
+  }, [discardActiveRun]);
 
   const sendMessage = useCallback(
     async (
@@ -53,6 +70,9 @@ export function useChat() {
         id: string | null,
       ) => Promise<{ id: string; title: string }>,
     ) => {
+      const runId = ++runIdRef.current;
+      const isCurrent = () => runId === runIdRef.current;
+
       const userMessage: Message = {
         id: crypto.randomUUID(),
         role: "user",
@@ -78,6 +98,11 @@ export function useChat() {
         createdAt: new Date().toISOString(),
       };
       let answer = "";
+      let streamError: string | null = null;
+      let providedCitations: MessageCitation[] = [];
+      let referencedCitationIds: string[] = [];
+      let retrievalTraceId: string | undefined;
+      let retrievalDiagnostics: Message["retrievalDiagnostics"];
       const startedAt = performance.now();
 
       setMessages([...nextMessages, assistantMessage]);
@@ -110,11 +135,24 @@ export function useChat() {
         }
         if (!response.body) throw new Error("本地模型没有返回可读取的内容");
 
-        setConnected(true);
+        if (isCurrent()) setConnected(true);
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+
+        const buildAssistant = (text: string): Message => ({
+          ...assistantMessage,
+          content: text,
+          ...(providedCitations.length > 0
+            ? { citations: providedCitations }
+            : {}),
+          ...(referencedCitationIds.length > 0
+            ? { referencedCitationIds }
+            : {}),
+          ...(retrievalTraceId ? { retrievalTraceId } : {}),
+          ...(retrievalDiagnostics ? { retrievalDiagnostics } : {}),
+        });
 
         try {
           while (true) {
@@ -124,18 +162,105 @@ export function useChat() {
             buffer = events.pop() ?? "";
 
             for (const event of events) {
+              let eventName = "message";
               for (const line of event.split("\n")) {
+                if (line.startsWith("event:")) {
+                  eventName = line.slice(6).trim();
+                  continue;
+                }
                 if (!line.startsWith("data:")) continue;
                 const data = line.slice(5).trim();
                 if (!data || data === "[DONE]") continue;
                 const chunk = JSON.parse(data);
+
+                // Orynode SSE v1
+                if (
+                  eventName === "metadata" ||
+                  (chunk?.version === 1 && Array.isArray(chunk.providedCitations))
+                ) {
+                  providedCitations = Array.isArray(chunk.providedCitations)
+                    ? chunk.providedCitations
+                    : [];
+                  retrievalTraceId =
+                    typeof chunk.traceId === "string"
+                      ? chunk.traceId
+                      : undefined;
+                  retrievalDiagnostics = chunk.diagnostics ?? undefined;
+                  continue;
+                }
+
+                if (
+                  eventName === "delta" ||
+                  (chunk?.version === 1 && typeof chunk.text === "string")
+                ) {
+                  if (typeof chunk.text === "string" && chunk.text) {
+                    answer += chunk.text;
+                    if (isCurrent()) {
+                      setMessages([...nextMessages, buildAssistant(answer)]);
+                    }
+                  }
+                  continue;
+                }
+
+                if (eventName === "usage") {
+                  continue;
+                }
+
+                if (eventName === "error") {
+                  const message =
+                    typeof chunk.message === "string"
+                      ? chunk.message
+                      : typeof chunk.error === "string"
+                        ? chunk.error
+                        : "模型流错误";
+                  streamError = message;
+                  if (isCurrent()) setError(message);
+                  continue;
+                }
+
+                if (
+                  eventName === "done" ||
+                  (chunk?.version === 1 &&
+                    Array.isArray(chunk.referencedCitationIds))
+                ) {
+                  referencedCitationIds = Array.isArray(
+                    chunk.referencedCitationIds,
+                  )
+                    ? chunk.referencedCitationIds
+                    : [];
+                  continue;
+                }
+
+                // 短期兼容：旧 orynode 包络 + OpenAI choices
+                if (chunk?.orynode?.type === "metadata") {
+                  providedCitations = Array.isArray(
+                    chunk.orynode.providedCitations,
+                  )
+                    ? chunk.orynode.providedCitations
+                    : [];
+                  retrievalTraceId =
+                    typeof chunk.orynode.retrievalTraceId === "string"
+                      ? chunk.orynode.retrievalTraceId
+                      : undefined;
+                  retrievalDiagnostics = chunk.orynode.diagnostics ?? undefined;
+                  continue;
+                }
+
+                if (chunk?.orynode?.type === "done") {
+                  referencedCitationIds = Array.isArray(
+                    chunk.orynode.referencedCitationIds,
+                  )
+                    ? chunk.orynode.referencedCitationIds
+                    : [];
+                  continue;
+                }
+
                 const delta = chunk.choices?.[0]?.delta?.content;
                 if (typeof delta !== "string" || !delta) continue;
                 answer += delta;
-                setMessages([
-                  ...nextMessages,
-                  { ...assistantMessage, content: answer },
-                ]);
+                if (isCurrent()) {
+                  setMessages([...nextMessages, buildAssistant(answer)]);
+                }
               }
             }
             if (done) break;
@@ -146,12 +271,29 @@ export function useChat() {
           });
         }
 
+        if (!isCurrent()) return null;
+
+        if (
+          referencedCitationIds.length === 0 &&
+          providedCitations.length > 0 &&
+          answer
+        ) {
+          referencedCitationIds = extractReferencedCitationIds(
+            answer,
+            providedCitations.map((item) => item.id),
+          );
+        }
+
+        // 流中报错且无任何输出：按失败回滚，不落幽灵用户消息
+        if (streamError && !answer) {
+          throw new Error(streamError);
+        }
+
         const completed: Message[] = answer
           ? [
               ...nextMessages,
               {
-                ...assistantMessage,
-                content: answer,
+                ...buildAssistant(answer),
                 durationMs: Math.round(performance.now() - startedAt),
               },
             ]
@@ -164,17 +306,30 @@ export function useChat() {
             nextTitle,
             activeId,
           );
+          if (!isCurrent()) return null;
           activeId = saved.id;
         } catch {
           // UI 已更新；持久化失败不回滚本轮可见回复
         }
 
-        return { id: activeId ?? "", title: nextTitle };
+        return isCurrent() ? { id: activeId ?? "", title: nextTitle } : null;
       } catch (e) {
+        if (!isCurrent()) return null;
+
         if (
           cancelledRef.current ||
           (e instanceof DOMException && e.name === "AbortError")
         ) {
+          if (
+            referencedCitationIds.length === 0 &&
+            providedCitations.length > 0 &&
+            answer
+          ) {
+            referencedCitationIds = extractReferencedCitationIds(
+              answer,
+              providedCitations.map((item) => item.id),
+            );
+          }
           const completed: Message[] = answer
             ? [
                 ...nextMessages,
@@ -182,6 +337,14 @@ export function useChat() {
                   ...assistantMessage,
                   content: answer,
                   durationMs: Math.round(performance.now() - startedAt),
+                  ...(providedCitations.length > 0
+                    ? { citations: providedCitations }
+                    : {}),
+                  ...(referencedCitationIds.length > 0
+                    ? { referencedCitationIds }
+                    : {}),
+                  ...(retrievalTraceId ? { retrievalTraceId } : {}),
+                  ...(retrievalDiagnostics ? { retrievalDiagnostics } : {}),
                 },
               ]
             : nextMessages;
@@ -192,21 +355,31 @@ export function useChat() {
               nextTitle,
               activeId,
             );
+            if (!isCurrent()) return null;
             activeId = saved.id;
           } catch {
             // ignore
           }
-          return { id: activeId ?? "", title: nextTitle };
+          return isCurrent() ? { id: activeId ?? "", title: nextTitle } : null;
         }
         // 推理失败：仅回滚 UI；DB 未写入本轮用户消息
         setMessages(messages);
-        setConnected(false);
-        setError(e instanceof Error ? e.message : "无法连接本地模型");
+        const message =
+          e instanceof Error ? e.message : "无法连接本地模型";
+        setError(message);
+        // 仅网络/连接类失败时标离线，避免业务错误误伤状态点
+        if (
+          /连接|不可用|Failed to fetch|network|ECONNREFUSED/i.test(message)
+        ) {
+          setConnected(false);
+        }
         return null;
       } finally {
-        cancelledRef.current = false;
-        abortController.current = null;
-        setSending(false);
+        if (isCurrent()) {
+          cancelledRef.current = false;
+          abortController.current = null;
+          setSending(false);
+        }
       }
     },
     [messages],
@@ -223,6 +396,7 @@ export function useChat() {
     sendMessage,
     checkStatus,
     stopGeneration,
+    discardActiveRun,
     clearChat,
   };
 }

@@ -2,7 +2,9 @@
 
 [简体中文](ARCHITECTURE_zh-CN.md) | [English](ARCHITECTURE.md)
 
-This document describes the **service architecture, data flow, module layering, extension interfaces**, and **knowledge base / RAG system** design of Orynode Local AI.
+This document describes the **service architecture, data flow, module layering, extension interfaces**, and **knowledge base / RAG system** design of Orynode Local AI (current implementation as of **1.1.0**).
+
+For Knowledge Engine design depth and completion status, see [knowledge-engine/](knowledge-engine/README.md) (zh-CN). The Chinese architecture doc is kept in closer sync: [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md).
 
 Target audience: developers who want to understand the internals, reuse modules, or extend functionality.
 
@@ -14,6 +16,7 @@ Target audience: developers who want to understand the internals, reuse modules,
 - [Service Layers](#service-layers)
 - [Data Flow](#data-flow)
 - [Directory Structure](#directory-structure)
+- [Models and technology](#models-and-technology)
 - [Knowledge Base / RAG System](#knowledge-base--rag-system)
   - [Parser](#1-parser)
   - [Chunker](#2-chunker)
@@ -27,6 +30,7 @@ Target audience: developers who want to understand the internals, reuse modules,
 - [Configuration](#configuration)
 - [Memory Strategy for Low-Resource Macs](#memory-strategy-for-low-resource-macs)
 - [Local Data Service API](#local-data-service-api)
+- [Windows compatibility (reserved)](#windows-compatibility-reserved)
 
 ---
 
@@ -113,7 +117,7 @@ Configuration Layer
 
 1. **Data service stays thin**: `scripts/local-data-service.mjs` provides SQLite CRUD + file storage only, with no business logic
 2. **Service layer is pure TypeScript**: All smart logic (parsing, chunking, embedding, retrieval) lives in `services/`, reusable by both API routes and scripts
-3. **Interfaces first**: `Embedder`, `VectorStore`, `InferenceService` are all interfaces, making implementations swappable
+3. **Interfaces first**: `Embedder`, `VectorStore`, `ModelRuntime` are all interfaces, making implementations swappable
 
 ---
 
@@ -243,7 +247,27 @@ orynode-local-ai/
 
 ---
 
+
+## Models and technology
+
+| Category | Tech | Role |
+|----------|------|------|
+| Chat LLM | Gemma 4 26B A4B IT (4-bit) | Local generation |
+| Runtime | TurboFieldfare (Swift/Metal, OpenAI-compatible) | macOS ModelRuntime adapter only |
+| Default retrieval | SQLite FTS5 + Chinese bigram | Keyword, zero extra RAM |
+| Optional vector backend | **blob_scan** (production) | sqlite-vec reserved for **large** corpora when scan is a proven bottleneck |
+| Optional embedding | multilingual-e5-small (384-d, recommended) | Semantic recall via ONNX / Xenova |
+| Compat embedding | bge-small-zh-v1.5 (512-d) | Legacy / Chinese baseline |
+| OCR (shipping) | Apple Vision (`orynode-ocr`) | Scanned PDF → DocumentBlock |
+| OCR (reserved) | PP-OCR mobile + ONNX metadata | Windows stub / `OCR_UNAVAILABLE` |
+| App stack | Next.js · React · vinext · TypeScript · SQLite | Web + Data Service |
+
+See `config/embedding-artifacts.ts` and [CHANGELOG 1.1.0](../CHANGELOG.md).
+
 ## Knowledge Base / RAG System
+
+> **1.1.0:** RAG is organized as a Knowledge Engine. Workspace uses **Search**; Chat uses **Retrieve + buildContext**; both share `HybridRetriever`. See [CHANGELOG](../CHANGELOG.md) and [knowledge-engine/](knowledge-engine/README.md).
+
 
 The full RAG pipeline is implemented across five modules in `services/knowledge/`:
 
@@ -268,7 +292,7 @@ User uploads PDF / TXT / Markdown
      │
      ▼
 ┌──────────────┐
-│ vector-store │  SQLite BLOB + JS cosine (no sqlite-vec required)
+│ vector-store │  SQLite BLOB + JS cosine (production = blob_scan; sqlite-vec reserved for large-scale bottlenecks only)
 └────┬─────────┘
      │
      ▼
@@ -323,30 +347,23 @@ export const CHUNK_CONFIG = {
 
 - `resolveEmbedder()` returns `null` when semantic search is off or deps missing
 - Enable with `ORYNODE_SEMANTIC_SEARCH=1` then restart `npm run local` (`@xenova/transformers` is already in package.json)
-- Model: `Xenova/bge-small-zh-v1.5` (512-d; computed in local data-service)
+- Default artifact: `Xenova/multilingual-e5-small` (384-d; computed in local data-service)
 - Keyword is **not** an Embedder
 
 ### 4. VectorStore
 
 **File**: `services/knowledge/vector-store.ts`
 
-Current implementation: **SQLite BLOB column + JavaScript cosine similarity**.
+Current implementation: **SQLite BLOB + JavaScript cosine (`blob_scan`)**. Production never selects sqlite-vec today.
 
-```typescript
-interface VectorStore {
-  insert(vectors: VectorDocument[]): Promise<void>;
-  search(queryVector: Float32Array, options?: { topK?: number; scope?: RetrievalScope }): Promise<SearchResult[]>;
-}
-```
+**Why not sqlite-vec by default**:
 
-**Why not a dedicated vector database**:
-
-- Personal local use: tens of PDFs, thousands of chunks
-- A few thousand 512-dim vectors = only a few MB
-- Cosine similarity in JS is fast (O(n) scan at this scale)
+- Personal / mid-scale local libraries: tens of PDFs, thousands of chunks — JS scan is enough
+- Avoid native extension install burden for open-source V1
+- **sqlite-vec is reserved** for when the corpus is **large** and benchmarks show BLOB scan is a latency/memory bottleneck — not a default upgrade path
 - No extra native dependencies
 
-**When to upgrade**: When chunk count exceeds 10,000, consider HNSW indexing or an external vector database.
+**When to reconsider sqlite-vec**: Only if the corpus is **large** and benchmarks show BLOB scan is a P95/memory bottleneck — not merely because an arbitrary chunk count is reached.
 
 ### 5. Retriever
 
@@ -406,26 +423,17 @@ const retriever = new HybridRetriever(await resolveEmbedder(), new QdrantVectorS
 
 ### Swap Inference Backend
 
-`services/inference/` provides an `InferenceService` interface:
+Inference goes through the `ModelRuntime` port in `services/platform` (`createRuntimeServices()`). Chat / Status must not import a concrete backend:
 
 ```typescript
-interface InferenceService {
-  chatCompletions(messages, options): Promise<ReadableStream>;
-  listModels(): Promise<string[]>;
+interface ModelRuntime {
+  chat(messages, options): Promise<ReadableStream<Uint8Array>>;
+  listModels(): Promise<ModelInfo[]>;
+  health(): Promise<RuntimeHealth>;
 }
 ```
 
-To integrate Ollama, vLLM, or other backends:
-
-```typescript
-// services/inference/ollama.ts
-class OllamaService implements InferenceService {
-  async chatCompletions(messages, options) {
-    const res = await fetch("http://localhost:11434/v1/chat/completions", { ... });
-    return res.body;
-  }
-}
-```
+To integrate Ollama, vLLM, or other backends: add a Host Profile adapter and wire it in `composition-root.ts`. Do not revive the removed `services/inference` direct path.
 
 ---
 
@@ -443,7 +451,7 @@ export const ORYNODE_DATA_URL = process.env.ORYNODE_DATA_URL ?? "http://127.0.0.
 // Knowledge base
 export const CHUNK_CONFIG = { maxChunkSize: 1800, minChunkSize: 200, overlapSize: 200 };
 export const SEARCH_CONFIG = { topK: 8, semanticSearchEnabled: false };
-export const EMBEDDING_CONFIG = { modelName: "bge-small-zh-v1.5", dimension: 512 };
+export const EMBEDDING_CONFIG = { modelName: "multilingual-e5-small", dimension: 384 }; // see embedding-artifacts.ts
 
 // Runtime defaults
 export const DEFAULT_RUNTIME_SETTINGS = { temperature: 0.2, topP: 0.95, topK: 64, maxContext: 16384, maxTokens: 0 };
@@ -479,7 +487,7 @@ The project is designed for 8 GB MacBook Air with three memory control layers:
 | Strategy | Description |
 |----------|-------------|
 | **Zero overhead (default)** | No Embedder; keyword retrieval only |
-| **Lazy loading** | Data-service loads `bge-small-zh-v1.5` on first embed request |
+| **Lazy loading** | Data-service loads the active embedding artifact on first embed request |
 | **Automatic fallback** | Semantic failure → keyword fallback |
 
 **Memory timeline (8 GB Mac)**:
@@ -573,3 +581,17 @@ CREATE TABLE conversation_file_chunks (
 - `PRAGMA journal_mode = WAL` — Better concurrent read/write performance
 - `PRAGMA foreign_keys = ON` — Data integrity enforcement
 - `PRAGMA busy_timeout = 5000` — Avoid concurrent lock conflicts
+
+---
+
+## Windows compatibility (reserved)
+
+Full product experience targets **Apple Silicon Mac**. Cross-platform boundaries live under `services/platform`:
+
+- **ModelRuntime** — Windows stub returns honest `CAPABILITY_UNAVAILABLE`
+- **OCR** — same `OcrEngine` contract; Windows is stub + PP-OCR/ONNX artifact metadata (no inference in 1.1.0)
+- **Knowledge Engine** — no OS branches in RAG business logic
+- Paths/exports use relative paths and cross-platform fixtures
+
+Details: [implementation plan §16.10](knowledge-engine/KNOWLEDGE_ENGINE_IMPLEMENTATION_PLAN_zh-CN.md) (zh-CN).
+

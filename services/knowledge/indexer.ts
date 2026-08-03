@@ -155,18 +155,47 @@ export async function indexDocumentEmbeddings(
   }
 }
 
-/** 强制按库中 chunks 重建向量（开启语义后补齐旧文档） */
+/**
+ * 强制按库中 chunks 重建向量。
+ * Phase 2：优先入队持久化 Job（可恢复）；Job API 不可用时回退同步路径。
+ */
 export async function reindexDocument(
   documentId: string,
   namespace: DocumentNamespace = "library",
-): Promise<{ status: IndexStatus; reason?: string }> {
+): Promise<{ status: IndexStatus; reason?: string; jobId?: string }> {
   resetEmbedderCache();
   if (!SEARCH_CONFIG.semanticSearchEnabled) {
     return {
       status: "skipped",
-      reason: "未开启语义检索（在 .env.local 设置 ORYNODE_SEMANTIC_SEARCH=1）",
+      reason:
+        "主机未加载向量模型。Balanced/Quality 档需在 .env.local 设置 ORYNODE_SEMANTIC_SEARCH=1",
     };
   }
+
+  try {
+    const enqueue = await fetch(`${ORYNODE_DATA_URL}/jobs`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "embed_document",
+        idempotencyKey: `reindex:${namespace}:${documentId}:${Date.now()}`,
+        payload: { namespace, documentId },
+      }),
+      signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
+    });
+    if (enqueue.ok) {
+      const body = await enqueue.json();
+      await setStatus(documentId, "embedding", {}, namespace);
+      return {
+        status: "skipped",
+        reason: "已入队后台向量重建",
+        jobId: body.job?.id,
+      };
+    }
+  } catch {
+    // fall through to sync path
+  }
+
   const embedder = await resolveEmbedder();
   if (!embedder) {
     return {
@@ -227,6 +256,164 @@ export async function reindexAllDocuments(): Promise<{
   }
 
   return { results };
+}
+
+export type VectorBackfillResult = {
+  totalDocuments: number;
+  indexedDocuments: number;
+  pendingDocuments: number;
+  enqueued: number;
+  skipped: number;
+};
+
+let lastBackfillAt = 0;
+let lastBackfillResult: VectorBackfillResult | null = null;
+
+/**
+ * 为尚未完成向量索引的资料库文档入队 embed_document（幂等）。
+ * 关键词索引不受影响；Chat 活跃时由 resource coordinator 延迟执行。
+ */
+export async function enqueuePendingVectorBackfill(): Promise<VectorBackfillResult> {
+  const empty: VectorBackfillResult = {
+    totalDocuments: 0,
+    indexedDocuments: 0,
+    pendingDocuments: 0,
+    enqueued: 0,
+    skipped: 0,
+  };
+
+  if (!SEARCH_CONFIG.semanticSearchEnabled) {
+    return empty;
+  }
+
+  const listResponse = await fetch(`${ORYNODE_DATA_URL}/knowledge`, {
+    cache: "no-store",
+    signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
+  });
+  if (!listResponse.ok) {
+    throw new Error("无法列出资料库文档");
+  }
+  const list = await listResponse.json();
+  const documents: KnowledgeDocument[] = list.documents ?? [];
+  const searchable = documents.filter(
+    (doc) =>
+      (doc.chunkCount ?? 0) > 0 &&
+      doc.status != null &&
+      ["ready", "embedding", "indexed", "error"].includes(doc.status),
+  );
+  const indexed = searchable.filter((doc) => doc.status === "indexed");
+  const pending = searchable.filter((doc) => doc.status !== "indexed");
+
+  let enqueued = 0;
+  let skipped = 0;
+
+  for (const document of pending) {
+    try {
+      const enqueue = await fetch(`${ORYNODE_DATA_URL}/jobs`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "embed_document",
+          idempotencyKey: `backfill:library:${document.id}`,
+          payload: { namespace: "library", documentId: document.id },
+        }),
+        signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
+      });
+      if (!enqueue.ok) {
+        skipped += 1;
+        continue;
+      }
+      const body = (await enqueue.json()) as {
+        job?: { status?: string; id?: string };
+      };
+      const status = body.job?.status;
+      if (status === "queued" || status === "retry_wait" || status === "running") {
+        enqueued += 1;
+        if (document.status === "ready" || document.status === "error") {
+          await setStatus(document.id, "embedding", {}, "library").catch(
+            () => undefined,
+          );
+        }
+      } else if (status === "failed" || status === "cancelled") {
+        // 终端失败：用带时间戳的 key 再入队一次
+        const retry = await fetch(`${ORYNODE_DATA_URL}/jobs`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            type: "embed_document",
+            idempotencyKey: `backfill:library:${document.id}:${Date.now()}`,
+            payload: { namespace: "library", documentId: document.id },
+          }),
+          signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
+        });
+        if (retry.ok) {
+          enqueued += 1;
+          await setStatus(document.id, "embedding", {}, "library").catch(
+            () => undefined,
+          );
+        } else {
+          skipped += 1;
+        }
+      } else {
+        // succeeded 但文档仍非 indexed：强制再入队
+        if (document.status !== "indexed") {
+          const retry = await fetch(`${ORYNODE_DATA_URL}/jobs`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              type: "embed_document",
+              idempotencyKey: `backfill:retry:library:${document.id}:${Date.now()}`,
+              payload: { namespace: "library", documentId: document.id },
+            }),
+            signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
+          });
+          if (retry.ok) {
+            enqueued += 1;
+          } else {
+            skipped += 1;
+          }
+        } else {
+          skipped += 1;
+        }
+      }
+    } catch {
+      skipped += 1;
+    }
+  }
+
+  return {
+    totalDocuments: searchable.length,
+    indexedDocuments: indexed.length,
+    pendingDocuments: pending.length,
+    enqueued,
+    skipped,
+  };
+}
+
+/**
+ * 节流版补建：能力探测 / UI 刷新可反复调用，不会打爆 Job 队列。
+ */
+export async function ensurePendingVectorBackfill(
+  minIntervalMs = 30_000,
+): Promise<VectorBackfillResult | null> {
+  if (!SEARCH_CONFIG.semanticSearchEnabled) return null;
+  const now = Date.now();
+  if (lastBackfillResult && now - lastBackfillAt < minIntervalMs) {
+    return lastBackfillResult;
+  }
+  try {
+    lastBackfillResult = await enqueuePendingVectorBackfill();
+    lastBackfillAt = now;
+    return lastBackfillResult;
+  } catch {
+    return lastBackfillResult;
+  }
+}
+
+/** 测试用：重置补建节流 */
+export function resetVectorBackfillThrottleForTests(): void {
+  lastBackfillAt = 0;
+  lastBackfillResult = null;
 }
 
 export function assignChunkIds(

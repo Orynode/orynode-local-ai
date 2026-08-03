@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "description": "ML-P0/P2 门禁：keyword 为主。semanticStrategy 为 hybrid_rrf_lexical_stub（实验/延期：不下载真实 embedding；真实模型写入与召回评测另开里程碑）",
+  "primaryStrategy": "keyword_multilingual_fields",
+  "thresholds": {
+    "recallAt5Min": 0.75,
+    "recallAt8Min": 0.75,
+    "mrrAt10Min": 0.6,
+    "ndcgAt10Min": 0.6,
+    "noAnswerFalseRecallMax": 0.5,
+    "exactTop1Min": 1.0,
+    "crossLingualRecallAt8Min": 0.5,
+    "zhZhRecallAt8Min": 1.0,
+    "enEnRecallAt8Min": 1.0
+  },
+  "semanticStrategy": "hybrid_rrf_lexical_stub",
+  "semanticGates": {
+    "recallAt8Min": 0.75,
+    "crossLingualRecallAt8Min": 0.5,
+    "exactTop1Min": 1.0,
+    "noAnswerFalseRecallMax": 0.5
+  }
+}

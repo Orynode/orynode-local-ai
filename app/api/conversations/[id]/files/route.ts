@@ -8,12 +8,15 @@ import {
   HTTP_TIMEOUT,
 } from "../../../../../config/defaults";
 import { ingestDocument } from "../../../../../services/knowledge";
+import { lanDeniedResponse } from "../../../../../services/platform";
 
 const dataUrl = ORYNODE_DATA_URL;
 
 type RouteContext = { params: Promise<{ id: string }> };
 
-export async function GET(_request: Request, context: RouteContext) {
+export async function GET(request: Request, context: RouteContext) {
+  const denied = lanDeniedResponse(request);
+  if (denied) return denied;
   try {
     const { id: conversationId } = await context.params;
     if (!conversationId) {
@@ -40,6 +43,8 @@ export async function GET(_request: Request, context: RouteContext) {
 }
 
 export async function POST(request: Request, context: RouteContext) {
+  const denied = lanDeniedResponse(request);
+  if (denied) return denied;
   try {
     const { id: conversationId } = await context.params;
     if (!conversationId) {
@@ -73,7 +78,13 @@ export async function POST(request: Request, context: RouteContext) {
       return Response.json({ error: "会话附件上传失败" }, { status: 500 });
     }
 
-    return Response.json({ file: result.file }, { status: 201 });
+    return Response.json(
+      {
+        file: result.file,
+        ...(result.jobId ? { jobId: result.jobId } : {}),
+      },
+      { status: 201 },
+    );
   } catch (error) {
     const message =
       error instanceof Error

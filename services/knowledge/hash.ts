@@ -23,12 +23,19 @@ function decodeMaybeUriComponent(value: string): string {
   }
 }
 
-/** 资料库去重短路：仅完整可用文档可复用（有分块且非 awaiting_chunks） */
+/** 资料库去重短路：仅完整可用文档可复用（有分块且非处理中） */
 export function isUsableLibraryDocument(doc: {
   status?: string | null;
   chunkCount?: number | null;
 }): boolean {
-  if (doc.status === "awaiting_chunks") return false;
+  if (
+    doc.status === "awaiting_chunks" ||
+    doc.status === "stored" ||
+    doc.status === "processing" ||
+    doc.status === "processing_error"
+  ) {
+    return false;
+  }
   return typeof doc.chunkCount === "number" && doc.chunkCount > 0;
 }
 

@@ -3,8 +3,11 @@
  */
 
 import { reindexAllDocuments } from "../../../../services/knowledge";
+import { lanDeniedResponse } from "../../../../services/platform";
 
-export async function POST() {
+export async function POST(request: Request) {
+  const denied = lanDeniedResponse(request);
+  if (denied) return denied;
   try {
     const result = await reindexAllDocuments();
     return Response.json(result);

@@ -1,14 +1,52 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { networkInterfaces } from "node:os";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
+
+const projectRoot = fileURLToPath(new URL("..", import.meta.url));
+
+/**
+ * 加载 .env / .env.local 到 process.env（不覆盖已有环境变量）。
+ * start-local 自身不走 Vite，必须显式读取，否则 ORYNODE_ACCESS_MODE 会静默落回 local_only。
+ */
+function loadEnvFiles() {
+  for (const name of [".env", ".env.local"]) {
+    const path = resolve(projectRoot, name);
+    if (!existsSync(path)) continue;
+    const text = readFileSync(path, "utf8");
+    for (const rawLine of text.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) continue;
+      const eq = line.indexOf("=");
+      if (eq <= 0) continue;
+      const key = line.slice(0, eq).trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+      if (process.env[key] !== undefined) continue;
+      let value = line.slice(eq + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      process.env[key] = value;
+    }
+  }
+}
+
+loadEnvFiles();
 
 const children = new Set();
 let stopping = false;
 
 function run(command, args, options = {}) {
   const child = spawn(command, args, {
-    cwd: new URL("..", import.meta.url),
+    cwd: projectRoot,
     stdio: "inherit",
+    env: process.env,
     ...options,
   });
   children.add(child);
@@ -67,6 +105,80 @@ function portIsOpen(port, host = "127.0.0.1") {
   });
 }
 
+/** PIDs listening on TCP `port` (macOS / Linux via lsof). */
+function pidsListeningOn(port) {
+  try {
+    const output = execFileSync(
+      "lsof",
+      ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
+      { encoding: "utf8" },
+    );
+    return [
+      ...new Set(
+        output
+          .split(/\s+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .map((s) => Number(s))
+          .filter((n) => Number.isInteger(n) && n > 0 && n !== process.pid),
+      ),
+    ];
+  } catch {
+    return [];
+  }
+}
+
+function killPid(pid, signal) {
+  try {
+    process.kill(pid, signal);
+    return true;
+  } catch (error) {
+    if (error && error.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+/**
+ * Free a local TCP port by stopping listeners (SIGTERM, then SIGKILL).
+ * Used so `npm run local` can replace a leftover Orynode web server on 3000.
+ */
+async function freePort(port, { label = `port ${port}` } = {}) {
+  const pids = pidsListeningOn(port);
+  if (pids.length === 0) {
+    if (await portIsOpen(port, "localhost")) {
+      throw new Error(
+        `${label} is in use, but no listening PID was found. Stop the process manually, then try again.`,
+      );
+    }
+    return;
+  }
+
+  console.log(
+    `${label} is in use (PID ${pids.join(", ")}). Stopping it so Orynode can start...`,
+  );
+  for (const pid of pids) killPid(pid, "SIGTERM");
+
+  for (let i = 0; i < 20; i++) {
+    await delay(100);
+    if (!(await portIsOpen(port, "localhost"))) return;
+  }
+
+  const remaining = pidsListeningOn(port);
+  for (const pid of remaining) {
+    console.log(`Force-killing PID ${pid} on ${label}...`);
+    killPid(pid, "SIGKILL");
+  }
+
+  for (let i = 0; i < 20; i++) {
+    await delay(100);
+    if (!(await portIsOpen(port, "localhost"))) return;
+  }
+
+  throw new Error(
+    `Could not free ${label}. Stop the process manually, then try again.`,
+  );
+}
+
 function shutdown(code = 0) {
   if (stopping) return;
   stopping = true;
@@ -89,11 +201,17 @@ function localNetworkUrls() {
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
 
+async function mustFreePort(port, label) {
+  try {
+    await freePort(port, { label });
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+}
+
 if (await portIsOpen(3000, "localhost")) {
-  console.error(
-    "Port 3000 is already in use. Stop the other Orynode development server, then try again.",
-  );
-  process.exit(1);
+  await mustFreePort(3000, "Port 3000");
 }
 
 if (!(await portIsOpen(4318, "127.0.0.1"))) {
@@ -102,10 +220,9 @@ if (!(await portIsOpen(4318, "127.0.0.1"))) {
 } else if (await isOrynodeDataService()) {
   console.log("Using the Orynode data service already running on port 4318.");
 } else {
-  console.error(
-    "Port 4318 is occupied by another program. Stop it before starting Orynode.",
-  );
-  process.exit(1);
+  await mustFreePort(4318, "Port 4318");
+  console.log("Starting the Orynode local data service...");
+  run("node", ["--disable-warning=ExperimentalWarning", "scripts/local-data-service.mjs"]);
 }
 
 if (!(await portIsOpen(8080, "127.0.0.1"))) {
@@ -114,16 +231,13 @@ if (!(await portIsOpen(8080, "127.0.0.1"))) {
 } else if (await isTurboFieldfare()) {
   console.log("Using the TurboFieldfare service already running on port 8080.");
   try {
-    const { readFileSync } = await import("node:fs");
-    const { resolve } = await import("node:path");
-    const root = new URL("..", import.meta.url);
     const settings = JSON.parse(
-      readFileSync(resolve(root.pathname, ".orynode/runtime-settings.json"), "utf8"),
+      readFileSync(resolve(projectRoot, ".orynode/runtime-settings.json"), "utf8"),
     );
     let applied = null;
     try {
       applied = JSON.parse(
-        readFileSync(resolve(root.pathname, ".orynode/turbo-applied.json"), "utf8"),
+        readFileSync(resolve(projectRoot, ".orynode/turbo-applied.json"), "utf8"),
       );
     } catch {
       // older runs may not have applied marker
@@ -140,21 +254,44 @@ if (!(await portIsOpen(8080, "127.0.0.1"))) {
     // settings optional
   }
 } else {
-  console.error(
-    "Port 8080 is occupied by another program. Stop it or configure another TurboFieldfare port.",
-  );
-  process.exit(1);
+  await mustFreePort(8080, "Port 8080");
+  console.log("Starting TurboFieldfare...");
+  run("bash", ["scripts/start-turbo.sh"]);
 }
 
+const accessModeRequested =
+  process.env.ORYNODE_ACCESS_MODE === "trusted_lan"
+    ? "trusted_lan"
+    : "local_only";
+const trustedLanUnsafe =
+  process.env.ORYNODE_TRUSTED_LAN_UNSAFE === "1" ||
+  process.env.ORYNODE_TRUSTED_LAN_UNSAFE === "true";
+const accessMode = accessModeRequested;
+const webHostname = accessMode === "trusted_lan" ? "0.0.0.0" : "127.0.0.1";
+
 console.log("\nStarting Orynode Local AI");
+console.log(`  Access mode: ${accessMode}`);
 console.log("  This Mac: http://localhost:3000");
-for (const url of localNetworkUrls()) {
-  console.log(`  Local network: ${url}`);
+if (accessMode === "trusted_lan" && trustedLanUnsafe) {
+  for (const url of localNetworkUrls()) {
+    console.log(`  Local network: ${url}`);
+  }
+  console.log(
+    "\nTrusted-LAN UNSAFE preview (ORYNODE_TRUSTED_LAN_UNSAFE=1): no auth. Anyone on the LAN can use this instance. Not a secure sharing mode.",
+  );
+} else if (accessMode === "trusted_lan") {
+  for (const url of localNetworkUrls()) {
+    console.log(`  Local network: ${url}`);
+  }
+  console.log(
+    "\nTrusted-LAN with pairing auth: LAN clients must claim a pairing code (POST /api/lan/pairing). Data Service stays on 127.0.0.1.",
+  );
+} else {
+  console.log(
+    "\nLocal-only mode: Web UI binds 127.0.0.1. To share on LAN: ORYNODE_ACCESS_MODE=trusted_lan (pairing) or add ORYNODE_TRUSTED_LAN_UNSAFE=1 for unsafe preview.",
+  );
 }
-console.log(
-  "\nV1 LAN sharing has no user accounts or access control. Anyone on the same network can use this Orynode instance.",
-);
 console.log(
   "TurboFieldfare and SQLite remain private on 127.0.0.1 and are not exposed directly.\n",
 );
-run("npm", ["run", "dev", "--", "--hostname", "0.0.0.0"]);
+run("npm", ["run", "dev", "--", "--hostname", webHostname]);

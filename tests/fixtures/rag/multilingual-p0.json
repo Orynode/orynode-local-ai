@@ -1,0 +1,211 @@
+{
+  "version": 1,
+  "description": "ML-P0 中英多语言检索离线评测集（无隐私、可提交）",
+  "corpus": [
+    {
+      "id": "chunk-zh-install",
+      "documentId": "doc-zh-guide",
+      "language": "zh-Hans",
+      "text": "安装步骤：先下载模型，再运行 npm run local 启动本地服务。"
+    },
+    {
+      "id": "chunk-zh-privacy",
+      "documentId": "doc-zh-guide",
+      "language": "zh-Hans",
+      "text": "本应用默认 Local-only，资料不会上传到云端向量库。"
+    },
+    {
+      "id": "chunk-zh-vector-rebuild",
+      "documentId": "doc-zh-ops",
+      "language": "zh-Hans",
+      "text": "向量索引重建（rebuild vector index）：在设置中触发 reindex，等待 IndexBuild 变为 ready 后即可检索。"
+    },
+    {
+      "id": "chunk-zh-hant-token",
+      "documentId": "doc-zh-hant",
+      "language": "zh-Hant",
+      "text": "請先建立訪問令牌，再把它寫入本機設定檔。"
+    },
+    {
+      "id": "chunk-en-rag",
+      "documentId": "doc-en-rag",
+      "language": "en",
+      "text": "Hybrid retrieval combines keyword search with embedding vectors for better recall."
+    },
+    {
+      "id": "chunk-en-access-token",
+      "documentId": "doc-en-api",
+      "language": "en",
+      "text": "Create an access token in the dashboard, then set ORYNODE_API_TOKEN in your environment."
+    },
+    {
+      "id": "chunk-en-private-server",
+      "documentId": "doc-en-product",
+      "language": "en",
+      "text": "Orynode turns your device into a local, private AI server without a cloud control plane."
+    },
+    {
+      "id": "chunk-mixed-nodejs",
+      "documentId": "doc-mixed",
+      "language": "mixed",
+      "text": "在 Node.js 中配置 access-token：把密钥写入 .env.local，然后重启 data-service。"
+    },
+    {
+      "id": "chunk-exact-error",
+      "documentId": "doc-errors",
+      "language": "en",
+      "text": "When the socket drops, the runtime raises ERR_CONNECTION_REFUSED and retries with backoff."
+    },
+    {
+      "id": "chunk-exact-file",
+      "documentId": "doc-files",
+      "language": "zh-Hans",
+      "text": "请打开手册.pdf 查看知识引擎 ingest 流程与 citation 字段说明。"
+    },
+    {
+      "id": "chunk-paraphrase-local",
+      "documentId": "doc-paraphrase",
+      "language": "en",
+      "text": "Keep documents on this machine; nothing is sent to remote vector databases by default."
+    },
+    {
+      "id": "chunk-conflict-a",
+      "documentId": "doc-conflict-a",
+      "language": "zh-Hans",
+      "text": "默认 topK 为 8。若结果过少，可在 Balanced 档开启语义检索。"
+    },
+    {
+      "id": "chunk-conflict-b",
+      "documentId": "doc-conflict-b",
+      "language": "zh-Hans",
+      "text": "旧版本曾经把 topK 固定为 3，该行为已废弃，请勿再参考。"
+    },
+    {
+      "id": "chunk-noise-weather",
+      "documentId": "doc-noise",
+      "language": "zh-Hans",
+      "text": "天气预报显示明天有雨，记得带伞出门购物。"
+    }
+  ],
+  "cases": [
+    {
+      "id": "zh-zh-install",
+      "category": "zh→zh",
+      "query": "如何启动本地服务",
+      "relevantChunkIds": ["chunk-zh-install"],
+      "gateStrategies": ["keyword", "keyword_multilingual_fields", "multi_query", "lexical_rerank"]
+    },
+    {
+      "id": "zh-zh-privacy",
+      "category": "zh→zh",
+      "query": "资料会不会上传到云端",
+      "relevantChunkIds": ["chunk-zh-privacy"],
+      "gateStrategies": ["keyword", "keyword_multilingual_fields", "multi_query", "lexical_rerank"]
+    },
+    {
+      "id": "en-en-hybrid",
+      "category": "en→en",
+      "query": "hybrid retrieval embedding vectors",
+      "relevantChunkIds": ["chunk-en-rag"],
+      "gateStrategies": ["keyword", "keyword_multilingual_fields", "multi_query", "lexical_rerank"]
+    },
+    {
+      "id": "en-en-private",
+      "category": "en→en",
+      "query": "local private AI server",
+      "relevantChunkIds": ["chunk-en-private-server"],
+      "gateStrategies": ["keyword", "keyword_multilingual_fields", "multi_query", "lexical_rerank"]
+    },
+    {
+      "id": "zh-en-access-token",
+      "category": "zh→en",
+      "query": "如何创建 access token",
+      "relevantChunkIds": ["chunk-en-access-token"],
+      "gateStrategies": ["keyword_multilingual_fields", "multi_query", "lexical_rerank"],
+      "notes": "中英混合查询，依赖英文术语字面命中"
+    },
+    {
+      "id": "en-zh-rebuild",
+      "category": "en→zh",
+      "query": "how to rebuild vector index",
+      "relevantChunkIds": ["chunk-zh-vector-rebuild"],
+      "gateStrategies": ["keyword_multilingual_fields", "multi_query", "lexical_rerank"],
+      "notes": "英文查询中文资料，依赖 vector/index/rebuild 与中文「向量索引重建」的部分字面/字段重合"
+    },
+    {
+      "id": "mixed-nodejs-token",
+      "category": "mixed",
+      "query": "Node.js 如何配置 access-token",
+      "relevantChunkIds": ["chunk-mixed-nodejs"],
+      "gateStrategies": ["keyword", "keyword_multilingual_fields", "multi_query", "lexical_rerank"]
+    },
+    {
+      "id": "hans-to-hant-token",
+      "category": "zh-Hans↔zh-Hant",
+      "query": "访问令牌",
+      "relevantChunkIds": ["chunk-zh-hant-token"],
+      "gateStrategies": ["keyword_multilingual_fields", "multi_query", "lexical_rerank"],
+      "notes": "简体查询繁体段落，依赖 normalizer 简繁扩展"
+    },
+    {
+      "id": "hant-to-hans-privacy",
+      "category": "zh-Hans↔zh-Hant",
+      "query": "資料會不會上傳",
+      "relevantChunkIds": ["chunk-zh-privacy"],
+      "gateStrategies": ["keyword_multilingual_fields", "multi_query", "lexical_rerank"]
+    },
+    {
+      "id": "exact-error-code",
+      "category": "exact",
+      "query": "ERR_CONNECTION_REFUSED",
+      "relevantChunkIds": ["chunk-exact-error"],
+      "gateStrategies": ["keyword", "keyword_multilingual_fields", "multi_query", "lexical_rerank"]
+    },
+    {
+      "id": "exact-filename",
+      "category": "exact",
+      "query": "手册.pdf",
+      "relevantChunkIds": ["chunk-exact-file"],
+      "gateStrategies": ["keyword", "keyword_multilingual_fields", "multi_query", "lexical_rerank"]
+    },
+    {
+      "id": "paraphrase-privacy",
+      "category": "paraphrase",
+      "query": "会不会把我的文件发到网上",
+      "relevantChunkIds": ["chunk-paraphrase-local", "chunk-zh-privacy"],
+      "gateStrategies": [],
+      "notes": "同义改写，keyword 基线可能失败；仅记录指标，不进门禁"
+    },
+    {
+      "id": "long-query-core-tail",
+      "category": "long_query",
+      "query": "请问一下如何怎么样才能正确地进行关于这个方面的一些问题解答也就是说向量索引重建",
+      "relevantChunkIds": ["chunk-zh-vector-rebuild"],
+      "gateStrategies": ["keyword_multilingual_fields", "multi_query", "lexical_rerank"]
+    },
+    {
+      "id": "conflict-topk-default",
+      "category": "conflict",
+      "query": "默认 topK 是多少",
+      "relevantChunkIds": ["chunk-conflict-a"],
+      "gateStrategies": ["keyword_multilingual_fields", "multi_query", "lexical_rerank"],
+      "notes": "冲突来源：应优先命中现行默认说明而非废弃旧版"
+    },
+    {
+      "id": "no-answer-mars",
+      "category": "no_answer",
+      "query": "企鹅在南极如何考取滑雪驾照",
+      "relevantChunkIds": [],
+      "expectNoAnswer": true,
+      "gateStrategies": []
+    },
+    {
+      "id": "no-answer-finance",
+      "category": "no_answer",
+      "query": "下周比特币杠杆合约最优仓位公式",
+      "relevantChunkIds": [],
+      "expectNoAnswer": true,
+      "gateStrategies": []
+    }
+  ]
+}

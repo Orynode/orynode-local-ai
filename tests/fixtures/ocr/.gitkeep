@@ -1,0 +1,10 @@
+/**
+ * OCR 测试用页面指标 fixture（不依赖大体积扫描 PDF）
+ *
+ * - native.json：可提取文本页
+ * - blank.json：空白页
+ * - scan-like.json：无字 + 大图 → 需 OCR
+ * - mixed.json：混合
+ */
+
+export {};

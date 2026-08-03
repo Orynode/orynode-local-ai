@@ -12,10 +12,13 @@ import {
   EMBEDDING_CONFIG,
 } from "../../../config/defaults";
 import { ingestDocument } from "../../../services/knowledge";
+import { lanDeniedResponse } from "../../../services/platform";
 
 const dataUrl = ORYNODE_DATA_URL;
 
-export async function GET() {
+export async function GET(request: Request) {
+  const denied = lanDeniedResponse(request);
+  if (denied) return denied;
   try {
     const response = await fetch(`${dataUrl}/knowledge`, {
       cache: "no-store",
@@ -42,6 +45,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  const denied = lanDeniedResponse(request);
+  if (denied) return denied;
   try {
     const contentLength = Number(request.headers.get("content-length") ?? 0);
     if (contentLength > MAX_KNOWLEDGE_FILE_SIZE) {
@@ -74,8 +79,15 @@ export async function POST(request: Request) {
       {
         document: result.document,
         deduplicated: result.deduplicated,
+        jobId: result.jobId ?? null,
       },
-      { status: result.deduplicated ? 200 : 201 },
+      {
+        status: result.deduplicated
+          ? 200
+          : result.jobId
+            ? 202
+            : 201,
+      },
     );
   } catch (error) {
     const message =
@@ -84,9 +96,20 @@ export async function POST(request: Request) {
         : "资料导入失败，请确认本地资料库服务正在运行";
     const status =
       message.includes("只支持") ? 415
-      : message.includes("没有可提取") || message.includes("扫描版") ? 422
+      : message.includes("OCR_DISABLED") ||
+          message.includes("没有可提取") ||
+          message.includes("扫描版")
+        ? 422
       : message.includes("为空") ? 400
       : 503;
-    return Response.json({ error: message }, { status });
+    return Response.json(
+      {
+        error:
+          message === "OCR_DISABLED"
+            ? "已关闭扫描 PDF 文字识别。可在设置中开启，或上传带可选中文本的 PDF。"
+            : message,
+      },
+      { status },
+    );
   }
 }

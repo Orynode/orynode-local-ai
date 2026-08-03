@@ -10,6 +10,13 @@ const INITIAL_SETTINGS: RuntimeSettings = {
   topK: runtimeDefaults.topK,
   maxContext: runtimeDefaults.maxContext,
   maxTokens: runtimeDefaults.maxTokens,
+  knowledgeTier:
+    runtimeDefaults.knowledgeTier === "auto" ||
+    runtimeDefaults.knowledgeTier === "balanced" ||
+    runtimeDefaults.knowledgeTier === "quality"
+      ? runtimeDefaults.knowledgeTier
+      : "lite",
+  ocrMode: runtimeDefaults.ocrMode === "disabled" ? "disabled" : "auto",
 };
 
 export function useSettings() {

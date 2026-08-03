@@ -39,6 +39,14 @@ export const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   topK: runtimeDefaults.topK,
   maxContext: runtimeDefaults.maxContext,
   maxTokens: runtimeDefaults.maxTokens,
+  knowledgeTier:
+    runtimeDefaults.knowledgeTier === "auto" ||
+    runtimeDefaults.knowledgeTier === "balanced" ||
+    runtimeDefaults.knowledgeTier === "quality" ||
+    runtimeDefaults.knowledgeTier === "lite"
+      ? runtimeDefaults.knowledgeTier
+      : "auto",
+  ocrMode: runtimeDefaults.ocrMode === "disabled" ? "disabled" : "auto",
 };
 
 export const ALLOWED_MAX_CONTEXT = new Set(runtimeDefaults.allowedMaxContext);
@@ -54,32 +62,138 @@ export const CHUNK_CONFIG = {
   separators: ["\n\n", "\n", "。", "！", "？", ".", "!", "?", "，", ";", " "],
 };
 
+/**
+ * 知识库 / RAG 配置
+ *
+ * 检索策略由单一用户叙事驱动：Settings.knowledgeTier。
+ * - auto（默认）：按主机能力选择 Balanced 或 Lite
+ * - lite：仅关键词（省资源）
+ * - balanced / quality：在主机已加载向量模型时融合语义（quality 另加多查询/重排）
+ *
+ * ORYNODE_SEMANTIC_SEARCH 是主机资源开关（是否加载 embedding 模型），
+ * 不是普通用户必配项。未开启时 auto/balanced/quality 自动降级并写诊断码。
+ */
 export const SEARCH_CONFIG = {
   topK: 8,
   maxSearchTerms: 40,
+  /** Quality 档：规则多查询变体上限（不含原句） */
+  multiQueryVariants: 2,
   /**
-   * 语义向量为可选能力。
-   * false（默认）：仅 keyword。
-   * true：data-service 加载 Xenova/bge-small-zh-v1.5；失败回退 keyword。
+   * 关键词 0 命中时，纯向量召回的最低余弦阈值（E5 归一化后）。
+   * 低于此值视为无答案噪声，不返回列表；displayName 不参与召回或豁免。
+   */
+  minVectorCosineSolo: 0.85,
+  /**
+   * 主机是否启用向量模型加载（data-service）。
+   * 与 knowledgeTier 配合：档位请求语义 + 本开关为真 → 才走 hybrid。
    */
   semanticSearchEnabled:
     process.env.ORYNODE_SEMANTIC_SEARCH === "1" ||
     process.env.ORYNODE_SEMANTIC_SEARCH === "true",
 };
 
-export const EMBEDDING_CONFIG = {
-  modelName: "bge-small-zh-v1.5",
-  dimension: 512,
-  batchSize: 8,
+export type KnowledgeTier = "auto" | "lite" | "balanced" | "quality";
+
+/** 档位是否可能请求语义向量（仍受主机 ORYNODE_SEMANTIC_SEARCH / Runtime 约束） */
+export function tierRequestsEmbedding(tier: KnowledgeTier): boolean {
+  return (
+    tier === "auto" || tier === "balanced" || tier === "quality"
+  );
+}
+
+export function parseKnowledgeTier(value: unknown): KnowledgeTier | null {
+  if (
+    value === "auto" ||
+    value === "lite" ||
+    value === "balanced" ||
+    value === "quality"
+  ) {
+    return value;
+  }
+  return null;
+}
+
+/** Agent space 默认配额（会话级，不入库） */
+export const AGENT_SPACE_DEFAULTS = {
+  maxDocuments: 32,
+  maxOpenChunks: 8,
+  ttlHours: 24,
 };
+
+import {
+  DEFAULT_EMBEDDING_ARTIFACT_ID,
+  COMPAT_BASELINE_ARTIFACT_ID,
+  resolveEmbeddingArtifact,
+  type EmbeddingArtifact,
+} from "./embedding-artifacts";
+
+const resolvedEmbedding = resolveEmbeddingArtifact();
+
+export const EMBEDDING_CONFIG = {
+  artifactId: resolvedEmbedding.artifact.id,
+  modelName: resolvedEmbedding.artifact.id,
+  xenovaModelId: resolvedEmbedding.artifact.xenovaModelId,
+  modelRevision: resolvedEmbedding.artifact.revision,
+  dimension: resolvedEmbedding.artifact.dimension,
+  batchSize: resolvedEmbedding.artifact.batchSize,
+  role: resolvedEmbedding.artifact.role as EmbeddingArtifact["role"],
+  queryTemplate: resolvedEmbedding.artifact.queryTemplate,
+  passageTemplate: resolvedEmbedding.artifact.passageTemplate,
+  maxInputChars: resolvedEmbedding.artifact.maxInputChars,
+};
+
+export {
+  DEFAULT_EMBEDDING_ARTIFACT_ID,
+  COMPAT_BASELINE_ARTIFACT_ID,
+  EMBEDDING_ARTIFACTS,
+  applyEmbeddingTemplate,
+  embeddingConfigFingerprint,
+  getEmbeddingArtifact,
+  getRecommendedEmbeddingArtifact,
+  isEmbeddingBuildCompatible,
+  listEmbeddingArtifacts,
+  resolveEmbeddingArtifact,
+} from "./embedding-artifacts";
+export type {
+  EmbeddingArtifact,
+  EmbeddingArtifactRole,
+} from "./embedding-artifacts";
+
+/**
+ * OCR 首版安全上限（§16.5）；真实 Mac 基准后可调并记 ADR。
+ * 与 knowledgeTier 解耦；用户开关见 RuntimeSettings.ocrMode。
+ */
+export const OCR_CONFIG = {
+  minMeaningfulCharacters: 24,
+  maxReplacementCharacterRatio: 0.3,
+  renderDpi: 144,
+  maxRenderedLongEdge: 2400,
+  maxRenderedPixels: 16_000_000,
+  maxOcrPagesPerDocument: 100,
+  ocrPageConcurrency: 1,
+  ocrPageTimeoutMs: 30_000,
+  /** 单 block / 单页文本上限，防 helper 撑爆 SQLite / Prompt */
+  maxBlockTextChars: 8_000,
+  maxPageTextChars: 100_000,
+  helperProtocolVersion: 1,
+} as const;
+
+export type OcrMode = "auto" | "disabled";
+
+
+/**
+ * 访问模式类型（解析请用 services/platform/access.resolveAccessMode）
+ * - local_only（默认）：Web 仅绑定 127.0.0.1
+ * - trusted_lan：绑定局域网；默认要求 pairing session
+ * - ORYNODE_TRUSTED_LAN_UNSAFE=1：无认证预览（不得当作安全共享）
+ */
+export type AccessMode = "local_only" | "trusted_lan";
 
 // ============================================================
 // 文件上传限制
 // ============================================================
 
 export const MAX_KNOWLEDGE_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
-/** @deprecated 使用 MAX_KNOWLEDGE_FILE_SIZE */
-export const MAX_PDF_SIZE = MAX_KNOWLEDGE_FILE_SIZE;
 
 // ============================================================
 // HTTP 超时

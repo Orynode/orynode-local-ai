@@ -3,7 +3,7 @@
 [简体中文](README.md) | [English](README_EN.md)
 
 Orynode Local AI 是一款面向 Apple Silicon Mac 的开源、本地优先 AI
-助手。它在 TurboFieldfare 和 Gemma 4 之上提供浏览器操作界面，让用户无需使用原始命令行对话工具，也能在自己的 Mac 上使用本地模型。
+助手，也致力于把用户自己的 Mac 变成一台私有 AI 服务器。它在 TurboFieldfare 和 Gemma 4 之上提供浏览器操作界面，让用户无需使用原始命令行对话工具，也能在自己的 Mac 上使用本地模型；模型推理、会话和知识数据默认留在服务器 Mac 本机。
 
 ## 界面预览
 
@@ -14,6 +14,10 @@ Orynode Local AI 是一款面向 Apple Silicon Mac 的开源、本地优先 AI
 ### 对话
 
 ![对话界面](docs/images/chat.png)
+
+### 本地资料库
+
+![本地资料库](docs/images/local-docs.png)
 
 ### 设置
 
@@ -28,17 +32,33 @@ V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复�
 
 ## 当前功能
 
-- 本地 Web 对话（流式输出、停止生成、自动滚动）
-- TurboFieldfare 连接状态与当前模型显示
+- 本地 Web 对话（流式输出、停止生成、自动滚动；Orynode SSE v1 + 结构化引用）
+- **RAG / Knowledge Engine**（1.1.0）：Scope 授权、Hybrid 检索、Citation、ProcessingBuild、知识工作台 Search 预览
+- TurboFieldfare 连接状态与当前模型显示（经 ModelRuntime，不直连）
 - OpenAI 兼容对话接口代理
-- 可复现的 TurboFieldfare 安装流程
-- 支持断点续传的 Gemma 4 模型安装
-- 一条命令同时启动模型和 Web 界面
-- 使用本地 SQLite 自动保存和恢复对话
-- 本地 PDF / TXT / Markdown 导入与基于原文的资料问答（默认关键词检索；可选语义向量）
-- 设置页与对话框可配置模型采样参数（上下文长度需重启后生效）
+- 可复现的 TurboFieldfare / Gemma 4 安装；一条命令同时启动模型与 Web
+- 本地 SQLite 自动保存对话；会话附件与持久资料库双命名空间
+- 本地 PDF / TXT / Markdown；扫描 PDF 可经 **Apple Vision OCR** 进索引
+- 设置页：采样参数、知识检索档位（自动 / 省资源 / 更高质量）、OCR 模式、Trusted-LAN 配对
+- 默认关键词检索；可选语义向量（`multilingual-e5-small` 等，需显式开启）
 - 无需账号，不包含统计分析，不在云端保存对话
-- 支持桌面端和移动端浏览器，以及可信局域网共享
+- 支持桌面端和移动端浏览器；Trusted-LAN 需配对会话（UNSAFE 仅为预览）
+- **Windows**：仅架构预留（ModelRuntime / OCR stub），本版完整体验面向 Apple Silicon Mac
+
+## 模型与技术
+
+| 类别 | 技术 | 说明 |
+|------|------|------|
+| 对话模型 | Gemma 4 26B A4B IT（4-bit） | 本机生成；经 TurboFieldfare（Metal） |
+| 推理运行时 | TurboFieldfare | `:8080/v1`；仅监听 `127.0.0.1` |
+| 默认检索 | SQLite FTS5 + 中文 bigram | 不开向量模型即可用 |
+| 可选向量后端 | blob_scan（BLOB + JS 余弦） | 生产固定；sqlite-vec 仅占位，**大量数据瓶颈时再评估** |
+| 可选 Embedding | multilingual-e5-small（默认推荐） | ONNX / `@xenova/transformers`；中英 |
+| Embedding 兼容 | bge-small-zh-v1.5 | 旧索引对照；勿与 E5 混用 |
+| OCR | Apple Vision（`orynode-ocr`） | macOS；Windows 预留 PP-OCR/ONNX stub |
+| 应用栈 | Next.js · React · vinext · TypeScript · SQLite | 本地 Web + Data Service `:4318` |
+
+完整清单与版本边界见 [CHANGELOG 1.1.0](CHANGELOG.md#110--2026-08-03)。
 
 ## 本地资料与检索
 
@@ -49,28 +69,29 @@ V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复�
 | 对话「附到本对话」/ 拖拽 | 会话附件 | 随对话删除；检索 API 按 `conversationId` 校验归属，仅本会话可用 |
 | 「导入资料库」或资料库页导入 | 持久资料库 | 长期保留；**按文件内容去重**（与显示名无关） |
 
-处理流程（两条入口共用解析 / 分块 / 可选向量）：
+处理流程（两条入口共用 **Knowledge Engine** 摄取管线）：
 
-1. **解析**：按类型提取文本（PDF / TXT / Markdown）；资料库入库前先算内容哈希，已存在则直接复用
-2. **分块**：切成可检索片段并写入本机 SQLite（分表）
-3. **检索**：按**本轮消息**勾选的范围（会话附件和/或资料库）取片段注入上下文；草稿选中发送后清空，打开历史不会自动恢复上次勾选，但可再次从本会话附件列表中选择
+1. **解析**：按类型提取文本（PDF / TXT / Markdown）；扫描/混合 PDF 可走 Apple Vision OCR（`process_revision` Job）
+2. **分块 / 索引**：切成可检索片段写入 SQLite；资料库入库前内容哈希去重
+3. **检索**：按**本轮消息**勾选范围 → `HybridRetriever`（默认 FTS；可选向量 + RRF）→ 注入上下文并带结构化引用
+4. 草稿选中发送后清空；打开历史不自动恢复上次勾选，但可再次从本会话附件列表选择
 
-资料库显示名可在导入时填写，也可事后在资料卡片上重命名；改名不会重建索引。
+资料库显示名可在导入时填写，也可事后重命名；改名不会重建索引。
 
-**默认只做关键词检索**（keyword），不加载向量模型，开箱无额外内存开销。关键词无命中时不会强行塞无关片段。
+**默认只做关键词检索**（FTS5），不加载向量模型。已选资料但 0 命中时，会向模型注入诚实说明，不会乱塞片段。
 
-若要开启**语义向量检索**（keyword + 向量混合，RRF 融合）：
+若要开启**语义向量检索**（需本机加载 ONNX）：
 
-1. 将 `.env.example` 复制为 `.env.local`（若尚未创建）
-2. 设置 `ORYNODE_SEMANTIC_SEARCH=1`
-3. 重启 `npm run local`（由本地 data-service 加载 ONNX 模型 `bge-small-zh-v1.5`；`@xenova/transformers` 已在依赖中）
+1. 复制 `.env.example` → `.env.local`
+2. 设置 `ORYNODE_SEMANTIC_SEARCH=1`（可选 `ORYNODE_EMBEDDING_ARTIFACT=multilingual-e5-small`）
+3. 可选 `npm run embedding:install`；重启 `npm run local`
+4. 设置页知识档位选「自动 / 更高质量」时，在主机开启语义后才会融合向量
 
-开启后：
+开启后新文档异步写向量（`ready` → `embedding` → `indexed`）；旧文档可重建索引。**切换 Embedding artifact 后必须重建向量索引**，禁止混用。
 
-- 新上传的文档会在入库后异步写向量；状态大致为 `ready` → `embedding` → `indexed`（失败为 `error`，仍可 keyword 检索）
-- 开启前已存在的文档，可在资料库中重建索引，或调用 `POST /api/knowledge/reindex` 批量补齐
+> **评测说明**：CI `test:retrieval-eval` 以关键词门禁为主；真实 embedding 召回质量评测另开里程碑。
 
-更完整的 RAG 设计、状态机与扩展接口见 [架构文档](docs/ARCHITECTURE_zh-CN.md)。
+当前实现：[架构文档](docs/ARCHITECTURE_zh-CN.md)。1.1.0 RAG 设计与完成度：[Knowledge Engine](docs/knowledge-engine/README.md)、[CHANGELOG](CHANGELOG.md)。
 
 ## 系统要求
 
@@ -98,8 +119,16 @@ npm run model:progress
 
 单独查看当前进度不会中断或重新启动下载。
 
-`npm run setup` 会先安装 TurboFieldfare，再下载模型。也可以分别执行
-`npm run turbo:install` 和 `npm run model:install`。
+`npm run setup` 会依次：安装 TurboFieldfare（若尚未安装）→ 下载模型 → 编译并安装本机 OCR helper（Apple Vision，产出 `.orynode/bin/orynode-ocr`，供扫描/混合 PDF 文字识别）。也可以分别执行：
+
+```bash
+npm run turbo:install   # TurboFieldfare
+npm run model:install   # Gemma 4 模型
+npm run ocr:install     # OCR helper（需 Swift；非 macOS 会跳过）
+npm run ocr:bench       # OCR micro-bench（默认 Fake；真机加 ORYNODE_OCR_BENCH_REAL=1）
+```
+
+`npm run doctor` 可检查 OCR helper 是否可用。
 
 ## 日常启动
 
@@ -107,14 +136,16 @@ npm run model:progress
 npm run local
 ```
 
-启动后终端会显示两类地址：
+启动后终端会显示本机地址 `http://localhost:3000`。若设置
+`ORYNODE_ACCESS_MODE=trusted_lan`，还会显示局域网地址，并要求设备完成配对
+（本机设置页「Trusted-LAN 配对」生成码，设备 `POST /api/lan/pairing` claim）。
 
-- 当前 Mac 使用 `http://localhost:3000`；
-- 同一局域网的电脑使用终端显示的 `http://本机IP:3000`。
+只有 Web 入口会监听局域网；TurboFieldfare 和 SQLite 数据服务仍只监听
+`127.0.0.1`，不直接暴露。
 
-所有设备共享服务器 Mac 上的对话、本地资料和本地模型。只有 Web 入口会监听局域网；TurboFieldfare 和 SQLite 数据服务仍只监听 `127.0.0.1`。
-
-V1 暂无用户账号和访问权限，请只在可信局域网使用，不要将 3000 端口映射到公网。按下 `Control+C` 可以停止服务。
+Trusted-LAN 正式路径使用一次性配对码与可撤销会话；
+`ORYNODE_TRUSTED_LAN_UNSAFE=1` 仅为**无认证开发预览**，不得当作安全共享模式，
+也不要映射 3000 端口到公网。按下 `Control+C` 可以停止服务。
 
 如果你已经单独管理 TurboFieldfare，可以执行 `npm run dev`，只启动 Web
 界面。如需修改本地 API 地址，请将 `.env.example` 复制为
@@ -130,24 +161,26 @@ orynode-local-ai/
 │   ├── hooks/                    #   自定义 Hooks (useChat/useKnowledge/useConversations/useSettings)
 │   └── api/                      #   API 路由 (chat/status/conversations/knowledge/settings)
 ├── services/                     # 核心业务逻辑（纯 TypeScript）
-│   ├── chat/                     #   System prompt
-│   ├── inference/                #   TurboFieldfare 适配（chat/status 共用）
-│   ├── knowledge/                #   解析/分块/可选向量/检索（唯一智能）
+│   ├── chat/                     #   Prompt / SSE v1 / 上下文预算
+│   ├── platform/                 #   Host / ModelRuntime / LAN / OCR 装配（含 Windows stub）
+│   ├── knowledge/                #   Knowledge Engine：解析/分块/检索/OCR 管线
+│   ├── agent/                    #   受控知识工具 + Agent space（无 UI 主路径）
 │   └── settings/                 #   运行时设置
-├── config/                       # 集中配置
-│   └── defaults.ts
-├── scripts/                      # 运维脚本
-│   ├── start-local.mjs           #   一键启动
-│   ├── local-data-service.mjs    #   薄存储层（:4318，SQLite）
-│   └── ...
-├── worker/                       # vinext 本地运行时入口（非云端业务）
-├── db/                           # 说明：业务数据不在此，见 README
+├── native/macos/orynode-ocr/     # Apple Vision OCR helper（源码；.build 不入库）
+├── config/                       # defaults + embedding-artifacts
+├── scripts/                      # 运维 + data-service 模块
+│   ├── start-local.mjs
+│   ├── local-data-service.mjs
+│   └── data-service/             #   FTS / jobs / worker / OCR blocks / LAN…
+├── worker/                       # vinext 本地运行时入口
 ├── .orynode/                     # 运行时数据（gitignore）
-│   ├── data/orynode.db           #   SQLite（对话 + 知识库）
-│   ├── knowledge/files/          #   已上传资料（PDF / TXT / MD）
-│   └── models/                   #   Gemma 4 模型
-└── docs/                         # 文档
-    └── ARCHITECTURE_zh-CN.md     #   架构说明
+│   ├── data/orynode.db
+│   ├── bin/orynode-ocr           #   OCR 可执行文件（install 产出）
+│   ├── knowledge/files/
+│   └── models/                   #   Gemma 4
+└── docs/
+    ├── ARCHITECTURE_zh-CN.md
+    └── knowledge-engine/         #   RAG / KE 设计与完成度（1.1.0）
 ```
 
 ### 三层服务架构
@@ -181,6 +214,9 @@ orynode-local-ai/
 - [隐私说明](PRIVACY.md)
 - [安全说明](SECURITY.md)
 - [架构文档](docs/ARCHITECTURE_zh-CN.md)
+- [Knowledge Engine 文档索引](docs/knowledge-engine/README.md)
+- [AI Knowledge Engine 长期架构](docs/knowledge-engine/KNOWLEDGE_ENGINE_ARCHITECTURE_zh-CN.md)
+- [AI Knowledge Engine 架构符合性审计与整改实施计划](docs/knowledge-engine/KNOWLEDGE_ENGINE_IMPLEMENTATION_PLAN_zh-CN.md)
 - [故障排查](docs/TROUBLESHOOTING_zh-CN.md)
 
 ## 贡献说明

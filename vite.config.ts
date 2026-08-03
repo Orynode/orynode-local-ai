@@ -74,11 +74,23 @@ export default defineConfig(async () => {
     },
     optimizeDeps: {
       // pdfjs worker 不能被 Vite 预构建进 deps_rsc（会丢 worker 文件）
-      exclude: ["@xenova/transformers", "pdfjs-dist"],
+      // jsdom/octokit 仅在 Node data-service 使用，勿预构建进 Workers
+      exclude: [
+        "@xenova/transformers",
+        "pdfjs-dist",
+        "jsdom",
+        "@mozilla/readability",
+        "@octokit/rest",
+      ],
     },
     ssr: {
       // 让服务端用 node_modules 原包，避免 worker 路径被改写
-      external: ["pdfjs-dist"],
+      external: [
+        "pdfjs-dist",
+        "jsdom",
+        "@mozilla/readability",
+        "@octokit/rest",
+      ],
     },
     plugins: [
       vinext(),

@@ -4,5 +4,7 @@
   "topK": 64,
   "maxContext": 16384,
   "maxTokens": 0,
+  "knowledgeTier": "auto",
+  "ocrMode": "auto",
   "allowedMaxContext": [4096, 8192, 16384, 32768, 65536]
 }

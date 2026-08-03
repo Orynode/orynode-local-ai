@@ -86,6 +86,22 @@ else
   check "Conversation database" "not created yet" "no"
 fi
 
+OCR_HELPER="${RUNTIME_ROOT}/bin/orynode-ocr"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  if [[ -x "${OCR_HELPER}" ]]; then
+    cap_json="$("${OCR_HELPER}" --capabilities 2>/dev/null | head -n 1 || true)"
+    if [[ -n "${cap_json}" ]] && printf '%s' "${cap_json}" | grep -q '"available"[[:space:]]*:[[:space:]]*true'; then
+      check "OCR helper" "orynode-ocr available (Vision ok)" "yes"
+    else
+      check "OCR helper" "installed but Vision unavailable; rebuild with npm run ocr:install" "no"
+    fi
+  else
+    check "OCR helper" "missing; run npm run ocr:install" "no"
+  fi
+else
+  check "OCR helper" "macOS only (Windows OCR pending)" "yes"
+fi
+
 printf '\n'
 if [[ "${problems}" -eq 0 ]]; then
   printf 'Everything required by Orynode is ready.\n'

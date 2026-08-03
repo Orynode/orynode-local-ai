@@ -1,4 +1,5 @@
 import { ORYNODE_DATA_URL, HTTP_TIMEOUT } from "../../../config/defaults";
+import { lanDeniedResponse } from "../../../services/platform";
 
 const dataUrl = ORYNODE_DATA_URL;
 
@@ -24,14 +25,20 @@ async function forward(method: "GET" | "POST" | "DELETE", request?: Request) {
   }
 }
 
-export function GET() {
+export function GET(request: Request) {
+  const denied = lanDeniedResponse(request);
+  if (denied) return denied;
   return forward("GET");
 }
 
 export function POST(request: Request) {
+  const denied = lanDeniedResponse(request);
+  if (denied) return denied;
   return forward("POST", request);
 }
 
-export function DELETE() {
+export function DELETE(request: Request) {
+  const denied = lanDeniedResponse(request);
+  if (denied) return denied;
   return forward("DELETE");
 }

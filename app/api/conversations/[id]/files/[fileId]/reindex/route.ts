@@ -4,12 +4,15 @@
 
 import { ORYNODE_DATA_URL, HTTP_TIMEOUT } from "../../../../../../../config/defaults";
 import { reindexDocument } from "../../../../../../../services/knowledge";
+import { lanDeniedResponse } from "../../../../../../../services/platform";
 
 type RouteContext = {
   params: Promise<{ id: string; fileId: string }>;
 };
 
-export async function POST(_request: Request, context: RouteContext) {
+export async function POST(request: Request, context: RouteContext) {
+  const denied = lanDeniedResponse(request);
+  if (denied) return denied;
   try {
     const { id: conversationId, fileId } = await context.params;
     if (!conversationId || !fileId) {

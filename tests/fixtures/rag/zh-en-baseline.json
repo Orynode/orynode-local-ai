@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "description": "Phase 0 最小中英检索表征集（不含隐私数据）",
+  "cases": [
+    {
+      "id": "zh-exact-term",
+      "query": "知识引擎",
+      "documents": [
+        {
+          "id": "doc-zh-1",
+          "name": "架构.md",
+          "chunks": [
+            "Orynode AI 知识引擎负责摄取与检索。",
+            "Chat 只通过公开接口调用公开 API。"
+          ]
+        }
+      ],
+      "relevantChunkSubstrings": ["知识引擎负责摄取"]
+    },
+    {
+      "id": "en-synonym",
+      "query": "local private AI server",
+      "documents": [
+        {
+          "id": "doc-en-1",
+          "name": "product.txt",
+          "chunks": [
+            "Orynode turns your device into a local, private AI server.",
+            "Cloud control planes are not part of the default path."
+          ]
+        }
+      ],
+      "relevantChunkSubstrings": ["local, private AI server"]
+    },
+    {
+      "id": "no-answer",
+      "query": "股票收益率预测模型参数",
+      "documents": [
+        {
+          "id": "doc-misc",
+          "name": "readme.md",
+          "chunks": ["本项目关注本地文档检索与对话，不涉及金融行情。"]
+        }
+      ],
+      "relevantChunkSubstrings": []
+    }
+  ]
+}

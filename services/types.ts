@@ -10,6 +10,49 @@ export type MessageAttachment =
   | { kind: "library_all"; id: "all"; name: string }
   | { kind: "conversation_file"; id: string; name: string };
 
+/** 持久化到消息的引用快照（与 KnowledgeEngine Citation 对齐的子集） */
+export type MessageCitation = {
+  /** Prompt / UI 中的 [S#] */
+  id: string;
+  /** 稳定 chunk 主键；缺省时（旧消息）可用 id 若碰巧是 chunk id */
+  chunkId?: string;
+  documentId: string;
+  revisionId: string;
+  processingBuildId: string;
+  title: string;
+  sourceType: string;
+  locator:
+    | {
+        kind: "page";
+        page: number;
+        startOffset?: number;
+        endOffset?: number;
+      }
+    | {
+        kind: "markdown";
+        headingPath?: string[];
+        startLine?: number;
+        endLine?: number;
+      }
+    | {
+        kind: "web";
+        url?: string;
+        headingPath?: string[];
+        textFragment?: string;
+      }
+    | {
+        kind: "code";
+        repo?: string;
+        path?: string;
+        commit?: string;
+        startLine?: number;
+        endLine?: number;
+      }
+    | { kind: "text"; startOffset: number; endOffset: number }
+    | Record<string, unknown>;
+  excerpt: string;
+};
+
 export interface Message {
   id: string;
   role: MessageRole;
@@ -17,6 +60,17 @@ export interface Message {
   createdAt: string;
   durationMs?: number;
   attachments?: MessageAttachment[];
+  /** 本轮提供给模型的引用（provided），不等于模型实际引用 */
+  citations?: MessageCitation[];
+  referencedCitationIds?: string[];
+  retrievalTraceId?: string;
+  /** 检索诊断（可选，调试用；历史消息可能没有） */
+  retrievalDiagnostics?: {
+    strategy: string[];
+    candidateCount: number;
+    elapsedMs: number;
+    degradedCapabilities: string[];
+  };
 }
 
 export interface ConversationSummary {
@@ -29,6 +83,9 @@ export interface ConversationSummary {
 
 export type KnowledgeDocumentStatus =
   | "awaiting_chunks"
+  | "stored"
+  | "processing"
+  | "processing_error"
   | "ready"
   | "embedding"
   | "indexed"
@@ -82,6 +139,10 @@ export interface RuntimeSettings {
   topK: number;
   maxContext: number;
   maxTokens: number;
+  /** 知识检索：auto / lite（省资源）/ balanced / quality（更高质量） */
+  knowledgeTier: "auto" | "lite" | "balanced" | "quality";
+  /** 扫描 PDF OCR：自动（默认）/ 关闭 */
+  ocrMode: "auto" | "disabled";
 }
 
 export interface ChatMessage {

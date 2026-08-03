@@ -1,8 +1,9 @@
 /**
- * 对话上下文预算：按 maxContext 裁剪历史，给 system / 回复留空间
+ * 对话上下文预算：按 maxContext 拆分 history / knowledge / output reserve
  */
 
 import type { ChatMessage } from "../types";
+import type { ContextBudget } from "../knowledge/core/types";
 
 /** 中英混合粗估：约 2 字符 ≈ 1 token（偏保守，少超窗） */
 export function estimateTokens(text: string): number {
@@ -18,25 +19,50 @@ function truncateToBudget(text: string, tokenBudget: number): string {
 }
 
 /**
- * 从最新消息往前保留，直到预算用尽。
- * system 与 reserveReply 不占用返回的 history 额度。
+ * 从模型窗口扣除 system 固定开销、输出保留与安全余量后，
+ * 拆出独立的 history / knowledge 预算。
  */
-export function trimChatHistory(
-  systemContent: string,
+export function resolveContextBudget(params: {
+  modelContextTokens: number;
+  systemBaseTokens: number;
+  outputReserveTokens: number;
+  safetyMarginTokens?: number;
+  /** 剩余额度中知识上下文占比；默认 0.45 */
+  knowledgeShare?: number;
+}): ContextBudget {
+  const modelContextTokens = Math.max(1024, Math.floor(params.modelContextTokens));
+  const safetyMarginTokens = Math.max(
+    32,
+    Math.floor(params.safetyMarginTokens ?? 64),
+  );
+  const outputReserveTokens = Math.max(
+    0,
+    Math.floor(params.outputReserveTokens),
+  );
+  const systemBaseTokens = Math.max(0, Math.floor(params.systemBaseTokens));
+  const remaining = Math.max(
+    256,
+    modelContextTokens - systemBaseTokens - outputReserveTokens - safetyMarginTokens,
+  );
+  const share = Math.min(0.75, Math.max(0.2, params.knowledgeShare ?? 0.45));
+  const knowledgeBudgetTokens = Math.max(128, Math.floor(remaining * share));
+  const historyBudgetTokens = Math.max(128, remaining - knowledgeBudgetTokens);
+
+  return {
+    modelContextTokens,
+    outputReserveTokens,
+    historyBudgetTokens,
+    knowledgeBudgetTokens,
+    safetyMarginTokens,
+  };
+}
+
+/** 在显式 token 预算内从最新消息往前保留历史 */
+export function trimChatHistoryToTokenBudget(
   history: ChatMessage[],
-  maxContext: number,
-  options: { maxTokens?: number } = {},
+  tokenBudget: number,
 ): ChatMessage[] {
-  const contextLimit = Math.max(1024, Math.floor(maxContext));
-  const replyReserve =
-    options.maxTokens && options.maxTokens > 0
-      ? Math.min(options.maxTokens, Math.floor(contextLimit * 0.4))
-      : Math.max(512, Math.floor(contextLimit * 0.15));
-
-  const systemCost = estimateTokens(systemContent) + 8;
-  let budget = contextLimit - systemCost - replyReserve;
-  if (budget < 256) budget = 256;
-
+  const budget = Math.max(32, Math.floor(tokenBudget));
   if (history.length === 0) return [];
 
   const kept: ChatMessage[] = [];
@@ -47,7 +73,6 @@ export function trimChatHistory(
     const cost = estimateTokens(message.content) + 4;
 
     if (kept.length === 0) {
-      // 至少保留最新一条；超预算则截断内容
       if (cost > budget) {
         kept.unshift({
           ...message,

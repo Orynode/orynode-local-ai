@@ -18,7 +18,6 @@ import {
 } from "../../lib/attachments";
 
 type PanelMode = "closed" | "actions" | "library" | "params";
-type FilePickMode = "attach" | "import";
 
 type HotSettings = Pick<
   RuntimeSettings,
@@ -75,10 +74,8 @@ interface ComposerProps {
   onDraftAttachmentsChange: (next: MessageAttachment[]) => void;
   uploading: boolean;
   uploadState?: KnowledgeUploadState | null;
-  /** 附到本对话（会话附件） */
+  /** 上传为本对话附件并自动选中 */
   onAttachFileSelect: (file: File) => void;
-  /** 导入资料库（持久） */
-  onImportLibrarySelect: (file: File) => void;
   /** 删除本会话附件（落盘 + 索引） */
   onRemoveConversationFile?: (fileId: string) => void;
   /** 重建本会话附件向量 */
@@ -102,7 +99,6 @@ export function Composer({
   uploading,
   uploadState = null,
   onAttachFileSelect,
-  onImportLibrarySelect,
   onRemoveConversationFile,
   onReindexConversationFile,
   hotSettings,
@@ -110,22 +106,21 @@ export function Composer({
 }: ComposerProps) {
   const composer = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
-  const filePickMode = useRef<FilePickMode>("attach");
   const panelRef = useRef<HTMLDivElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragDepth = useRef(0);
   const [panel, setPanel] = useState<PanelMode>("closed");
   const [draft, setDraft] = useState<HotSettings>(hotSettings);
-  const [paramsHelpOpen, setParamsHelpOpen] = useState(false);
-  const [draggingFile, setDraggingFile] = useState(false);
-
-  useEffect(() => {
+  const [prevHotSettings, setPrevHotSettings] = useState(hotSettings);
+  if (hotSettings !== prevHotSettings) {
+    setPrevHotSettings(hotSettings);
     setDraft(hotSettings);
-  }, [hotSettings]);
-
-  useEffect(() => {
-    if (panel !== "params") setParamsHelpOpen(false);
-  }, [panel]);
+  }
+  const [paramsHelpOpen, setParamsHelpOpen] = useState(false);
+  if (panel !== "params" && paramsHelpOpen) {
+    setParamsHelpOpen(false);
+  }
+  const [draggingFile, setDraggingFile] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -182,8 +177,8 @@ export function Composer({
     };
   }, [onAttachFileSelect, uploading]);
 
-  function openAttachMenu() {
-    setPanel("actions");
+  function openSourcePicker() {
+    setPanel("library");
   }
 
   function resize(element: HTMLTextAreaElement | null = composer.current) {
@@ -254,8 +249,7 @@ export function Composer({
     onSubmit(draft);
   }
 
-  function openFilePicker(mode: FilePickMode) {
-    filePickMode.current = mode;
+  function openFilePicker() {
     setPanel("closed");
     fileInput.current?.click();
   }
@@ -280,7 +274,8 @@ export function Composer({
       {draggingFile ? (
         <div className="composer-drop-overlay" role="status" aria-live="polite">
           <div className="composer-drop-card">
-            <strong>松开以附到本对话</strong>
+            <strong>松开以上传文件</strong>
+            <small>将作为本对话附件，并用于下一条消息</small>
             <p>支持 PDF、TXT、Markdown（不会写入资料库）</p>
           </div>
         </div>
@@ -303,7 +298,9 @@ export function Composer({
             <small>
               {uploadState.phase === "uploading"
                 ? `上传中 ${uploadState.percent}%`
-                : "正在解析…"}
+                : uploadState.phase === "ocr"
+                  ? uploadState.detail || "正在识别扫描页…"
+                  : "正在分析 PDF…"}
             </small>
           </span>
         </div>
@@ -343,33 +340,19 @@ export function Composer({
 
       <div className="composer-picker-anchor" ref={panelRef}>
         {panel === "actions" ? (
-          <div className="composer-actions" role="menu" aria-label="附加操作">
+          <div className="composer-actions" role="menu" aria-label="添加资料">
             <button
               type="button"
               role="menuitem"
               disabled={uploading}
-              onClick={() => openFilePicker("attach")}
+              onClick={() => openFilePicker()}
             >
               <span className="composer-action-icon" aria-hidden>
                 <Icon name="attach" />
               </span>
               <span className="composer-action-copy">
-                <strong>附到本对话</strong>
-                <small>仅本会话可用，不写入资料库</small>
-              </span>
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              disabled={uploading}
-              onClick={() => openFilePicker("import")}
-            >
-              <span className="composer-action-icon" aria-hidden>
-                <Icon name="database" />
-              </span>
-              <span className="composer-action-copy">
-                <strong>导入资料库</strong>
-                <small>PDF / TXT / Markdown，永久保存</small>
+                <strong>上传文件</strong>
+                <small>附到本对话，并用于下一条消息</small>
               </span>
             </button>
             <button
@@ -381,7 +364,7 @@ export function Composer({
                 <Icon name="database" />
               </span>
               <span className="composer-action-copy">
-                <strong>选择检索范围</strong>
+                <strong>选择资料</strong>
                 <small>本对话附件或资料库，仅作用于下次发送</small>
               </span>
             </button>
@@ -391,7 +374,7 @@ export function Composer({
         {panel === "library" ? (
           <div className="composer-picker" role="dialog" aria-label="选择本条消息的检索资料">
             <div className="composer-picker-head">
-              <strong>本条消息检索范围</strong>
+              <strong>选择资料</strong>
               <button type="button" onClick={() => setPanel("closed")}>
                 完成
               </button>
@@ -426,7 +409,12 @@ export function Composer({
                               ? "已选"
                               : file.status === "error"
                                 ? "索引失败"
-                                : `${file.chunkCount} 片段`}
+                                : file.status === "processing" ||
+                                    file.status === "stored"
+                                  ? "正在识别…"
+                                  : file.status === "processing_error"
+                                    ? "识别失败"
+                                    : `${file.chunkCount} 片段`}
                           </small>
                         </button>
                         <div className="composer-picker-row-actions">
@@ -465,7 +453,7 @@ export function Composer({
             ) : null}
             {documents.length === 0 && conversationFiles.length === 0 ? (
               <p className="composer-picker-empty">
-                还没有可检索内容。可「附到本对话」，或「导入资料库」。
+                还没有可检索内容。可先「上传文件」，或到资料库页面导入。
               </p>
             ) : documents.length > 0 ? (
               <>
@@ -645,21 +633,15 @@ export function Composer({
             accept="application/pdf,.pdf,text/plain,.txt,text/markdown,.md,.markdown"
             onChange={(event) => {
               const file = event.target.files?.[0];
-              if (file) {
-                if (filePickMode.current === "import") {
-                  onImportLibrarySelect(file);
-                } else {
-                  onAttachFileSelect(file);
-                }
-              }
+              if (file) onAttachFileSelect(file);
               if (fileInput.current) fileInput.current.value = "";
             }}
           />
           <button
             className={`attach ${plusActive ? "active" : ""}`}
             type="button"
-            title="附加"
-            aria-label="附加"
+            title="添加资料"
+            aria-label="添加资料"
             aria-expanded={panel === "actions" || panel === "library"}
             aria-haspopup="menu"
             onClick={() =>
@@ -677,10 +659,10 @@ export function Composer({
             value={input}
             onChange={(event) => {
               const next = event.target.value;
-              // 空输入时粘贴/输入以 @ 开头 → 打开附加菜单（与 + 相同）
+              // 空输入以 @ 开头 → 直接打开「选择资料」（引用已有内容）
               if (input === "" && next.startsWith("@")) {
                 onInputChange(next.replace(/^@+/, ""));
-                openAttachMenu();
+                openSourcePicker();
                 requestAnimationFrame(() => resize(event.currentTarget));
                 return;
               }
@@ -690,14 +672,14 @@ export function Composer({
             onKeyDown={(event) => {
               if (event.nativeEvent.isComposing || event.keyCode === 229) return;
               const el = event.currentTarget;
-              // 光标在开头输入 @ → 打开附加菜单，不写入 @
+              // 光标在开头输入 @ → 打开选择资料，不写入 @
               if (
                 event.key === "@" &&
                 el.selectionStart === 0 &&
                 el.selectionEnd === 0
               ) {
                 event.preventDefault();
-                openAttachMenu();
+                openSourcePicker();
                 return;
               }
               if (event.key !== "Enter") return;
@@ -708,7 +690,7 @@ export function Composer({
               event.preventDefault();
               void handleSubmit();
             }}
-            placeholder="输入问题；Shift+Enter 换行"
+            placeholder="输入问题；@ 选择资料；Shift+Enter 换行"
             rows={1}
           />
           <button

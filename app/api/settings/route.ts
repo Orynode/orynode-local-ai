@@ -6,8 +6,11 @@
  */
 
 import { settingsService } from "../../../services/settings";
+import { lanDeniedResponse } from "../../../services/platform";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const denied = lanDeniedResponse(request);
+  if (denied) return denied;
   try {
     const snapshot = await settingsService.getSettings();
     return Response.json(snapshot);
@@ -20,6 +23,8 @@ export async function GET() {
 }
 
 export async function PUT(request: Request) {
+  const denied = lanDeniedResponse(request);
+  if (denied) return denied;
   try {
     const body = await request.json();
     const result = await settingsService.updateSettings(

@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   KnowledgeDocument,
+  KnowledgeDocumentStatus,
   Message,
   MessageAttachment,
 } from "../services/types";
@@ -22,7 +23,6 @@ import { AlertDialog } from "./components/ui/AlertDialog";
 import { ConfirmDialog } from "./components/ui/ConfirmDialog";
 import { GITHUB_REPO_URL } from "../config/defaults";
 import {
-  DEFAULT_DISPLAY_NAME,
   readStoredDisplayName,
 } from "./lib/displayName";
 import { attachmentFromConversationFile } from "./lib/attachments";
@@ -32,6 +32,85 @@ type PendingDelete =
   | { type: "knowledge"; id: string }
   | null;
 
+const PENDING_INDEX_STATUSES = new Set<KnowledgeDocumentStatus>([
+  "processing",
+  "stored",
+  "awaiting_chunks",
+]);
+
+const FAILED_INDEX_STATUSES = new Set<KnowledgeDocumentStatus>([
+  "processing_error",
+  "error",
+]);
+
+function attachmentReadinessError(
+  attachments: MessageAttachment[],
+  conversationFiles: Array<{ id: string; name: string; status?: KnowledgeDocumentStatus }>,
+  documents: Array<{ id: string; name: string; status?: KnowledgeDocumentStatus }>,
+): string | null {
+  const readyOrIndexing = new Set<KnowledgeDocumentStatus>([
+    "ready",
+    "embedding",
+    "indexed",
+  ]);
+
+  for (const item of attachments) {
+    if (item.kind === "conversation_file") {
+      const file = conversationFiles.find((entry) => entry.id === item.id);
+      if (!file) {
+        return `「${item.name}」尚未同步到本对话附件列表，请稍后再发送`;
+      }
+      const status = file.status;
+      if (!status) {
+        return `「${file.name}」状态未知，请稍后再发送或刷新后重试`;
+      }
+      if (PENDING_INDEX_STATUSES.has(status)) {
+        return `「${file.name}」仍在识别中，请稍后再发送`;
+      }
+      if (FAILED_INDEX_STATUSES.has(status)) {
+        return `「${file.name}」识别失败，请删除或重建后再试`;
+      }
+      if (!readyOrIndexing.has(status)) {
+        return `「${file.name}」尚未可检索（${status}），请稍后再发送`;
+      }
+    }
+    if (item.kind === "library") {
+      const doc = documents.find((entry) => entry.id === item.id);
+      if (!doc) {
+        return `「${item.name}」不在资料库列表中，请刷新后再挂载`;
+      }
+      const status = doc.status;
+      if (!status) {
+        return `「${doc.name}」状态未知，请稍后再发送或刷新后重试`;
+      }
+      if (PENDING_INDEX_STATUSES.has(status)) {
+        return `「${doc.name}」仍在处理中，请稍后再发送`;
+      }
+      if (FAILED_INDEX_STATUSES.has(status)) {
+        return `「${doc.name}」处理失败，请到资料库重试后再挂载`;
+      }
+      if (!readyOrIndexing.has(status)) {
+        return `「${doc.name}」尚未可检索（${status}），请稍后再发送`;
+      }
+    }
+    if (item.kind === "library_all") {
+      const pending = documents.find(
+        (doc) => doc.status && PENDING_INDEX_STATUSES.has(doc.status),
+      );
+      if (pending) {
+        return `资料库中「${pending.name}」仍在处理中；全部资料检索可能不完整，请稍后再发送或取消「全部资料」`;
+      }
+      const failed = documents.find(
+        (doc) => doc.status && FAILED_INDEX_STATUSES.has(doc.status),
+      );
+      if (failed) {
+        return `资料库中「${failed.name}」处理失败；请先处理失败文档或取消「全部资料」后再发送`;
+      }
+    }
+  }
+  return null;
+}
+
 export default function Home() {
   // ---- State ----
   const [input, setInput] = useState("");
@@ -40,7 +119,7 @@ export default function Home() {
   const [conversationTitle, setConversationTitle] = useState("");
   const [viewMode, setViewMode] = useState<"assistant" | "knowledge">("assistant");
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-  const [displayName, setDisplayName] = useState(DEFAULT_DISPLAY_NAME);
+  const [displayName, setDisplayName] = useState(readStoredDisplayName);
   const [pendingDelete, setPendingDelete] = useState<PendingDelete>(null);
   /** 内容去重命中时弹窗（对话页也可见） */
   const [duplicateNotice, setDuplicateNotice] =
@@ -49,6 +128,8 @@ export default function Home() {
   const [draftAttachments, setDraftAttachments] = useState<MessageAttachment[]>(
     [],
   );
+  /** 取消进行中的会话附件上传，避免 New Chat 后脏写 draft */
+  const attachGenerationRef = useRef(0);
 
   // ---- Hooks ----
   const chat = useChat();
@@ -59,7 +140,6 @@ export default function Home() {
 
   // ---- Init ----
   useEffect(() => {
-    setDisplayName(readStoredDisplayName());
     const t = setTimeout(() => {
       void chat.checkStatus();
       void conversations.refresh();
@@ -107,6 +187,19 @@ export default function Home() {
   }) {
     const content = input.trim();
     if (!content || chat.sending) return;
+
+    if (draftAttachments.length > 0) {
+      const readiness = attachmentReadinessError(
+        draftAttachments,
+        conversationFiles.files,
+        knowledge.documents,
+      );
+      if (readiness) {
+        chat.setError(readiness);
+        return;
+      }
+    }
+
     setInput("");
 
     const sampling = hot ?? {
@@ -145,6 +238,10 @@ export default function Home() {
 
   async function handleOpenConversation(id: string) {
     try {
+      attachGenerationRef.current += 1;
+      conversationFiles.abortUpload();
+      conversationFiles.clear();
+      chat.discardActiveRun();
       const conv = await conversations.load(id);
       setConversationId(conv.id);
       setConversationTitle(conv.title);
@@ -174,6 +271,8 @@ export default function Home() {
       try {
         await conversations.remove(current.id);
         if (conversationId === current.id) {
+          attachGenerationRef.current += 1;
+          conversationFiles.abortUpload();
           setConversationId(null);
           setConversationTitle("");
           chat.clearChat();
@@ -187,7 +286,8 @@ export default function Home() {
       return;
     }
 
-    await knowledge.remove(current.id);
+    const removed = await knowledge.remove(current.id);
+    if (!removed) return;
     setDraftAttachments((prev) =>
       prev.filter(
         (item) =>
@@ -212,8 +312,11 @@ export default function Home() {
     }
   }
 
-  async function ensureConversationId(): Promise<string> {
-    if (conversationId) return conversationId;
+  async function ensureConversationId(): Promise<{
+    id: string;
+    created: boolean;
+  }> {
+    if (conversationId) return { id: conversationId, created: false };
     const response = await fetch("/api/conversations", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -227,28 +330,54 @@ export default function Home() {
     setConversationId(id);
     setConversationTitle(result.conversation.title || "新对话");
     void conversations.refresh();
-    return id;
+    return { id, created: true };
   }
 
   /** 附到本对话：会话附件命名空间 */
   async function handleAttachConversationFile(file: File) {
+    const generation = ++attachGenerationRef.current;
+    let createdId: string | null = null;
+
+    const discardCreatedConversation = () => {
+      if (!createdId) return;
+      const id = createdId;
+      createdId = null;
+      void conversations
+        .remove(id)
+        .then(() => conversations.refresh())
+        .catch(() => undefined);
+    };
+
     try {
-      const id = await ensureConversationId();
-      const uploaded = await conversationFiles.upload(id, file);
-      if (uploaded) {
-        setDraftAttachments((prev) => {
-          if (
-            prev.some(
-              (item) =>
-                item.kind === "conversation_file" && item.id === uploaded.id,
-            )
-          ) {
-            return prev;
-          }
-          return [...prev, attachmentFromConversationFile(uploaded)];
-        });
+      const ensured = await ensureConversationId();
+      if (ensured.created) createdId = ensured.id;
+      if (generation !== attachGenerationRef.current) {
+        discardCreatedConversation();
+        return;
       }
+      const uploaded = await conversationFiles.upload(ensured.id, file);
+      if (generation !== attachGenerationRef.current) {
+        if (!uploaded) discardCreatedConversation();
+        return;
+      }
+      if (!uploaded) return;
+      createdId = null;
+      setDraftAttachments((prev) => {
+        if (
+          prev.some(
+            (item) =>
+              item.kind === "conversation_file" && item.id === uploaded.file.id,
+          )
+        ) {
+          return prev;
+        }
+        return [...prev, attachmentFromConversationFile(uploaded.file)];
+      });
     } catch (e) {
+      if (generation !== attachGenerationRef.current) {
+        discardCreatedConversation();
+        return;
+      }
       conversationFiles.setError(
         e instanceof Error ? e.message : "无法附到本对话",
       );
@@ -256,21 +385,47 @@ export default function Home() {
   }
 
   function handleNewChat() {
+    const previousId = conversationId;
+    const hadMessages = chat.messages.length > 0;
+    const fileCount = conversationFiles.files.length;
+    const wasUploading = conversationFiles.uploading;
+    const draftHasConversationFile = draftAttachments.some(
+      (item) => item.kind === "conversation_file",
+    );
+    attachGenerationRef.current += 1;
+    conversationFiles.abortUpload();
+    conversationFiles.clear();
     setConversationId(null);
     setConversationTitle("");
     chat.clearChat();
     setDraftAttachments([]);
-    conversationFiles.clear();
     setViewMode("assistant");
+    // 仅清理真正空壳；列表为空但草稿仍挂会话附件时不删，避免 refresh 失败误删
+    if (
+      previousId &&
+      !hadMessages &&
+      fileCount === 0 &&
+      !wasUploading &&
+      !draftHasConversationFile
+    ) {
+      void conversations
+        .remove(previousId)
+        .then(() => conversations.refresh())
+        .catch(() => undefined);
+    }
   }
 
   /** 资料库「去对话」：始终新开空对话，再挂上本轮资料库草稿 */
   function handleAttachToChat(attachments: MessageAttachment[]) {
+    attachGenerationRef.current += 1;
+    conversationFiles.abortUpload();
+    conversationFiles.clear();
     setConversationId(null);
     setConversationTitle("");
     chat.clearChat();
-    conversationFiles.clear();
-    setDraftAttachments(attachments);
+    setDraftAttachments(
+      attachments.filter((item) => item.kind !== "conversation_file"),
+    );
     setViewMode("assistant");
   }
 
@@ -410,10 +565,17 @@ export default function Home() {
             error={knowledge.error}
             onDelete={(id) => { void handleDeleteKnowledge(id); }}
             onReindex={(id) => { void knowledge.reindex(id); }}
+            onReprocess={(id) => { void knowledge.reprocess(id); }}
             onReindexAll={() => { void knowledge.reindexAll(); }}
             onRename={(id, name) => knowledge.rename(id, name)}
             onImport={(file, options) => {
               void handleUploadKnowledge(file, options);
+            }}
+            onImportWeb={(url) => {
+              void knowledge.importWeb(url);
+            }}
+            onImportGitHub={(input) => {
+              void knowledge.importGitHub(input);
             }}
             onAttachToChat={handleAttachToChat}
           />
@@ -423,9 +585,22 @@ export default function Home() {
               connected={chat.connected}
               onSuggestionClick={(text) => setInput(text)}
             />
-            {(knowledge.error || conversationFiles.error) && (
-              <div className="error-banner">
-                {knowledge.error || conversationFiles.error}
+            {chat.error && <div className="error-banner">{chat.error}</div>}
+            {(knowledge.error ||
+              conversationFiles.error ||
+              settingsHook.error ||
+              conversationFiles.notice) && (
+              <div
+                className={
+                  knowledge.error || conversationFiles.error || settingsHook.error
+                    ? "error-banner"
+                    : "notice-banner"
+                }
+              >
+                {knowledge.error ||
+                  conversationFiles.error ||
+                  settingsHook.error ||
+                  conversationFiles.notice}
               </div>
             )}
             <Composer
@@ -446,9 +621,6 @@ export default function Home() {
               }
               onAttachFileSelect={(file) => {
                 void handleAttachConversationFile(file);
-              }}
-              onImportLibrarySelect={(file) => {
-                void handleUploadKnowledge(file);
               }}
               onRemoveConversationFile={(fileId) => {
                 void handleRemoveConversationFile(fileId);
@@ -473,9 +645,21 @@ export default function Home() {
         ) : (
           <>
             {chat.error && <div className="error-banner">{chat.error}</div>}
-            {(knowledge.error || conversationFiles.error) && (
-              <div className="error-banner">
-                {knowledge.error || conversationFiles.error}
+            {(knowledge.error ||
+              conversationFiles.error ||
+              settingsHook.error ||
+              conversationFiles.notice) && (
+              <div
+                className={
+                  knowledge.error || conversationFiles.error || settingsHook.error
+                    ? "error-banner"
+                    : "notice-banner"
+                }
+              >
+                {knowledge.error ||
+                  conversationFiles.error ||
+                  settingsHook.error ||
+                  conversationFiles.notice}
               </div>
             )}
             <ChatView
@@ -503,9 +687,6 @@ export default function Home() {
               }
               onAttachFileSelect={(file) => {
                 void handleAttachConversationFile(file);
-              }}
-              onImportLibrarySelect={(file) => {
-                void handleUploadKnowledge(file);
               }}
               onRemoveConversationFile={(fileId) => {
                 void handleRemoveConversationFile(fileId);
@@ -578,6 +759,7 @@ export default function Home() {
         maxContextRestartRequired={settingsHook.maxContextRestartRequired}
         displayName={displayName}
         onDisplayNameChange={setDisplayName}
+        settingsError={settingsHook.error}
         onSaveSettings={async (s) => {
           const result = await settingsHook.save(s);
           return result;

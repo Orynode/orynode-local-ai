@@ -109,6 +109,8 @@ export class SQLiteVectorStore implements VectorStore {
       content: string;
       embedding: number[] | null;
       source?: "library" | "conversation_file";
+      revisionId?: string;
+      processingBuildId?: string;
     }> = result.chunks ?? [];
 
     const scored = chunks
@@ -122,6 +124,8 @@ export class SQLiteVectorStore implements VectorStore {
           position: chunk.position,
           content: chunk.content,
           source: chunk.source ?? "library",
+          revisionId: chunk.revisionId,
+          processingBuildId: chunk.processingBuildId,
         },
         score: cosineSimilarity(
           queryVector,

@@ -2,7 +2,10 @@
 
 import { useState } from "react";
 import type { KnowledgeDocument } from "../../../services/types";
-import { statusLabel } from "../../../services/knowledge/status";
+import {
+  processingErrorLabel,
+  statusLabel,
+} from "../../../services/knowledge/status";
 import { Icon } from "../ui/Icon";
 
 interface DocumentCardProps {
@@ -13,6 +16,7 @@ interface DocumentCardProps {
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onReindex: (id: string) => void;
+  onReprocess?: (id: string) => void;
   onRename: (id: string, name: string) => void | Promise<unknown>;
 }
 
@@ -24,11 +28,15 @@ export function DocumentCard({
   onSelect,
   onDelete,
   onReindex,
+  onReprocess,
   onRename,
 }: DocumentCardProps) {
   const status = document.status ?? "ready";
+  const canReprocess =
+    Boolean(onReprocess) && status === "processing_error";
   const canReindex =
     showReindex &&
+    !canReprocess &&
     (status === "ready" || status === "indexed" || status === "error");
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(document.name);
@@ -92,7 +100,11 @@ export function DocumentCard({
             {document.pageCount} 页 ·{" "}
             {(document.size / 1024 / 1024).toFixed(1)} MB ·{" "}
             {document.chunkCount} 片段 · {statusLabel(status)}
-            {document.errorMessage ? `（${document.errorMessage}）` : ""}
+            {status === "processing_error" && document.errorMessage
+              ? `（${processingErrorLabel(document.errorMessage)}）`
+              : document.errorMessage && status !== "processing"
+                ? `（${document.errorMessage}）`
+                : ""}
             {document.originalName && document.originalName !== document.name
               ? ` · 原文件 ${document.originalName}`
               : ""}
@@ -113,6 +125,18 @@ export function DocumentCard({
         >
           重命名
         </button>
+        {canReprocess && (
+          <button
+            className="knowledge-reindex"
+            type="button"
+            disabled={reindexing}
+            aria-label={`重试识别：${document.name}`}
+            title="重新识别扫描页"
+            onClick={() => onReprocess?.(document.id)}
+          >
+            重试
+          </button>
+        )}
         {canReindex && (
           <button
             className="knowledge-reindex"
