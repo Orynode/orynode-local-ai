@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { RuntimeSettings } from "../../../services/types";
 import { GITHUB_REPO_URL } from "../../../config/defaults";
+import packageJson from "../../../package.json";
 import {
   DEFAULT_DISPLAY_NAME,
   persistDisplayName,
@@ -814,13 +815,96 @@ export function SettingsPanel({
               aria-labelledby="settings-tab-about"
               className="settings-tab-panel"
             >
+              <div className="version-callout">
+                <strong>
+                  V{packageJson.version} · Knowledge Engine
+                </strong>
+                <p>
+                  完整体验面向 Apple Silicon Mac。对话、检索与资料默认留在本机；
+                  Windows 仅为 ModelRuntime / OCR adapter 预留，本版不提供可用产品体验。
+                </p>
+              </div>
+
+              <div className="settings-about">
+                <strong>对话模型与推理</strong>
+                <dl className="settings-tech-list">
+                  <div>
+                    <dt>对话 LLM</dt>
+                    <dd>
+                      <strong>Gemma 4 26B A4B IT</strong>（4-bit）— 本机生成；权重约
+                      15GB，路径 <code>.orynode/models/gemma4.gturbo</code>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>推理运行时</dt>
+                    <dd>
+                      <strong>TurboFieldfare</strong>（Swift / Metal）— OpenAI 兼容{" "}
+                      <code>:8080/v1</code>；仅 macOS ModelRuntime adapter
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>调用边界</dt>
+                    <dd>
+                      Chat / Status 经 <code>ModelRuntime</code>
+                      ，Web 与 Knowledge Engine 不直连推理端口；采样与上下文长度见「模型」页
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+
+              <div className="settings-about">
+                <strong>知识引擎技术点</strong>
+                <dl className="settings-tech-list">
+                  <div>
+                    <dt>检索</dt>
+                    <dd>
+                      Hybrid：默认 <strong>SQLite FTS5</strong>
+                      （中文 bigram / search_text）+ 可选语义向量；RRF 融合；档位 Lite /
+                      Balanced / Quality / Auto
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Embedding</dt>
+                    <dd>
+                      默认推荐 <strong>multilingual-e5-small</strong>（384 维，ONNX /
+                      Xenova）；兼容基线 bge-small-zh-v1.5；实验 bge-m3。需{" "}
+                      <code>ORYNODE_SEMANTIC_SEARCH=1</code>
+                      ；仅 Data Service 加载，不进浏览器包
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>向量后端</dt>
+                    <dd>
+                      生产固定 <strong>blob_scan</strong>（SQLite BLOB + JS
+                      余弦）；sqlite-vec 仅 adapter 占位，资料量很大且评测证明瓶颈时再评估
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>OCR / PDF</dt>
+                    <dd>
+                      macOS <strong>Apple Vision</strong>（
+                      <code>orynode-ocr</code>）；pdfjs 原生文本 + 按页质量路由。Windows
+                      PP-OCR/ONNX 仅 stub
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>存储与协议</dt>
+                    <dd>
+                      SQLite + Job Worker（Data Service <code>:4318</code>
+                      ，仅 127.0.0.1）；结构化 Citation；Chat SSE v1 引用协议；Trusted-LAN
+                      可绑局域网，推理与 DB 仍回环
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+
               <ol className="setup-steps">
                 <li>
                   <span>1</span>
                   <div>
                     <strong>完成首次安装</strong>
                     <code>npm run setup</code>
-                    <p>自动安装 TurboFieldfare 并下载约 15GB 的本地模型。</p>
+                    <p>自动安装 TurboFieldfare 并下载约 15GB 的本地 Gemma 4 模型。</p>
                   </div>
                 </li>
                 <li>
@@ -844,7 +928,8 @@ export function SettingsPanel({
               <div className="settings-about">
                 <strong>关于与开源</strong>
                 <p>
-                  Orynode Local AI 以 MIT 许可开源。可在 GitHub 查看源码、提交
+                  Orynode Local AI 以 MIT 许可开源。底层 Gemma 4 权重与许可由 Google
+                  提供，与应用源码开源分开说明。可在 GitHub 查看源码、提交
                   Issues；当前阶段暂不接受外部 Pull Request。
                 </p>
                 <a

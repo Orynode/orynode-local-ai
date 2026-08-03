@@ -2706,7 +2706,8 @@ button {
 .settings-tab-panel > .model-settings:first-child,
 .settings-tab-panel > .profile-setting:first-child,
 .settings-tab-panel > .version-callout:first-child,
-.settings-tab-panel > .setup-steps:first-child {
+.settings-tab-panel > .setup-steps:first-child,
+.settings-tab-panel > .settings-about:first-child {
   margin-top: 0;
 }
 
@@ -2975,6 +2976,42 @@ button {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.55;
+}
+
+.settings-tech-list {
+  display: grid;
+  gap: 12px;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.settings-tech-list > div {
+  margin: 0;
+}
+
+.settings-tech-list dt {
+  margin: 0;
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.settings-tech-list dd {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.settings-tech-list dd strong {
+  display: inline;
+  font-size: inherit;
+  color: #2f3d34;
+}
+
+.settings-tech-list code {
+  font-size: 11px;
 }
 
 .settings-about a {
