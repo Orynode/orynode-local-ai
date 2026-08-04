@@ -2,6 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import type { KnowledgeDocument, MessageAttachment } from "../../../services/types";
+import type { RetrievalHit } from "../../../services/knowledge/types";
 import type { KnowledgeMeta } from "../../hooks/useKnowledge";
 import {
   allDocumentsAttachment,
@@ -88,17 +89,7 @@ export function KnowledgeView({
   const [highlightTerms, setHighlightTerms] = useState<string[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchPage, setSearchPage] = useState(1);
-  const [searchHits, setSearchHits] = useState<
-    Array<{
-      id: string;
-      documentId?: string;
-      documentName: string;
-      pageNumber: number;
-      content: string;
-      score: number;
-      source: string;
-    }>
-  >([]);
+  const [searchHits, setSearchHits] = useState<RetrievalHit[]>([]);
   const [searchDiag, setSearchDiag] = useState<string>("");
 
   const semanticOn = meta?.semanticSearchEnabled === true;

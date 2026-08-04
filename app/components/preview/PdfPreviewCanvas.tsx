@@ -10,6 +10,7 @@ import { friendlyPdfError } from "../../lib/preview-errors";
 import {
   isHighlightPageActive,
   rectsForHighlightPlan,
+  pdfRectToViewport,
   resolvePdfHighlightPlan,
   type PdfTextItemLike,
   type NormalizedBboxTuple,
@@ -161,10 +162,15 @@ export function PdfPreviewCanvas({
   useEffect(() => {
     if (!session) return;
     const { epoch, numPages } = session;
-    const doc = docRef.current;
-    if (!doc || epochRef.current !== epoch || docRef.current !== doc) {
+    const maybeDoc = docRef.current;
+    if (
+      !maybeDoc ||
+      epochRef.current !== epoch ||
+      docRef.current !== maybeDoc
+    ) {
       return;
     }
+    const doc: PDFDocumentProxy = maybeDoc;
 
     let cancelled = false;
     let renderTask: RenderTask | null = null;
@@ -280,7 +286,7 @@ export function PdfPreviewCanvas({
                 pageHeightPx: height,
                 items,
                 convertToViewportRectangle: (pdfRect) =>
-                  viewport.convertToViewportRectangle(pdfRect),
+                  pdfRectToViewport(viewport, pdfRect),
               });
               hctx.fillStyle = "rgb(36 74 54 / 28%)";
               for (const rect of rects) {

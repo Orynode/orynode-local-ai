@@ -115,6 +115,17 @@ export function highlightRectForNormalizedBbox(
   return { left, top, width, height };
 }
 
+/** pdf.js v6 移除 convertToViewportRectangle；用两点还原矩形 */
+export function pdfRectToViewport(
+  viewport: { convertToViewportPoint(x: number, y: number): number[] },
+  pdfRect: number[],
+): number[] {
+  const [x0, y0, x1, y1] = pdfRect;
+  const [vx0, vy0] = viewport.convertToViewportPoint(x0, y0);
+  const [vx1, vy1] = viewport.convertToViewportPoint(x1, y1);
+  return [vx0, vy0, vx1, vy1];
+}
+
 /**
  * 将 [startOffset, endOffset) 映射到视口矩形。
  * 偏移按 items[].str 以空格拼接计算（与 parsePdf / chunk 抽取一致）。

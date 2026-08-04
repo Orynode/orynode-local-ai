@@ -97,7 +97,7 @@ function DocumentPreviewPanel({
   const [reloadToken, setReloadToken] = useState(0);
   const textRef = useRef<HTMLPreElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
-  const panelRef = useRef<HTMLAsideElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
   const titleId = "doc-preview-title";
 
   const title = intent?.title || fileName || "文档预览";

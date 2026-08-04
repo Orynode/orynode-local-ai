@@ -65,12 +65,18 @@ export async function renderPdfPageToPng(
     createCanvas = canvasMod.createCanvas;
     // pdfjs page.render 走全局 Path2D；pdf-dom-polyfill 的 stub 只有 addPath，
     // 复杂页会报 path.moveTo is not a function。Node 渲染必须换成 napi 实现。
-    const g = globalThis as typeof globalThis & {
-      Path2D?: typeof canvasMod.Path2D;
-      DOMMatrix?: typeof canvasMod.DOMMatrix;
+    type GlobalWithPdfShims = typeof globalThis & {
+      Path2D?: new (...args: unknown[]) => unknown;
+      DOMMatrix?: new (...args: unknown[]) => unknown;
     };
-    if (canvasMod.Path2D) g.Path2D = canvasMod.Path2D;
-    if (canvasMod.DOMMatrix) g.DOMMatrix = canvasMod.DOMMatrix;
+    const g = globalThis as GlobalWithPdfShims;
+    if (canvasMod.Path2D) {
+      g.Path2D = canvasMod.Path2D as unknown as GlobalWithPdfShims["Path2D"];
+    }
+    if (canvasMod.DOMMatrix) {
+      g.DOMMatrix =
+        canvasMod.DOMMatrix as unknown as GlobalWithPdfShims["DOMMatrix"];
+    }
   } catch {
     throw new Error("OCR_RENDER_UNAVAILABLE");
   }
