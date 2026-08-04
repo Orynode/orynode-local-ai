@@ -301,7 +301,7 @@ export async function runProcessRevisionJob(ctx: ProcessRevisionJobContext) {
       revisionId,
       ocrEngine: cap?.engine ?? null,
       ocrVersion: cap?.engineVersion ?? null,
-      configHash: `ocr:${mode}:${OCR_CONFIG.helperProtocolVersion}`,
+      configHash: `ocr:${mode}:${OCR_CONFIG.recognitionLevel}:v${OCR_CONFIG.helperProtocolVersion}`,
     });
     processingBuildId = build.id;
   }
@@ -435,7 +435,7 @@ export async function runProcessRevisionJob(ctx: ProcessRevisionJobContext) {
           mimeType: "image/png",
           width: rendered.width,
           height: rendered.height,
-          recognitionLevel: "fast",
+          recognitionLevel: OCR_CONFIG.recognitionLevel,
           imagePath: rendered.pngPath,
         });
         const blocks = recognized.blocks.map((b, i) => ({

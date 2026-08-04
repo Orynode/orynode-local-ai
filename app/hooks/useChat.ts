@@ -6,7 +6,7 @@ import type {
   MessageAttachment,
   MessageCitation,
 } from "../../services/types";
-import { extractReferencedCitationIds } from "../../services/chat/prompt";
+import { canonicalizeAssistantCitations } from "../../services/chat/prompt";
 import { scopeFromAttachments } from "../lib/attachments";
 
 export type { Message };
@@ -105,6 +105,31 @@ export function useChat() {
       let retrievalDiagnostics: Message["retrievalDiagnostics"];
       const startedAt = performance.now();
 
+      // 落库真相：流式结束后唯一一次 canonicalize，写入 content + referencedCitationIds。
+      // 展示侧 prepareAssistantCitationMarkdown 可再跑（幂等），用于流式原文与历史兜底。
+      const finalizeAnswer = (text: string) => {
+        if (!text || providedCitations.length === 0) {
+          return { content: text, referencedIds: referencedCitationIds };
+        }
+        return canonicalizeAssistantCitations(
+          text,
+          providedCitations.map((item) => item.id),
+        );
+      };
+
+      const buildAssistant = (text: string): Message => ({
+        ...assistantMessage,
+        content: text,
+        ...(providedCitations.length > 0
+          ? { citations: providedCitations }
+          : {}),
+        ...(referencedCitationIds.length > 0
+          ? { referencedCitationIds }
+          : {}),
+        ...(retrievalTraceId ? { retrievalTraceId } : {}),
+        ...(retrievalDiagnostics ? { retrievalDiagnostics } : {}),
+      });
+
       setMessages([...nextMessages, assistantMessage]);
       setSending(true);
       setError("");
@@ -140,19 +165,6 @@ export function useChat() {
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
-
-        const buildAssistant = (text: string): Message => ({
-          ...assistantMessage,
-          content: text,
-          ...(providedCitations.length > 0
-            ? { citations: providedCitations }
-            : {}),
-          ...(referencedCitationIds.length > 0
-            ? { referencedCitationIds }
-            : {}),
-          ...(retrievalTraceId ? { retrievalTraceId } : {}),
-          ...(retrievalDiagnostics ? { retrievalDiagnostics } : {}),
-        });
 
         try {
           while (true) {
@@ -273,15 +285,10 @@ export function useChat() {
 
         if (!isCurrent()) return null;
 
-        if (
-          referencedCitationIds.length === 0 &&
-          providedCitations.length > 0 &&
-          answer
-        ) {
-          referencedCitationIds = extractReferencedCitationIds(
-            answer,
-            providedCitations.map((item) => item.id),
-          );
+        if (answer) {
+          const finalized = finalizeAnswer(answer);
+          answer = finalized.content;
+          referencedCitationIds = finalized.referencedIds;
         }
 
         // 流中报错且无任何输出：按失败回滚，不落幽灵用户消息
@@ -320,31 +327,17 @@ export function useChat() {
           cancelledRef.current ||
           (e instanceof DOMException && e.name === "AbortError")
         ) {
-          if (
-            referencedCitationIds.length === 0 &&
-            providedCitations.length > 0 &&
-            answer
-          ) {
-            referencedCitationIds = extractReferencedCitationIds(
-              answer,
-              providedCitations.map((item) => item.id),
-            );
+          if (answer) {
+            const finalized = finalizeAnswer(answer);
+            answer = finalized.content;
+            referencedCitationIds = finalized.referencedIds;
           }
           const completed: Message[] = answer
             ? [
                 ...nextMessages,
                 {
-                  ...assistantMessage,
-                  content: answer,
+                  ...buildAssistant(answer),
                   durationMs: Math.round(performance.now() - startedAt),
-                  ...(providedCitations.length > 0
-                    ? { citations: providedCitations }
-                    : {}),
-                  ...(referencedCitationIds.length > 0
-                    ? { referencedCitationIds }
-                    : {}),
-                  ...(retrievalTraceId ? { retrievalTraceId } : {}),
-                  ...(retrievalDiagnostics ? { retrievalDiagnostics } : {}),
                 },
               ]
             : nextMessages;

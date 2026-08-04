@@ -176,6 +176,11 @@ export const OCR_CONFIG = {
   maxBlockTextChars: 8_000,
   maxPageTextChars: 100_000,
   helperProtocolVersion: 1,
+  /**
+   * Apple Vision：fast 对中文扫描页常产出乱码；accurate 慢一些但可用。
+   * 本机资料库默认 accurate。
+   */
+  recognitionLevel: "accurate" as "fast" | "accurate",
 } as const;
 
 export type OcrMode = "auto" | "disabled";
@@ -193,7 +198,16 @@ export type AccessMode = "local_only" | "trusted_lan";
 // 文件上传限制
 // ============================================================
 
-export const MAX_KNOWLEDGE_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
+/** 单文件上传上限（高清少页 PDF 可能很大；解析另有页数/OCR 资源上限） */
+export const MAX_KNOWLEDGE_FILE_SIZE = 150 * 1024 * 1024; // 150 MB
+export const MAX_KNOWLEDGE_FILE_SIZE_LABEL = "150 MB";
+
+/** 文本内嵌预览最大读取字节（超出截断） */
+export const PREVIEW_TEXT_MAX_BYTES = 2 * 1024 * 1024;
+/** 超过此大小预览时提示可能较慢（仍允许打开） */
+export const PREVIEW_SIZE_WARN_BYTES = 40 * 1024 * 1024;
+/** 小 PDF 整包进内存再交给 pdf.js 的上限；更大则走 URL 流式加载 */
+export const PREVIEW_PDF_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
 
 // ============================================================
 // HTTP 超时
@@ -202,6 +216,8 @@ export const MAX_KNOWLEDGE_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
 export const HTTP_TIMEOUT = {
   status: 1200,
   knowledge: 5000,
+  /** 原件预览 / 大文件字节拉取 */
+  knowledgeFile: 2 * 60 * 1000,
   knowledgeImport: 2 * 60 * 1000,
   embeddingStatus: 8000,
   embedding: 10 * 60 * 1000,

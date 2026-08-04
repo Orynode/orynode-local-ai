@@ -89,6 +89,9 @@ export function parseHelperResponseLine(
   }
 
   const blocks: OcrBlock[] = [];
+  const warnings: string[] = Array.isArray(o.warnings)
+    ? o.warnings.filter((w): w is string => typeof w === "string")
+    : [];
   for (const item of o.blocks) {
     if (!item || typeof item !== "object") {
       throw new Error("OCR_HELPER_PROTOCOL_ERROR");
@@ -103,7 +106,14 @@ export function parseHelperResponseLine(
     if (typeof b.readingOrder !== "number" || !Number.isFinite(b.readingOrder)) {
       throw new Error("OCR_HELPER_PROTOCOL_ERROR");
     }
-    const bbox = parseNormalizedBbox(b.bbox);
+    let bbox;
+    try {
+      bbox = parseNormalizedBbox(b.bbox);
+    } catch {
+      // 不可修复的 bbox：丢弃该块，保留其余文本，避免整页失败
+      warnings.push("skipped_invalid_bbox");
+      continue;
+    }
     blocks.push({
       text: b.text,
       bbox,
@@ -129,8 +139,6 @@ export function parseHelperResponseLine(
     engine: typeof o.engine === "string" ? o.engine : "unknown",
     engineVersion:
       typeof o.engineVersion === "string" ? o.engineVersion : "unknown",
-    warnings: Array.isArray(o.warnings)
-      ? o.warnings.filter((w): w is string => typeof w === "string")
-      : [],
+    warnings,
   };
 }

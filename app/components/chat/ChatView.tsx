@@ -9,6 +9,7 @@ interface ChatViewProps {
   sending: boolean;
   displayName: string;
   copiedMessageId: string | null;
+  conversationId?: string | null;
   onCopy: (message: Message, format: "txt" | "md") => void;
 }
 
@@ -17,6 +18,7 @@ export function ChatView({
   sending,
   displayName,
   copiedMessageId,
+  conversationId = null,
   onCopy,
 }: ChatViewProps) {
   const ref = useRef<HTMLDivElement>(null);
@@ -56,6 +58,7 @@ export function ChatView({
               displayName={displayName}
               thinking={thinking}
               copiedMessageId={copiedMessageId}
+              conversationId={conversationId}
               onCopy={onCopy}
             />
           );

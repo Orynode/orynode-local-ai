@@ -8,18 +8,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OCR_CONFIG } from "../../../config/defaults";
-
-type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
-
-async function loadPdfJs(): Promise<PdfJsModule> {
-  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const worker = await import("pdfjs-dist/legacy/build/pdf.worker.mjs");
-  const g = globalThis as typeof globalThis & {
-    pdfjsWorker?: unknown;
-  };
-  g.pdfjsWorker = worker;
-  return pdfjs;
-}
+import { loadPdfJs } from "../pdfjs-load";
 
 export type RenderedPageImage = {
   pageNumber: number;
@@ -72,7 +61,16 @@ export async function renderPdfPageToPng(
 
   let createCanvas: typeof import("@napi-rs/canvas").createCanvas;
   try {
-    ({ createCanvas } = await import("@napi-rs/canvas"));
+    const canvasMod = await import("@napi-rs/canvas");
+    createCanvas = canvasMod.createCanvas;
+    // pdfjs page.render 走全局 Path2D；pdf-dom-polyfill 的 stub 只有 addPath，
+    // 复杂页会报 path.moveTo is not a function。Node 渲染必须换成 napi 实现。
+    const g = globalThis as typeof globalThis & {
+      Path2D?: typeof canvasMod.Path2D;
+      DOMMatrix?: typeof canvasMod.DOMMatrix;
+    };
+    if (canvasMod.Path2D) g.Path2D = canvasMod.Path2D;
+    if (canvasMod.DOMMatrix) g.DOMMatrix = canvasMod.DOMMatrix;
   } catch {
     throw new Error("OCR_RENDER_UNAVAILABLE");
   }

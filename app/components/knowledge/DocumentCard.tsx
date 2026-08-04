@@ -18,6 +18,7 @@ interface DocumentCardProps {
   onReindex: (id: string) => void;
   onReprocess?: (id: string) => void;
   onRename: (id: string, name: string) => void | Promise<unknown>;
+  onPreview?: (document: KnowledgeDocument) => void;
 }
 
 export function DocumentCard({
@@ -30,6 +31,7 @@ export function DocumentCard({
   onReindex,
   onReprocess,
   onRename,
+  onPreview,
 }: DocumentCardProps) {
   const status = document.status ?? "ready";
   const canReprocess =
@@ -137,6 +139,17 @@ export function DocumentCard({
             重试
           </button>
         )}
+        {onPreview ? (
+          <button
+            className="knowledge-reindex"
+            type="button"
+            aria-label={`预览：${document.name}`}
+            title="预览原件"
+            onClick={() => onPreview(document)}
+          >
+            预览
+          </button>
+        ) : null}
         {canReindex && (
           <button
             className="knowledge-reindex"

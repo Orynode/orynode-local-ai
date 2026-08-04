@@ -25,8 +25,7 @@ import {
   formatCitationBlock,
   truncateChunkForBudget,
 } from "./token-pack";
-
-const EXCERPT_MAX = 240;
+import { buildCitationExcerpt } from "./citation-excerpt";
 
 const PROMPT_FRAME_OVERHEAD = `
 
@@ -76,7 +75,11 @@ export function locatorFromHit(hit: RetrievalHit): CitationLocator {
   return page;
 }
 
-export function citationFromHit(hit: RetrievalHit, index: number): Citation {
+export function citationFromHit(
+  hit: RetrievalHit,
+  index: number,
+  terms: readonly string[] = [],
+): Citation {
   const content = hit.content;
   return {
     id: `S${index + 1}`,
@@ -87,15 +90,15 @@ export function citationFromHit(hit: RetrievalHit, index: number): Citation {
     title: hit.documentName,
     sourceType: hit.source,
     locator: locatorFromHit(hit),
-    excerpt:
-      content.length > EXCERPT_MAX
-        ? `${content.slice(0, EXCERPT_MAX)}…`
-        : content,
+    excerpt: buildCitationExcerpt(content, terms),
   };
 }
 
-export function citationsFromHits(hits: RetrievalHit[]): Citation[] {
-  return hits.map((hit, index) => citationFromHit(hit, index));
+export function citationsFromHits(
+  hits: RetrievalHit[],
+  terms: readonly string[] = [],
+): Citation[] {
+  return hits.map((hit, index) => citationFromHit(hit, index, terms));
 }
 
 /** 由 S# 或 chunkId 解析到 Citation（优先 chunkId） */
@@ -124,12 +127,17 @@ function resolveCitationForHit(
   hit: RetrievalHit,
   index: number,
   preset: Map<string, Citation>,
+  terms: readonly string[] = [],
 ): Citation {
   const existing = preset.get(hit.id);
   if (existing) {
-    return { ...existing, id: `S${index + 1}` };
+    return {
+      ...existing,
+      id: `S${index + 1}`,
+      excerpt: buildCitationExcerpt(hit.content, terms),
+    };
   }
-  return citationFromHit(hit, index);
+  return citationFromHit(hit, index, terms);
 }
 
 /**
@@ -168,6 +176,7 @@ export function buildContextPackage(
   }
 
   const preset = citationLookup(request);
+  const excerptTerms = request.excerptTerms ?? [];
   const frameCost = estimateTokens(PROMPT_FRAME_OVERHEAD);
   let used = Math.min(frameCost, Number.isFinite(budget) ? budget : frameCost);
   const packedHits: RetrievalHit[] = [];
@@ -177,7 +186,12 @@ export function buildContextPackage(
   for (const hit of candidates) {
     const nextIndex = packedCitations.length;
     let content = hit.content;
-    let citation = resolveCitationForHit(hit, nextIndex, preset);
+    let citation = resolveCitationForHit(
+      hit,
+      nextIndex,
+      preset,
+      excerptTerms,
+    );
     let block = formatCitationBlock(citation, content);
     let cost = estimateBlockTokens(block);
 
@@ -195,11 +209,8 @@ export function buildContextPackage(
       const truncated = truncateChunkForBudget(content, available);
       content = truncated.text;
       citation = {
-        ...resolveCitationForHit(hit, 0, preset),
-        excerpt:
-          content.length > EXCERPT_MAX
-            ? `${content.slice(0, EXCERPT_MAX)}…`
-            : content,
+        ...resolveCitationForHit(hit, 0, preset, excerptTerms),
+        excerpt: buildCitationExcerpt(content, excerptTerms),
       };
       block = formatCitationBlock(citation, content);
       cost = estimateBlockTokens(block);
@@ -212,10 +223,7 @@ export function buildContextPackage(
         content = emergency.text;
         citation = {
           ...citation,
-          excerpt:
-            content.length > EXCERPT_MAX
-              ? `${content.slice(0, EXCERPT_MAX)}…`
-              : content,
+          excerpt: buildCitationExcerpt(content, excerptTerms),
         };
       }
       packedHits.push(hit);

@@ -27,6 +27,8 @@ export type MessageCitation = {
         page: number;
         startOffset?: number;
         endOffset?: number;
+        /** OCR 归一化框：[x, y, width, height]，左上角原点，0..1 */
+        bbox?: [number, number, number, number];
       }
     | {
         kind: "markdown";
@@ -61,7 +63,9 @@ export interface Message {
   durationMs?: number;
   attachments?: MessageAttachment[];
   /** 本轮提供给模型的引用（provided），不等于模型实际引用 */
+  /** 本轮提供给模型的引用快照（provided）；胶囊 popover lookup 依赖此字段 */
   citations?: MessageCitation[];
+  /** 正文实际引用的 id（落库字段；由 useChat.finalizeAnswer 写入） */
   referencedCitationIds?: string[];
   retrievalTraceId?: string;
   /** 检索诊断（可选，调试用；历史消息可能没有） */

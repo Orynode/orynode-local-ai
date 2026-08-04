@@ -13,6 +13,7 @@ import {
 } from "../core/types";
 import type { RetrievalHit, RetrievalScope } from "../types";
 import { enrichCitationsWithSourceLocators } from "../context/enrich-citations";
+import { buildCitationExcerpt } from "../context/citation-excerpt";
 import {
   defaultScopePolicy,
   type ChunkAccessMeta,
@@ -128,10 +129,7 @@ export async function citationFromChunk(
     title: chunk.documentName,
     sourceType: chunk.source,
     locator: { kind: "page", page: chunk.pageNumber },
-    excerpt:
-      chunk.content.length > 240
-        ? `${chunk.content.slice(0, 240)}…`
-        : chunk.content,
+    excerpt: buildCitationExcerpt(chunk.content),
   };
   const [enriched] = await enrichCitationsWithSourceLocators([base]);
   return enriched;

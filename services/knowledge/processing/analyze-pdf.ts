@@ -6,29 +6,8 @@
 
 import "../pdf-dom-polyfill";
 import type { ParsedDocument, ParsedPage } from "../types";
+import { loadPdfJs } from "../pdfjs-load";
 import { assessPageTextQuality, type PageTextQuality } from "./page-quality";
-
-type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
-
-let pdfjsPromise: Promise<PdfJsModule> | null = null;
-
-async function loadPdfJs(): Promise<PdfJsModule> {
-  if (!pdfjsPromise) {
-    pdfjsPromise = (async () => {
-      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-      const worker = (await import(
-        /* @vite-ignore */
-        "pdfjs-dist/legacy/build/pdf.worker.mjs"
-      )) as { WorkerMessageHandler: unknown };
-      const g = globalThis as typeof globalThis & {
-        pdfjsWorker?: { WorkerMessageHandler: unknown };
-      };
-      g.pdfjsWorker = worker;
-      return pdfjs;
-    })();
-  }
-  return pdfjsPromise;
-}
 
 const OPS_PAINT_IMAGE_XOBJECT = 85; // pdfjs OPS.paintImageXObject
 

@@ -11,6 +11,8 @@ import {
   hasLexicalHighlight,
   highlightSearchSnippet,
 } from "../../lib/highlight-search-terms";
+import { MAX_KNOWLEDGE_FILE_SIZE_LABEL } from "../../../config/defaults";
+import { useDocumentPreview } from "../../lib/document-preview";
 import { Icon } from "../ui/Icon";
 import { DocumentCard } from "./DocumentCard";
 
@@ -64,6 +66,7 @@ export function KnowledgeView({
   onImportGitHub,
   onAttachToChat,
 }: KnowledgeViewProps) {
+  const { openPreview } = useDocumentPreview();
   const fileInput = useRef<HTMLInputElement>(null);
   const [pickedIds, setPickedIds] = useState<string[]>([]);
   const [pickAll, setPickAll] = useState(false);
@@ -88,6 +91,7 @@ export function KnowledgeView({
   const [searchHits, setSearchHits] = useState<
     Array<{
       id: string;
+      documentId?: string;
       documentName: string;
       pageNumber: number;
       content: string;
@@ -388,16 +392,35 @@ export function KnowledgeView({
             const lexical = hasLexicalHighlight(hit.content, terms);
             return (
               <li key={hit.id}>
-                <strong>
-                  {hit.documentName}
-                  {hit.pageNumber ? ` · p.${hit.pageNumber}` : ""}
-                </strong>
-                <span className="knowledge-meta-line">
-                  score {hit.score?.toFixed?.(3) ?? hit.score} · {hit.source} ·{" "}
-                  {hit.id.slice(0, 8)}
-                  {!lexical ? " · 语义命中" : ""}
-                </span>
-                <p>{highlightSearchSnippet(hit.content, terms, 280)}</p>
+                <button
+                  type="button"
+                  className="knowledge-search-hit-open"
+                  disabled={!hit.documentId}
+                  title={hit.documentId ? "预览原文" : "缺少 documentId"}
+                  onClick={() => {
+                    if (!hit.documentId) return;
+                    openPreview({
+                      documentId: hit.documentId,
+                      sourceType: "library",
+                      title: hit.documentName,
+                      page: hit.pageNumber || 1,
+                      startOffset: hit.startOffset,
+                      endOffset: hit.endOffset,
+                      bbox: hit.bbox,
+                    });
+                  }}
+                >
+                  <strong>
+                    {hit.documentName}
+                    {hit.pageNumber ? ` · p.${hit.pageNumber}` : ""}
+                  </strong>
+                  <span className="knowledge-meta-line">
+                    score {hit.score?.toFixed?.(3) ?? hit.score} · {hit.source} ·{" "}
+                    {hit.id.slice(0, 8)}
+                    {!lexical ? " · 语义命中" : ""}
+                  </span>
+                  <p>{highlightSearchSnippet(hit.content, terms, 280)}</p>
+                </button>
               </li>
             );
           })}
@@ -446,7 +469,10 @@ export function KnowledgeView({
             <Icon name="database" />
           </span>
           <strong>导入第一份资料</strong>
-          <small>支持 PDF、TXT、Markdown，单个文件最大 50 MB；相同内容不会重复入库</small>
+          <small>
+            支持 PDF、TXT、Markdown，单个文件最大 {MAX_KNOWLEDGE_FILE_SIZE_LABEL}
+            ；相同内容不会重复入库
+          </small>
         </button>
       ) : (
         <>
@@ -463,6 +489,14 @@ export function KnowledgeView({
                 onReindex={onReindex}
                 onReprocess={onReprocess}
                 onRename={onRename}
+                onPreview={(document) => {
+                  openPreview({
+                    documentId: document.id,
+                    sourceType: "library",
+                    title: document.name,
+                    page: 1,
+                  });
+                }}
               />
             ))}
           </div>

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildCitedKnowledgePrompt,
   buildKnowledgePrompt,
+  canonicalizeAssistantCitations,
   extractReferencedCitationIds,
 } from "../../services/chat/prompt";
 import {
@@ -206,6 +207,21 @@ test("extractReferencedCitationIds: 只保留允许集合", () => {
     ["S1", "S2"],
   );
   assert.deepEqual(ids, ["S1"]);
+});
+
+test("canonicalizeAssistantCitations: 中段收到该行末尾（协议）", () => {
+  assert.equal(
+    canonicalizeAssistantCitations("第一句。[S1][S2]", ["S1", "S2"]).content,
+    "第一句。[S1][S2]",
+  );
+  assert.equal(
+    canonicalizeAssistantCitations("中间[S1]。仍保留。", ["S1"]).content,
+    "中间。仍保留。[S1]",
+  );
+  assert.equal(
+    canonicalizeAssistantCitations("甲[S1]。\n乙[S2]。", ["S1", "S2"]).content,
+    "甲。[S1]\n乙。[S2]",
+  );
 });
 
 test("buildCitedKnowledgePrompt: 空输入", () => {

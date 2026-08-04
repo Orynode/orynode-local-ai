@@ -68,9 +68,13 @@ export function createScopePolicy(): ScopePolicy {
       ) {
         return true;
       }
+      // 与 canReadChunk 对齐：会话附件必须已绑定 conversationId
+      const files = scope.conversationFiles;
       if (
-        scope.conversationFiles &&
-        scope.conversationFiles.fileIds.includes(documentId)
+        files &&
+        typeof files.conversationId === "string" &&
+        files.conversationId.trim() &&
+        files.fileIds.includes(documentId)
       ) {
         return true;
       }

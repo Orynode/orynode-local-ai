@@ -6,7 +6,10 @@ import {
   detectBrowserFileKind,
   mimeForKind,
 } from "../../services/knowledge/formats";
-import { MAX_KNOWLEDGE_FILE_SIZE } from "../../config/defaults";
+import {
+  MAX_KNOWLEDGE_FILE_SIZE,
+  MAX_KNOWLEDGE_FILE_SIZE_LABEL,
+} from "../../config/defaults";
 
 export interface KnowledgeMeta {
   semanticSearchEnabled: boolean;
@@ -216,7 +219,7 @@ export function useKnowledge() {
         return null;
       }
       if (file.size > MAX_KNOWLEDGE_FILE_SIZE) {
-        setError("文件不能超过 50 MB");
+        setError(`文件不能超过 ${MAX_KNOWLEDGE_FILE_SIZE_LABEL}`);
         return null;
       }
 

@@ -5,6 +5,7 @@
 import { z } from "zod";
 import {
   MAX_KNOWLEDGE_FILE_SIZE,
+  MAX_KNOWLEDGE_FILE_SIZE_LABEL,
 } from "../../../../../config/defaults";
 import { ingestDocument } from "../../../../../services/knowledge";
 import { requireLanAccess } from "../../../../../services/platform";
@@ -40,7 +41,7 @@ export async function POST(request: Request) {
     const contentLength = Number(request.headers.get("content-length") ?? 0);
     if (contentLength > MAX_KNOWLEDGE_FILE_SIZE) {
       return Response.json(
-        { error: "文件不能超过 50 MB", code: "payload_too_large" },
+        { error: `文件不能超过 ${MAX_KNOWLEDGE_FILE_SIZE_LABEL}`, code: "payload_too_large" },
         { status: 413 },
       );
     }
@@ -48,7 +49,7 @@ export async function POST(request: Request) {
     const buffer = await request.arrayBuffer();
     if (buffer.byteLength > MAX_KNOWLEDGE_FILE_SIZE) {
       return Response.json(
-        { error: "文件不能超过 50 MB", code: "payload_too_large" },
+        { error: `文件不能超过 ${MAX_KNOWLEDGE_FILE_SIZE_LABEL}`, code: "payload_too_large" },
         { status: 413 },
       );
     }

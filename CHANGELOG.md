@@ -4,6 +4,50 @@
 `0.x` 期间破坏性或用户可见行为变化可递增次版本（`0.Y.0`）。  
 产品线「V1 源码安装版 / V2 签名安装包」见 README，与 npm `version` 不是同一套编号。
 
+## 1.1.1 — 2026-08-04
+
+1.1.0 后的修订：统一 Chat 引用协议与胶囊 UI、**原件预览**（引用跳页 / OCR 框高亮），并修 PDF/OCR 摄取若干硬故障。
+
+### Added / 新增
+
+#### 原件预览（Document Preview）
+
+- 统一 Intent：`DocumentPreviewProvider` + `openPreview`；资料库卡片 / 检索命中 / 引用胶囊「查看原文」共用
+- 侧栏 Shell：HEAD 探测 MIME / 体积；PDF（pdf.js legacy + 共用 `pdfjs-load`）、文本 `<pre>`、未知格式下载降级
+- Next API：`GET/HEAD /api/knowledge/[id]/file`、`/api/conversations/[id]/files/[fileId]/content`；鉴权与 RAG Scope 脱钩（资料存在性 / 会话附件 `conversationId` 归属）
+- data-service：`/bytes` 流式输出 + loopback 守卫；`x-file-name` / 魔数友好 MIME
+- 引用定位：页码跳转；Markdown / 代码 `startLine`；文本与 PDF `startOffset`/`endOffset`；**OCR 归一化 bbox 框高亮**（优先于字符偏移）
+- 翻页仅在引用页绘制高亮；单页按可视区宽高适配缩放；失败可重试 / 下载原件
+
+### Changed / 变更
+
+#### Citation Protocol（Chat 引用）
+
+- 新增单一协议模块 `services/chat/citation-protocol.ts`：解析 / 行末落点 / 同行合并；Prompt 规则同源
+- 展示适配 `app/lib/citation-markdown.ts`：放行 `citation:`（规避 react-markdown 清空未知协议），行末合并为单胶囊
+- **写库真相**：仅 `useChat.finalizeAnswer` 写入规范正文 + `referencedCitationIds`；SSE `done` 只用 `extractReferencedCitationIds` 下发 ids
+- 行内胶囊：文档短名 + 点击弹层（多来源列表、贴底翻转、可滚动）；**「查看原文」** 打开原件预览
+- `S#` 仅作模型/协议内部编号，用户界面展示文档名
+
+#### OCR / 上传默认
+
+- macOS Vision OCR 默认 `accurate`（`fast` 对中文扫描页易乱码）
+- 单文件上传上限 **50 MB → 150 MB**（文案走 `MAX_KNOWLEDGE_FILE_SIZE_LABEL`）
+
+### Fixed / 修复
+
+- PDF OCR 渲染：Node 侧用 `@napi-rs/canvas` 的 `Path2D`/`DOMMatrix` 覆盖 polyfill stub，避免 `path.moveTo is not a function`
+- OCR bbox：Vision 浮点越界改为钳位，不再因 `OCR_INVALID_BBOX` 整页失败；helper 输出同步钳位
+- 胶囊 `citation:` 锚点稳定组件类型，修复点击无响应（Markdown 重挂载导致 `useId` 错位）
+- 无扩展名 PDF / `octet-stream`：客户端魔数 + 单次 GET 流 peek，避免误判为「不支持内嵌预览」
+- 设置「关于」补充本版模型 / TurboFieldfare / Knowledge Engine 技术点（读 `package.json` version）
+
+### Docs / 工程
+
+- 引用协议职责与字段语义写在模块头与 `Message` 类型注释，避免贡献者误用双写路径
+- 单测：`tests/chat/citation-protocol.test.ts`、`citation-markdown.test.ts`；OCR bbox / Path2D 相关回归
+- 预览：`document-preview.test.ts`、`preview-mime` / `preview-errors`、`preview-file-auth`、`preview-integration`、PDF 高亮与行偏移；`citation-excerpt`
+
 ## 1.1.0 — 2026-08-03
 
 **本版核心：RAG 全面更新**（相对 `0.3.0` 的知识检索 / 摄取 / 引用 / 索引链路重整）。

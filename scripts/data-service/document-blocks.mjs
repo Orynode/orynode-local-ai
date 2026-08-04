@@ -12,20 +12,25 @@ function serializeBbox(bbox) {
   if (!bbox || typeof bbox !== "object") return null;
   const o = /** @type {Record<string, unknown>} */ (bbox);
   const nums = [o.x, o.y, o.width, o.height];
+  if (!nums.every((n) => typeof n === "number" && Number.isFinite(n))) {
+    throw new Error("OCR_INVALID_BBOX");
+  }
   if (
-    !nums.every(
-      (n) => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1,
-    )
+    /** @type {number} */ (o.width) < 0 ||
+    /** @type {number} */ (o.height) < 0
   ) {
     throw new Error("OCR_INVALID_BBOX");
   }
-  const x = /** @type {number} */ (o.x);
-  const y = /** @type {number} */ (o.y);
-  const width = /** @type {number} */ (o.width);
-  const height = /** @type {number} */ (o.height);
-  if (x + width > 1.0000001 || y + height > 1.0000001) {
-    throw new Error("OCR_INVALID_BBOX");
-  }
+  const x = Math.min(1, Math.max(0, /** @type {number} */ (o.x)));
+  const y = Math.min(1, Math.max(0, /** @type {number} */ (o.y)));
+  const width = Math.min(
+    Math.max(0, /** @type {number} */ (o.width)),
+    Math.max(0, 1 - x),
+  );
+  const height = Math.min(
+    Math.max(0, /** @type {number} */ (o.height)),
+    Math.max(0, 1 - y),
+  );
   return JSON.stringify({ x, y, width, height });
 }
 

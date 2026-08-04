@@ -676,8 +676,9 @@ export function SettingsPanel({
                     </select>
                   </label>
                   <p className="model-settings-wide settings-inline-hint">
-                    自动：无文本或疑似扫描页走本机 OCR（macOS Apple Vision）。关闭：只存原件。
-                    Windows OCR 已架构预留，当前不可用。
+                    自动：无文本或疑似扫描页走本机 OCR（macOS Apple Vision
+                    accurate，中文扫描页更稳）。关闭：只存原件。Windows OCR
+                    已架构预留，当前不可用。
                   </p>
                 </div>
               </div>

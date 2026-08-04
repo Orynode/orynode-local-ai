@@ -12,6 +12,7 @@ import { ChatView } from "./components/chat/ChatView";
 import { WelcomeScreen } from "./components/chat/WelcomeScreen";
 import { Composer } from "./components/chat/Composer";
 import { KnowledgeView } from "./components/knowledge/KnowledgeView";
+import { DocumentPreviewShell } from "./components/preview/DocumentPreviewShell";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { useChat } from "./hooks/useChat";
 import { useConversations } from "./hooks/useConversations";
@@ -21,6 +22,7 @@ import { useSettings } from "./hooks/useSettings";
 import { Icon } from "./components/ui/Icon";
 import { AlertDialog } from "./components/ui/AlertDialog";
 import { ConfirmDialog } from "./components/ui/ConfirmDialog";
+import { DocumentPreviewProvider } from "./lib/document-preview";
 import { GITHUB_REPO_URL } from "../config/defaults";
 import {
   readStoredDisplayName,
@@ -469,6 +471,7 @@ export default function Home() {
 
   // ---- Render ----
   return (
+    <DocumentPreviewProvider>
     <main className="app-shell">
       <Sidebar
         knowledgeCount={knowledge.documents.length}
@@ -667,6 +670,7 @@ export default function Home() {
               sending={chat.sending}
               displayName={displayName}
               copiedMessageId={copiedMessageId}
+              conversationId={conversationId}
               onCopy={handleCopy}
             />
             <Composer
@@ -767,6 +771,8 @@ export default function Home() {
         onCheckStatus={() => { void chat.checkStatus(); }}
       />
     </main>
+    <DocumentPreviewShell />
+    </DocumentPreviewProvider>
   );
 }
 

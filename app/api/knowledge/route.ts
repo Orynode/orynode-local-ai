@@ -7,6 +7,7 @@
 import {
   ORYNODE_DATA_URL,
   MAX_KNOWLEDGE_FILE_SIZE,
+  MAX_KNOWLEDGE_FILE_SIZE_LABEL,
   HTTP_TIMEOUT,
   SEARCH_CONFIG,
   EMBEDDING_CONFIG,
@@ -51,7 +52,7 @@ export async function POST(request: Request) {
     const contentLength = Number(request.headers.get("content-length") ?? 0);
     if (contentLength > MAX_KNOWLEDGE_FILE_SIZE) {
       return Response.json(
-        { error: "文件不能超过 50 MB" },
+        { error: `文件不能超过 ${MAX_KNOWLEDGE_FILE_SIZE_LABEL}` },
         { status: 413 },
       );
     }
@@ -59,7 +60,7 @@ export async function POST(request: Request) {
     const buffer = await request.arrayBuffer();
     if (buffer.byteLength > MAX_KNOWLEDGE_FILE_SIZE) {
       return Response.json(
-        { error: "文件不能超过 50 MB" },
+        { error: `文件不能超过 ${MAX_KNOWLEDGE_FILE_SIZE_LABEL}` },
         { status: 413 },
       );
     }

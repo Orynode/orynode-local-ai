@@ -10,7 +10,13 @@ export function isFiniteUnit(n: unknown): n is number {
   return typeof n === "number" && Number.isFinite(n);
 }
 
-/** 校验左上角原点、0..1 归一化 bbox */
+/**
+ * 校验并归一化为左上角原点、落在 [0,1] 内的 bbox。
+ *
+ * Apple Vision 常给出 x+width 略大于 1 的浮点误差；此时钳位裁剪，
+ * 而不是抛 OCR_INVALID_BBOX 导致整页/整文档失败。
+ * 非有限值或负宽高仍拒绝。
+ */
 export function parseNormalizedBbox(raw: unknown): NormalizedBoundingBox {
   if (!raw || typeof raw !== "object") {
     throw new Error("OCR_INVALID_BBOX");
@@ -28,26 +34,15 @@ export function parseNormalizedBbox(raw: unknown): NormalizedBoundingBox {
   ) {
     throw new Error("OCR_INVALID_BBOX");
   }
-  if (
-    x < -EPS ||
-    y < -EPS ||
-    width < -EPS ||
-    height < -EPS ||
-    x > 1 + EPS ||
-    y > 1 + EPS ||
-    width > 1 + EPS ||
-    height > 1 + EPS ||
-    x + width > 1 + EPS ||
-    y + height > 1 + EPS
-  ) {
+  if (width < -EPS || height < -EPS) {
     throw new Error("OCR_INVALID_BBOX");
   }
-  return {
-    x: clamp01(x),
-    y: clamp01(y),
-    width: clamp01(width),
-    height: clamp01(height),
-  };
+
+  const nx = clamp01(x);
+  const ny = clamp01(y);
+  const nw = Math.min(Math.max(0, width), Math.max(0, 1 - nx));
+  const nh = Math.min(Math.max(0, height), Math.max(0, 1 - ny));
+  return { x: nx, y: ny, width: nw, height: nh };
 }
 
 function clamp01(n: number): number {

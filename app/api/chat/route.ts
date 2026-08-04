@@ -176,6 +176,7 @@ export async function POST(request: Request) {
         },
       },
       {
+        // 只抽取 ids（不改正文）。正文规范化与落库仅由客户端 finalizeAnswer 负责。
         onComplete: (fullText) => ({
           type: "done",
           referencedCitationIds: extractReferencedCitationIds(

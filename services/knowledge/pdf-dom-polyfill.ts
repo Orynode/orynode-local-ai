@@ -38,7 +38,18 @@ if (!g.DOMMatrix) {
 }
 
 if (!g.Path2D) {
+  // Text extraction only needs the ctor to exist. Node OCR render overwrites
+  // these globals with @napi-rs/canvas Path2D (see pdf-render.ts).
   g.Path2D = class Path2D {
     addPath() {}
+    moveTo() {}
+    lineTo() {}
+    closePath() {}
+    bezierCurveTo() {}
+    quadraticCurveTo() {}
+    arc() {}
+    arcTo() {}
+    ellipse() {}
+    rect() {}
   } as unknown as GlobalWithPdfShims["Path2D"];
 }

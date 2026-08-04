@@ -118,6 +118,8 @@ export interface ContextRequest {
   maxTokens?: number;
   /** 是否扩展同 Revision 邻块；默认 true */
   expandNeighbors?: boolean;
+  /** 胶囊摘录定位词（通常为 highlightTerms） */
+  excerptTerms?: string[];
 }
 
 export interface ContextPackage {

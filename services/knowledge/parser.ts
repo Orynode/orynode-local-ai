@@ -8,39 +8,7 @@
 import "./pdf-dom-polyfill";
 import type { ParsedDocument, ParsedPage } from "./types";
 import { type KnowledgeFileKind } from "./formats";
-
-type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
-
-type PdfJsWorkerModule = {
-  WorkerMessageHandler: unknown;
-};
-
-let pdfjsPromise: Promise<PdfJsModule> | null = null;
-
-/**
- * vinext / Vite RSC 下动态 import("./pdf.worker.mjs") 会指到不存在的
- * `.vite/deps_rsc/pdf.worker.mjs`。显式导入 worker 并挂到 globalThis，
- * 让 pdfjs 走主线程 fake worker（与 OS 无关）。
- */
-async function loadPdfJs(): Promise<PdfJsModule> {
-  if (!pdfjsPromise) {
-    pdfjsPromise = (async () => {
-      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-      const worker = (await import(
-        /* @vite-ignore */
-        "pdfjs-dist/legacy/build/pdf.worker.mjs"
-      )) as PdfJsWorkerModule;
-
-      const g = globalThis as typeof globalThis & {
-        pdfjsWorker?: PdfJsWorkerModule;
-      };
-      g.pdfjsWorker = worker;
-
-      return pdfjs;
-    })();
-  }
-  return pdfjsPromise;
-}
+import { loadPdfJs } from "./pdfjs-load";
 
 export async function parseDocument(
   buffer: ArrayBuffer,

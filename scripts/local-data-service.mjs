@@ -4,6 +4,11 @@ import {
   unlinkSync,
   writeFileSync,
   readFileSync,
+  readSync,
+  openSync,
+  closeSync,
+  statSync,
+  createReadStream,
   rmSync,
   existsSync,
 } from "node:fs";
@@ -58,6 +63,24 @@ const turboAppliedPath = resolve(projectRoot, ".orynode/turbo-applied.json");
 const runtimeDefaultsPath = resolve(projectRoot, "config/runtime-defaults.json");
 const port = Number(process.env.ORYNODE_DATA_PORT ?? 4318);
 const host = "127.0.0.1";
+
+function isLoopbackAddress(addr) {
+  if (!addr || typeof addr !== "string") return false;
+  return (
+    addr === "127.0.0.1" ||
+    addr === "::1" ||
+    addr === "::ffff:127.0.0.1" ||
+    addr.startsWith("127.")
+  );
+}
+
+/** 原件字节仅允许本机回环访问（defense-in-depth；服务本身已 bind 127.0.0.1） */
+function rejectNonLoopbackBytes(request, response) {
+  const addr = request.socket?.remoteAddress;
+  if (isLoopbackAddress(addr)) return false;
+  json(response, 403, { error: "仅本机可访问原件", code: "loopback_only" });
+  return true;
+}
 const allowedOrigins = new Set([
   "http://localhost:3000",
   "http://127.0.0.1:3000",
@@ -298,7 +321,7 @@ async function ensureProcessRevisionPayload(payload, options = {}) {
       revisionId,
       ocrEngine,
       ocrVersion,
-      configHash: `ocr:${ocrMode}:v1`,
+      configHash: `ocr:${ocrMode}:accurate:v1`,
     });
     processingBuildId = build.id;
   }
@@ -1188,14 +1211,14 @@ function readJson(request) {
   });
 }
 
-function readBuffer(request, maxBytes = 50 * 1024 * 1024) {
+function readBuffer(request, maxBytes = 150 * 1024 * 1024) {
   return new Promise((resolveBody, reject) => {
     const chunks = [];
     let length = 0;
     request.on("data", (chunk) => {
       length += chunk.length;
       if (length > maxBytes) {
-        reject(new Error("文件不能超过 50 MB"));
+        reject(new Error("文件不能超过 150 MB"));
         request.destroy();
         return;
       }
@@ -1219,6 +1242,83 @@ function extensionFromName(name) {
   const lower = String(name || "").toLowerCase();
   const dot = lower.lastIndexOf(".");
   return dot >= 0 ? lower.slice(dot + 1) : "";
+}
+
+function contentTypeForName(name) {
+  const ext = extensionFromName(name);
+  if (ext === "pdf") return "application/pdf";
+  if (ext === "md" || ext === "markdown") return "text/markdown; charset=utf-8";
+  if (ext === "txt") return "text/plain; charset=utf-8";
+  return "application/octet-stream";
+}
+
+function resolveStoredFileMeta(fileRow, bytes) {
+  const displayName = String(
+    fileRow.originalName || fileRow.name || "file",
+  );
+  // 显示名常被去掉扩展名；优先 originalName / storedPath 推断 MIME
+  const typeCandidates = [
+    fileRow.originalName,
+    fileRow.storedPath,
+    fileRow.name,
+  ].filter(Boolean);
+  let contentType = "application/octet-stream";
+  for (const candidate of typeCandidates) {
+    const guessed = contentTypeForName(String(candidate));
+    if (guessed !== "application/octet-stream") {
+      contentType = guessed;
+      break;
+    }
+  }
+  if (contentType === "application/octet-stream" && isPdfMagicBuffer(bytes)) {
+    contentType = "application/pdf";
+  }
+  // 下载/预览文件名尽量带扩展名
+  let fileName = displayName;
+  if (!extensionFromName(fileName)) {
+    const fromPath = extensionFromName(fileRow.storedPath || "");
+    const fromOriginal = extensionFromName(fileRow.originalName || "");
+    const ext = fromOriginal || fromPath;
+    if (ext) fileName = `${fileName}.${ext}`;
+  }
+  return { contentType, fileName };
+}
+
+function sendStoredFileBytes(response, fileRow, options = {}) {
+  const headOnly = Boolean(options.headOnly);
+  const storedPath = fileRow.storedPath;
+  const stat = statSync(storedPath);
+  // 只读文件头做 MIME 推断，避免大文件整包进内存阻塞事件循环
+  const head = Buffer.alloc(Math.min(1024, stat.size));
+  if (head.length > 0) {
+    const fd = openSync(storedPath, "r");
+    try {
+      readSync(fd, head, 0, head.length, 0);
+    } finally {
+      closeSync(fd);
+    }
+  }
+  const { contentType, fileName } = resolveStoredFileMeta(fileRow, head);
+  response.writeHead(200, {
+    "content-type": contentType,
+    "content-length": stat.size,
+    "content-disposition": `inline; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+    "x-file-name": encodeURIComponent(fileName),
+    "cache-control": "no-store",
+  });
+  if (headOnly) {
+    response.end();
+    return;
+  }
+  const stream = createReadStream(storedPath);
+  stream.on("error", () => {
+    if (!response.headersSent) {
+      json(response, 404, { error: "原件文件不存在" });
+    } else {
+      response.destroy();
+    }
+  });
+  stream.pipe(response);
 }
 
 function looksLikeTextBuffer(buffer) {
@@ -3367,21 +3467,20 @@ const server = createServer(async (request, response) => {
         return;
       }
 
-      if (action === "bytes" && request.method === "GET") {
+      if (
+        action === "bytes" &&
+        (request.method === "GET" || request.method === "HEAD")
+      ) {
+        if (rejectNonLoopbackBytes(request, response)) return;
         const file = getConversationFile.get(fileId);
         if (!file) {
           json(response, 404, { error: "会话附件不存在" });
           return;
         }
         try {
-          const bytes = readFileSync(file.storedPath);
-          response.writeHead(200, {
-            "content-type": "application/octet-stream",
-            "content-length": bytes.length,
-            "x-file-name": encodeURIComponent(file.name),
-            "cache-control": "no-store",
+          sendStoredFileBytes(response, file, {
+            headOnly: request.method === "HEAD",
           });
-          response.end(bytes);
         } catch {
           json(response, 404, { error: "原件文件不存在" });
         }
@@ -3540,6 +3639,26 @@ const server = createServer(async (request, response) => {
           chunks: getKnowledgeChunks.all(docId),
           documentName: document.name,
         });
+        return;
+      }
+
+      if (
+        action === "bytes" &&
+        (request.method === "GET" || request.method === "HEAD")
+      ) {
+        if (rejectNonLoopbackBytes(request, response)) return;
+        const document = getKnowledgeDocument.get(docId);
+        if (!document) {
+          json(response, 404, { error: "资料不存在" });
+          return;
+        }
+        try {
+          sendStoredFileBytes(response, document, {
+            headOnly: request.method === "HEAD",
+          });
+        } catch {
+          json(response, 404, { error: "原件文件不存在" });
+        }
         return;
       }
 

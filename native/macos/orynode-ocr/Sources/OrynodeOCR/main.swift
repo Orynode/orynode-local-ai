@@ -125,13 +125,17 @@ func loadCGImage(path: String) -> CGImage? {
   return CGImageSourceCreateImageAtIndex(source, 0, nil)
 }
 
-/// Vision bbox is bottom-left origin; convert to top-left normalized.
+/// Vision bbox is bottom-left origin; convert to top-left normalized and clamp to [0,1].
 func topLeftBBox(from box: CGRect) -> BBox {
-  BBox(
-    x: Double(box.origin.x),
-    y: Double(1.0 - box.origin.y - box.size.height),
-    width: Double(box.size.width),
-    height: Double(box.size.height)
+  let x0 = min(max(Double(box.origin.x), 0), 1)
+  let y0 = min(max(Double(1.0 - box.origin.y - box.size.height), 0), 1)
+  let w0 = max(Double(box.size.width), 0)
+  let h0 = max(Double(box.size.height), 0)
+  return BBox(
+    x: x0,
+    y: y0,
+    width: min(w0, 1 - x0),
+    height: min(h0, 1 - y0)
   )
 }
 

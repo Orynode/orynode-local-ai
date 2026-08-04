@@ -305,7 +305,14 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
       throw new KnowledgeError("retrieval_failed", "检索失败", { cause: error });
     }
 
-    const citations = citationsFromHits(hits);
+    const highlightTerms = buildHighlightTerms({
+      query: request.query,
+      searchTerms: plan.searchTerms,
+      exactTerms: plan.exactTerms,
+      variants: plan.variants,
+    });
+
+    const citations = citationsFromHits(hits, highlightTerms);
     const degraded = [...profile.degradedReasons, ...multilingualDegraded];
     if (!strategies.has("hybrid") && profile.embedding) {
       if (
@@ -338,13 +345,6 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
         (strategy) => strategy !== "rrf" && strategy !== "lexical_rerank",
       );
     }
-
-    const highlightTerms = buildHighlightTerms({
-      query: request.query,
-      searchTerms: plan.searchTerms,
-      exactTerms: plan.exactTerms,
-      variants: plan.variants,
-    });
 
     return {
       query: request.query,
@@ -470,6 +470,7 @@ export async function buildChatKnowledgeContext(
       citations: retrieval.citations,
       maxTokens: input.knowledgeBudgetTokens,
       expandNeighbors: true,
+      excerptTerms: retrieval.highlightTerms,
     });
     return {
       knowledgePrompt: context.text,
