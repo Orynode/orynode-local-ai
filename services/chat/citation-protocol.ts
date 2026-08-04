@@ -79,7 +79,7 @@ function canonicalizeLine(
   }
 
   const leading = line.match(/^[ \t]*/)?.[0] ?? "";
-  let body = line
+  const body = line
     .slice(leading.length)
     .replace(citationGroupRe(), "")
     .replace(/[ \t\u00a0\u3000]+([。．.！!？?；;，,])/g, "$1")

@@ -65,6 +65,23 @@ const FOCUSABLE_SELECTOR =
 
 export function DocumentPreviewShell() {
   const { intent, closePreview } = useDocumentPreview();
+  if (!intent) return null;
+  return (
+    <DocumentPreviewPanel
+      key={`${intent.sourceType}:${intent.documentId}`}
+      intent={intent}
+      closePreview={closePreview}
+    />
+  );
+}
+
+function DocumentPreviewPanel({
+  intent,
+  closePreview,
+}: {
+  intent: DocumentPreviewIntent;
+  closePreview: () => void;
+}) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [kind, setKind] = useState<PreviewKind>("unknown");
@@ -95,22 +112,6 @@ export function DocumentPreviewShell() {
   }, []);
 
   useEffect(() => {
-    if (!intent) {
-      // 关闭后清状态，避免下次打开短暂闪出上一份文档
-      setLoading(false);
-      setError("");
-      setKind("unknown");
-      setFileName("");
-      setFileUrl(null);
-      setPdfData(null);
-      setTextContent("");
-      setTextTruncated(false);
-      setSizeWarn("");
-      setVersionNote("");
-      setPage(1);
-      setNumPages(null);
-      return;
-    }
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const focusTimer = window.setTimeout(() => closeRef.current?.focus(), 0);
@@ -118,11 +119,9 @@ export function DocumentPreviewShell() {
       document.body.style.overflow = prev;
       window.clearTimeout(focusTimer);
     };
-  }, [intent]);
+  }, []);
 
   useEffect(() => {
-    if (!intent) return;
-
     let cancelled = false;
 
     async function load(current: DocumentPreviewIntent) {
@@ -301,7 +300,6 @@ export function DocumentPreviewShell() {
   }, [intent, reloadToken]);
 
   useEffect(() => {
-    if (!intent) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         closePreview();
@@ -329,10 +327,10 @@ export function DocumentPreviewShell() {
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [intent, closePreview]);
+  }, [closePreview]);
 
   useEffect(() => {
-    if (kind !== "text" || !textContent || !intent) return;
+    if (kind !== "text" || !textContent) return;
     const raf = requestAnimationFrame(() => {
       const el = textRef.current;
       if (!el) return;
@@ -349,8 +347,6 @@ export function DocumentPreviewShell() {
     });
     return () => cancelAnimationFrame(raf);
   }, [intent, kind, textContent]);
-
-  if (!intent) return null;
 
   const maxPage = numPages ?? null;
   const canPrev = page > 1;
@@ -488,6 +484,7 @@ export function DocumentPreviewShell() {
             </div>
           ) : kind === "pdf" && (fileUrl || pdfData) ? (
             <PdfPreviewCanvas
+              key={`${intent.sourceType}:${intent.documentId}:${reloadToken}`}
               cacheKey={`${intent.sourceType}:${intent.documentId}:${reloadToken}`}
               url={pdfData ? null : fileUrl}
               data={pdfData}

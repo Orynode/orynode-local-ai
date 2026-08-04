@@ -95,9 +95,6 @@ export function PdfPreviewCanvas({
     let ownedDoc: PDFDocumentProxy | null = null;
 
     docRef.current = null;
-    setSession(null);
-    setBusy(true);
-    setHasPainted(false);
 
     async function loadDocument() {
       if (!url && !data) {
