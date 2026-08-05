@@ -118,7 +118,7 @@ API 网关层 (Gateway)
 1. **数据服务保持薄**：`scripts/local-data-service.mjs` 只负责 SQLite CRUD 和文件存储，**不解析 PDF、不切块、不检索**
 2. **服务层是唯一智能**：解析 / 分块 / Embedder / Retriever 只存在于 `services/knowledge`
 3. **Embedder 可缺省**：默认无向量模型；Keyword 是 Retriever 策略，不是假 Embedder
-4. **检索唯一入口**：`HybridRetriever.retrieve(query, scope)`；chat 不得旁路查库
+4. **检索唯一入口**：`KnowledgeEngine.retrieve|search`（内部 `resolveQueryRewrite` → `planQuery` → `HybridRetriever`）；chat 不得旁路查库
 5. **不做 sqlite-vec 硬依赖 / 默认路径**：向量以 BLOB 存 SQLite，JS 余弦扫描即可；**仅当资料量很大、评测证明扫描成为瓶颈时**再考虑 ANN（如 sqlite-vec adapter），不作开箱默认
 6. **双命名空间**：会话附件（`conversation_files`）与持久资料库（`knowledge_documents`）分表分目录；共享 `ingestDocument`，禁止上传时隐式串库
 
@@ -135,7 +135,7 @@ Composer 草稿 draftAttachments（仅下一轮；发送后清空）
       → scopeFromAttachments → RetrievalScope（sources: library + conversationFiles）
       → POST /api/chat
           → normalizeRetrievalScope（兼容旧 knowledgeScope）
-          → HybridRetriever.retrieve（唯一检索入口）
+          → KnowledgeEngine.retrieve（rewrite → plan → HybridRetriever）
           → buildSystemPrompt + TurboFieldfare SSE
 ```
 
@@ -168,14 +168,18 @@ ingestDocument({ bytes, displayName?, target })
 ### 检索流程
 
 ```
-query + RetrievalScope
-  → POST :4318/retrieval/chunks/query（双命名空间）
-  → HybridRetriever
-    ├── keyword：有命中才返回片段；无词命中则不灌上下文
-    ├── semantic：Embedder.embed(query) + SQLite BLOB 余弦（可选）
-    └── hybrid：两路按 chunk id 做 RRF 融合
-  → topK excerpts → system prompt → 推理
+query + RetrievalScope + knowledgeTier
+  → resolveQueryRewrite（术语库命中跳过 LLM；未命中 → LLM → 写入 terminology_entries）
+  → planQuery（只消费注入的 StructuredQueryRewrite；产出 lexicalLadder + variants）
+  → HybridRetriever / FTS5
+        ├── 词法阶梯：phrase → all → minimum_should_match（禁止无条件 OR）
+        ├── term_expansion：同义完整短语只走词法，不再次向量化
+        └──（可选）vector + RRF；phrase 已命中时可短路向量防噪声
+  → applyRewriteExcludes（containsTerm）→ 高亮（hansHantVariants + synonyms）
+  → Context packing + Citations → LLM（Chat）或预览（Search）
 ```
+
+权威闭环与否决项见 [RAG 升级闭环](knowledge-engine/RAG_UPGRADE_CLOSED_LOOP_zh-CN.md)。
 
 ---
 
@@ -197,6 +201,7 @@ orynode-local-ai/
 │   │   │   └── WelcomeScreen.tsx     #     欢迎页
 │   │   ├── knowledge/                #   知识库视图
 │   │   │   ├── KnowledgeView.tsx     #     列表；「用于对话」→ 草稿
+│   │   │   ├── KnowledgeJobsPanel.tsx#     顶栏处理队列
 │   │   │   └── DocumentCard.tsx      #     资料卡片
 │   │   ├── sidebar/                  #   侧边栏
 │   │   │   ├── Sidebar.tsx           #     导航 + 状态
@@ -211,6 +216,7 @@ orynode-local-ai/
 │   │   ├── useConversations.ts       #   对话历史 CRUD
 │   │   ├── useConversationFiles.ts   #   会话附件 CRUD
 │   │   ├── useKnowledge.ts           #   资料仓库 CRUD（无跨轮选中）
+│   │   ├── useKnowledgeJobs.ts       #   处理队列轮询
 │   │   └── useSettings.ts            #   设置读写
 │   └── api/                          # API 路由 (Next.js 约定)
 │       ├── chat/route.ts             #   POST 对话代理
@@ -234,12 +240,10 @@ orynode-local-ai/
 │   ├── platform/                     #   Host / ModelRuntime / LAN 认证 / composition root
 │   ├── agent/                        #   受控知识工具与 Agent space
 │   ├── knowledge/                    #   知识库（唯一智能层）
-│   │   ├── types.ts                  #     Embedder/VectorStore/Retriever
-│   │   ├── parser.ts / chunker.ts
-│   │   ├── embedder.ts               #     可选；resolveEmbedder() 可 null
-│   │   ├── indexer.ts / status.ts
-│   │   ├── vector-store.ts           #     insert + search（删除靠 CASCADE）
-│   │   ├── retriever.ts              #     唯一检索入口
+│   │   ├── application/engine.ts     #     KnowledgeEngine 入口
+│   │   ├── query/                    #     planner / resolve-rewrite / lexical-coverage
+│   │   ├── retrieval/                #     profile / highlight / degraded-labels
+│   │   ├── retriever.ts              #     HybridRetriever
 │   │   └── index.ts                  #     对外导出（仅接线符号）
 │   └── settings/                     #   运行时设置
 │
@@ -272,7 +276,7 @@ orynode-local-ai/
 |------|------|------|
 | 对话 LLM | Gemma 4 26B A4B IT（4-bit） | 本机生成 |
 | 推理运行时 | TurboFieldfare（Swift/Metal，OpenAI 兼容 `:8080/v1`） | 仅 macOS ModelRuntime adapter |
-| 默认检索 | SQLite FTS5 + 中文 bigram / search_text | 开箱关键词 |
+| 默认检索 | SQLite FTS5 词法阶梯 + search_text | 开箱关键词；可选 e5 hybrid |
 | 可选向量后端 | **blob_scan**（生产固定） | sqlite-vec 仅占位；**大量数据且评测证明瓶颈时**再评估 |
 | 可选 Embedding | multilingual-e5-small（384 维，默认推荐） | 语义召回；`@xenova/transformers` ONNX |
 | Embedding 兼容 | bge-small-zh-v1.5（512 维） | 旧索引 / 对照；勿与 E5 混用 |
@@ -281,14 +285,15 @@ orynode-local-ai/
 | OCR（预留） | PP-OCR mobile + ONNX artifact 元数据 | Windows stub，`OCR_UNAVAILABLE` |
 | PDF 文本 | pdfjs-dist | 原生文本页 |
 | 融合策略 | RRF、lexical rerank（Quality 档） | Lite / Balanced / Quality / Auto |
-| 存储 / 任务 | SQLite + Job Worker | Data Service `:4318` |
+| Query Rewrite | 术语库 + 可选本地 LLM 晋升 | `resolveQueryRewrite`；`ORYNODE_QUERY_REWRITE_LLM` |
+| 存储 / 任务 | SQLite + Job Worker + terminology_entries | Data Service `:4318` |
 | 前端 | Next.js + React + vinext | `/api` 网关 |
 
-登记与切换规则见 `config/embedding-artifacts.ts`；发布清单见根目录 [CHANGELOG 1.1.0](../CHANGELOG.md)。
+登记与切换规则见 `config/embedding-artifacts.ts`；发布清单见根目录 [CHANGELOG 1.2.0](../CHANGELOG.md#120--2026-08-05)。
 
 ## 知识库 / RAG 系统
 
-> **1.1.0**：RAG 主链路已升级为 Knowledge Engine（Phase 0～3 首批）。工作台走 **Search**；Chat 走 **Retrieve + buildContext**；共用唯一 `HybridRetriever`。完成度与未闭环项见 [knowledge-engine/](knowledge-engine/README.md)。
+> **1.2.0**：在 1.1.0 Knowledge Engine 上闭合检索升级——可学习 Rewrite、词法阶梯、处理队列与诚实 diagnostics。工作台走 **Search**；Chat 走 **Retrieve + buildContext**；共用 `HybridRetriever`。完成度见 [knowledge-engine/](knowledge-engine/README.md) 与 [RAG 升级闭环](knowledge-engine/RAG_UPGRADE_CLOSED_LOOP_zh-CN.md)。
 
 ```
 上传 PDF / TXT / MD（或 Web/GitHub Connector）
@@ -296,17 +301,19 @@ orynode-local-ai/
   → ProcessingBuild activate → data-service 存原件 / chunks / blocks
   →（可选）embed Job → vector_entries
 对话 / 工作台
-  → KnowledgeEngine.retrieve|search(scope, tier)
-  → HybridRetriever（FTS 和/或 vector + RRF）
-  → Context packing + Citations → LLM（Chat）或预览 UI（Search）
+  → resolveQueryRewrite → planQuery → KnowledgeEngine.retrieve|search
+  → HybridRetriever（FTS 词法阶梯 和/或 vector + RRF）
+  → exclude + Context packing + Citations → LLM（Chat）或预览 UI（Search）
 ```
 
 | 模块 | 职责 |
 |------|------|
 | `application/engine` | KnowledgeEngine：search / retrieve / buildContext |
+| `query/resolve-rewrite` | 术语库 → LLM 晋升；唯一开放世界同义入口 |
+| `query/planner` + `lexical-coverage` | 只消费注入 rewrite；phrase→all→minimum_should_match |
 | `ingest` / `processing/*` | 摄取；PDF OCR 路由；ProcessingBuild |
-| `formats` / `parser` / `chunker` | 种类识别、解析、分块 |
-| `retrieval/*` + `retriever` | FTS / hybrid / planner / tier / diagnostics |
+| `formats` / `parser` / `chunker` | 种类识别、解析、标题感知分块 |
+| `retrieval/*` + `retriever` | FTS / hybrid / tier / highlight / diagnostics |
 | `embedder` + `vector-store` | 可选语义；BLOB / vector_entries |
 | `connectors/*` | Web / GitHub + SSRF |
 | `context/*` | token packing、citation 定位 |
@@ -416,25 +423,26 @@ const chunks = chunker.chunkDocument(doc.pages);
 
 ### 5. 检索 (Retriever)
 
-**文件**: `services/knowledge/retriever.ts`
+**文件**: `services/knowledge/application/engine.ts`、`query/*`、`retriever.ts`
 
-- `retrieve(query, scope)` 为唯一入口
-- scope：`RetrievalScope`（`none` | `sources` + library / conversationFiles）；前端由本轮附件推导，**不会**从历史消息自动拼 scope
-- keyword 始终可用；存在非空 embedding 时走 hybrid + RRF（按排名与 chunk id）
+- 生产编排入口：`KnowledgeEngine.retrieve`（先 `resolveQueryRewrite` 再 `planQuery`）
+- `HybridRetriever.retrieve(query, scope, options)` 执行 FTS / hybrid；词法阶梯由 `keywordQuery.lexicalLadder` 下发
+- scope：`RetrievalScope`；前端由本轮附件推导，**不会**从历史消息自动拼 scope
+- keyword 始终可用；向量索引就绪且档位允许时走 hybrid + RRF；**phrase 已命中可短路向量**
+- 降级原因只来自 capabilities/profile；phrase 短路不得误标 `VECTOR_INDEX_NOT_READY`
 - `error` 文档会清空向量 BLOB，仅 keyword；`awaiting_chunks` 不参与检索
-- 兼容 `knowledgeDocumentId`
 
 
 ```typescript
-import { HybridRetriever } from "./services/knowledge";
+import { createKnowledgeEngine } from "./services/knowledge";
 
-const retriever = new HybridRetriever();
-const result = await retriever.retrieve(
-  "如何提高性能？",
-  { mode: "sources", library: { documentIds: [documentId] } }, // 或 library: "all" / conversationFiles
-  { topK: 8 },
-);
-// → { chunks, strategy: "keyword" | "hybrid" }
+const engine = createKnowledgeEngine();
+const response = await engine.retrieve({
+  query: "如何提高性能？",
+  scope: { mode: "sources", library: { documentIds: [documentId] } },
+  knowledgeTier: "auto",
+});
+// → { hits, citations, diagnostics: { strategy, rewriteSource, fusion, ... } }
 ```
 
 ### 状态机
@@ -449,10 +457,10 @@ const result = await retriever.retrieve(
 
 开启 `ORYNODE_SEMANTIC_SEARCH` 后，对旧文档执行 `POST /api/knowledge/reindex` 批量补齐。
 
-**关键词提取策略**：
+**词法召回策略**（QS / 闭环）：
 
-- 英文/数字：≥2 字符的 token
-- 中文：bigram 组合 + 三字以上词组
+- 阶梯：`phrase` → `all` → `minimum_should_match`（禁止默认全词 OR）
+- 同义：完整短语 variant；高亮与 exclude 共用 `hansHantVariants` / `containsTerm`
 
 ---
 
@@ -532,7 +540,8 @@ export const ORYNODE_DATA_URL = process.env.ORYNODE_DATA_URL ?? "http://127.0.0.
 // 知识库参数
 export const CHUNK_CONFIG = { maxChunkSize: 1800, minChunkSize: 200, overlapSize: 200 };
 export const SEARCH_CONFIG = { topK: 8, semanticSearchEnabled: false };
-export const EMBEDDING_CONFIG = { modelName: "bge-small-zh-v1.5", dimension: 512 };
+export const EMBEDDING_CONFIG = { /* artifactId / dimension 见 embedding-artifacts */ };
+// ORYNODE_QUERY_REWRITE_LLM：可学习改写，默认开
 
 // 运行时默认值
 export const DEFAULT_RUNTIME_SETTINGS = { temperature: 0.2, topP: 0.95, topK: 64, maxContext: 16384, maxTokens: 0 };
@@ -555,6 +564,7 @@ export const DEFAULT_RUNTIME_SETTINGS = { temperature: 0.2, topP: 0.95, topK: 64
 TURBO_FIELDFARE_URL=http://127.0.0.1:11434/v1    # 切换到 Ollama
 ORYNODE_DATA_URL=http://127.0.0.1:4318
 ORYNODE_SEMANTIC_SEARCH=1                        # 可选语义向量；包已依赖，设 1 后重启 npm run local
+# ORYNODE_QUERY_REWRITE_LLM=0                    # 关闭可学习 Query Rewrite（仅术语库种子）
 ```
 
 应用层补索引：
@@ -609,6 +619,10 @@ ORYNODE_SEMANTIC_SEARCH=1                        # 可选语义向量；包已�
 | POST | `/knowledge/vectors` | 批量写入 embedding BLOB |
 | GET | `/knowledge/embed/status` | 向量模型是否可用 |
 | POST | `/knowledge/embed` | 文本批量向量化（Node/ONNX） |
+| GET | `/knowledge/vector-coverage` | 向量索引覆盖率（indexed/total） |
+| GET/POST | `/terminology/entries` | 可学习术语表 list / upsert |
+| POST | `/terminology/entries/hit` | 术语命中计数 |
+| GET | `/jobs`（及摘要） | 处理队列（embed / process_revision 等） |
 | DELETE | `/knowledge/:id` | 删除文档 |
 
 检索业务**不在**数据服务；应用层另有 `POST /api/conversations/:id/files/:fileId/reindex` 重建会话附件向量。
@@ -675,6 +689,18 @@ CREATE TABLE conversation_file_chunks (
   FOREIGN KEY (file_id)
     REFERENCES conversation_files(id) ON DELETE CASCADE
 );
+
+-- 1.2.0：可学习术语库（LLM Rewrite 晋升缓存）
+CREATE TABLE terminology_entries (
+  id TEXT PRIMARY KEY,
+  domain TEXT,
+  terms_json TEXT NOT NULL,
+  exclude_json TEXT NOT NULL,
+  source TEXT NOT NULL,
+  hit_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 ```
 
 ### SQLite 优化
@@ -694,5 +720,5 @@ CREATE TABLE conversation_file_chunks (
 - **Knowledge Engine**：无 `if (windows)` 业务分支；未来换 adapter 即可
 - **路径 / 导出**：相对路径与跨平台 fixture，避免 Mac 绝对路径假设
 
-详见 [实施计划 §16.10](knowledge-engine/KNOWLEDGE_ENGINE_IMPLEMENTATION_PLAN_zh-CN.md) 与 [CHANGELOG Windows 节](../CHANGELOG.md#110--2026-08-03)。
+详见 [实施计划 §16.10](knowledge-engine/KNOWLEDGE_ENGINE_IMPLEMENTATION_PLAN_zh-CN.md) 与 [CHANGELOG](../CHANGELOG.md#120--2026-08-05)。
 

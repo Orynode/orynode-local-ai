@@ -2,9 +2,9 @@
 
 [简体中文](ARCHITECTURE_zh-CN.md) | [English](ARCHITECTURE.md)
 
-This document describes the **service architecture, data flow, module layering, extension interfaces**, and **knowledge base / RAG system** design of Orynode Local AI (current implementation as of **1.1.0**).
+This document describes the **service architecture, data flow, module layering, extension interfaces**, and **knowledge base / RAG system** design of Orynode Local AI (current implementation as of **1.2.0**).
 
-For Knowledge Engine design depth and completion status, see [knowledge-engine/](knowledge-engine/README.md) (zh-CN). The Chinese architecture doc is kept in closer sync: [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md).
+For Knowledge Engine design depth and completion status, see [knowledge-engine/](knowledge-engine/README.md) (zh-CN). The Chinese architecture doc is the source of truth for implementation detail: [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md). Release notes: [CHANGELOG 1.2.0](../CHANGELOG.md#120--2026-08-05).
 
 Target audience: developers who want to understand the internals, reuse modules, or extend functionality.
 

@@ -4,6 +4,57 @@
 `0.x` 期间破坏性或用户可见行为变化可递增次版本（`0.Y.0`）。  
 产品线「V1 源码安装版 / V2 签名安装包」见 README，与 npm `version` 不是同一套编号。
 
+## 1.2.0 — 2026-08-05
+
+**本版核心：RAG 检索闭环收紧**（相对 `1.1.1`）。闭合可学习 Query Rewrite、词法阶梯准入、处理队列 UX，并修正诊断误报；正式权威说明见 [RAG 升级闭环](docs/knowledge-engine/RAG_UPGRADE_CLOSED_LOOP_zh-CN.md)。
+
+> **范围**  
+> 在 1.1.0 Knowledge Engine 主链路上，把「开放世界同义」从手写术语表堆叠改为 **术语库 →（未命中）本地 LLM → 写回 SQLite**；词法召回禁止无条件 OR；8GB 仍否决查询时 Cross-Encoder。
+
+### Added / 新增
+
+#### 可学习 Query Rewrite
+
+- 唯一入口 `resolveQueryRewrite`：术语库命中跳过 LLM；未命中则本地 LLM 结构化改写并晋升入库
+- SQLite `terminology_entries`（迁移 `014`）；极小内置种子 `terminology-v4-learned`
+- `ORYNODE_QUERY_REWRITE_LLM`（默认开；`=0` 关）；Chat 占用时跳过 LLM rewrite
+- diagnostics.`rewriteSource`：`none` | `terminology` | `llm`（非降级码）
+- upsert **仅按主查询词合并**，避免同义偶然重叠绑死无关条目
+
+#### 词法阶梯与 FTS
+
+- `lexicalLadder`：phrase → all → minimum_should_match；**禁止**无条件全词 OR
+- 中英短复合对称 phrase；连续短语命中后可短路 hybrid 向量（防语义噪声）
+- CI：`fts-multilingual-gate` 走真实 FTS5 路径
+
+#### 处理队列 UX
+
+- 顶栏「处理中心」：`KnowledgeJobsMenu` + Job API；页眉订阅 active；空闲停轮询
+- 弹层 stacking：顶栏 `z-index` 高于资料库检索栏，避免透出「检索/清空」
+
+#### 文档与冒烟
+
+- [RAG_UPGRADE_CLOSED_LOOP_zh-CN.md](docs/knowledge-engine/RAG_UPGRADE_CLOSED_LOOP_zh-CN.md)、[RAG_8GB_SMOKE_CHECKLIST_zh-CN.md](docs/knowledge-engine/RAG_8GB_SMOKE_CHECKLIST_zh-CN.md)
+- `npm run test:smoke-rag`
+
+### Changed / 变更
+
+- QueryPlanner **只消费**注入的 `StructuredQueryRewrite`，禁止内部再查术语表
+- 高亮共用 `hansHantVariants`；`applyRewriteExcludes` 共用 `containsTerm`（拉丁词界）
+- phrase 短路仅关键词时 **不再误报** `VECTOR_INDEX_NOT_READY`
+- Markdown 标题感知分块 / citation locator 优先
+- 查询语义 / 多语言架构文档对齐可学习术语库表述
+
+### Fixed / 修复
+
+- 「反向代理」≠「代理」、「钠离子电池」≠「电池」等短复合误召回
+- 诊断与 Settings「已就绪 · 关键词 + 语义」矛盾的假降级文案
+
+### Docs / 工程
+
+- 架构文档检索流、模块表、data-service 术语/Jobs API 对齐本版
+- 单测：`resolve-rewrite`、`terminology-repo`、`lexical-coverage`、`retrieve-usecase` phrase 短路等
+
 ## 1.1.1 — 2026-08-04
 
 1.1.0 后的修订：统一 Chat 引用协议与胶囊 UI、**原件预览**（引用跳页 / OCR 框高亮），并修 PDF/OCR 摄取若干硬故障。

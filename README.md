@@ -33,7 +33,7 @@ V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复�
 ## 当前功能
 
 - 本地 Web 对话（流式输出、停止生成、自动滚动；Orynode SSE v1 + 结构化引用）
-- **RAG / Knowledge Engine**（1.1.0）：Scope 授权、Hybrid 检索、Citation、ProcessingBuild、知识工作台 Search 预览
+- **RAG / Knowledge Engine**（1.1.0 主链路 + **1.2.0** 检索闭环）：Scope 授权、Hybrid、可学习 Query Rewrite、词法阶梯、Citation、ProcessingBuild、处理队列、知识工作台 Search 预览
 - TurboFieldfare 连接状态与当前模型显示（经 ModelRuntime，不直连）
 - OpenAI 兼容对话接口代理
 - 可复现的 TurboFieldfare / Gemma 4 安装；一条命令同时启动模型与 Web
@@ -58,7 +58,7 @@ V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复�
 | OCR | Apple Vision（`orynode-ocr`） | macOS；Windows 预留 PP-OCR/ONNX stub |
 | 应用栈 | Next.js · React · vinext · TypeScript · SQLite | 本地 Web + Data Service `:4318` |
 
-完整清单与版本边界见 [CHANGELOG 1.1.0](CHANGELOG.md#110--2026-08-03)。
+完整清单与版本边界见 [CHANGELOG 1.2.0](CHANGELOG.md#120--2026-08-05)（KE 首发基线：[1.1.0](CHANGELOG.md#110--2026-08-03)）。
 
 ## 本地资料与检索
 
@@ -91,7 +91,7 @@ V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复�
 
 > **评测说明**：CI `test:retrieval-eval` 以关键词门禁为主；真实 embedding 召回质量评测另开里程碑。
 
-当前实现：[架构文档](docs/ARCHITECTURE_zh-CN.md)。1.1.0 RAG 设计与完成度：[Knowledge Engine](docs/knowledge-engine/README.md)、[CHANGELOG](CHANGELOG.md)。
+当前实现：[架构文档](docs/ARCHITECTURE_zh-CN.md)。RAG 设计与完成度：[Knowledge Engine](docs/knowledge-engine/README.md)、[RAG 升级闭环](docs/knowledge-engine/RAG_UPGRADE_CLOSED_LOOP_zh-CN.md)、[CHANGELOG](CHANGELOG.md)。
 
 ## 系统要求
 
@@ -180,7 +180,7 @@ orynode-local-ai/
 │   └── models/                   #   Gemma 4
 └── docs/
     ├── ARCHITECTURE_zh-CN.md
-    └── knowledge-engine/         #   RAG / KE 设计与完成度（1.1.0）
+    └── knowledge-engine/         #   RAG / KE 设计与完成度（1.2.0）
 ```
 
 ### 三层服务架构
