@@ -270,17 +270,13 @@ export async function runProcessRevisionJob(ctx: ProcessRevisionJobContext) {
     throw new Error(code);
   }
 
-  if (
-    summary.ocrPageCount > OCR_CONFIG.maxOcrPagesPerDocument &&
-    mode !== "disabled"
-  ) {
-    const code = "OCR_PAGE_LIMIT_EXCEEDED";
-    if (processingBuildId) processingBuilds.markFailed(processingBuildId, code);
-    await setDocumentStatus(namespace, documentId, "processing_error", {
-      errorMessage: code,
-    });
-    throw new Error(code);
-  }
+  // 超页：截断可检索前 N 个 OCR 页，不再整本失败（8GB 安全上限）
+  const maxOcrPages = OCR_CONFIG.maxOcrPagesPerDocument;
+  const ocrPageNumbers = analyzed.pages
+    .filter((p) => p.quality.decision === "ocr")
+    .map((p) => p.pageNumber);
+  const ocrTruncated = ocrPageNumbers.length > maxOcrPages;
+  const allowedOcrPages = new Set(ocrPageNumbers.slice(0, maxOcrPages));
 
   const ocrEngine = mode === "disabled" ? null : await resolveOcrEngine();
   if (summary.needsOcr && mode !== "disabled") {
@@ -317,8 +313,9 @@ export async function runProcessRevisionJob(ctx: ProcessRevisionJobContext) {
   onProgress?.({
     phase: "ocr",
     totalPages: analyzed.pageCount,
-    ocrPagesTotal: summary.ocrPageCount,
+    ocrPagesTotal: Math.min(summary.ocrPageCount, maxOcrPages),
     ocrPagesCompleted: 0,
+    ocrTruncated,
     checkpointPages: checkpointPages.size,
   });
 
@@ -406,6 +403,29 @@ export async function runProcessRevisionJob(ctx: ProcessRevisionJobContext) {
       }
 
       // OCR page（disabled + needsOcr 已在上方整体失败，此处不会把 ocr 改 blank）
+      // 超限页：跳过 OCR，保留空白可预览页，不阻断整本入检索
+      if (!allowedOcrPages.has(page.pageNumber)) {
+        if (typeof documentBlocks.upsertPageBlocks === "function") {
+          documentBlocks.upsertPageBlocks(
+            processingBuildId,
+            page.pageNumber,
+            [],
+          );
+        }
+        markPageDone(
+          documentBlocks,
+          processingBuildId,
+          page.pageNumber,
+          "blank",
+        );
+        pageResults.push({
+          pageNumber: page.pageNumber,
+          text: "",
+          blocks: [],
+        });
+        continue;
+      }
+
       const acquire = tryAcquireOcr();
       if (!acquire.ok) {
         const err = new Error(
@@ -552,13 +572,19 @@ export async function runProcessRevisionJob(ctx: ProcessRevisionJobContext) {
     );
 
     await setDocumentStatus(namespace, documentId, "ready", {
-      errorMessage: null,
+      errorMessage: ocrTruncated
+        ? `OCR_PAGE_TRUNCATED:${maxOcrPages}/${summary.ocrPageCount}`
+        : null,
     });
 
     return {
       processingBuildId,
       pageCount: analyzed.pageCount,
       ocrPages: ocrDone,
+      ocrTruncated,
+      ocrPagesSkipped: ocrTruncated
+        ? Math.max(0, summary.ocrPageCount - maxOcrPages)
+        : 0,
       chunkCount: chunks.length,
       document: committed,
     };

@@ -2,6 +2,10 @@
 
 import { useState } from "react";
 import type { RuntimeSettings } from "../../services/types";
+import type {
+  HostMemoryClass,
+  MemoryRuntimePreset,
+} from "../../services/platform/host-memory";
 import runtimeDefaults from "../../config/runtime-defaults.json";
 
 const INITIAL_SETTINGS: RuntimeSettings = {
@@ -27,7 +31,49 @@ export function useSettings() {
   );
   const [maxContextRestartRequired, setMaxContextRestartRequired] =
     useState(false);
+  const [hostMemoryClass, setHostMemoryClass] = useState<
+    HostMemoryClass | null
+  >(null);
+  const [recommendedMaxContext, setRecommendedMaxContext] = useState<
+    number | null
+  >(null);
+  const [maxContextAboveRecommendation, setMaxContextAboveRecommendation] =
+    useState(false);
+  const [memoryRecommendedPreset, setMemoryRecommendedPreset] =
+    useState<MemoryRuntimePreset | null>(null);
+  const [
+    settingsMatchMemoryRecommendation,
+    setSettingsMatchMemoryRecommendation,
+  ] = useState(false);
   const [error, setError] = useState("");
+
+  function applyMemoryHints(result: {
+    hostMemoryClass?: string;
+    recommendedMaxContext?: number;
+    maxContextAboveRecommendation?: boolean;
+    memoryRecommendedPreset?: MemoryRuntimePreset;
+    settingsMatchMemoryRecommendation?: boolean;
+  }) {
+    setHostMemoryClass(
+      result.hostMemoryClass === "low" ||
+        result.hostMemoryClass === "medium" ||
+        result.hostMemoryClass === "high"
+        ? result.hostMemoryClass
+        : null,
+    );
+    setRecommendedMaxContext(
+      typeof result.recommendedMaxContext === "number"
+        ? result.recommendedMaxContext
+        : null,
+    );
+    setMaxContextAboveRecommendation(
+      Boolean(result.maxContextAboveRecommendation),
+    );
+    setMemoryRecommendedPreset(result.memoryRecommendedPreset ?? null);
+    setSettingsMatchMemoryRecommendation(
+      Boolean(result.settingsMatchMemoryRecommendation),
+    );
+  }
 
   async function load() {
     try {
@@ -42,6 +88,7 @@ export function useSettings() {
           : null,
       );
       setMaxContextRestartRequired(Boolean(result.maxContextRestartRequired));
+      applyMemoryHints(result);
     } catch {
       // Keep defaults
     }
@@ -69,6 +116,7 @@ export function useSettings() {
           : null;
       setAppliedMaxContext(applied);
       setMaxContextRestartRequired(Boolean(result.maxContextRestartRequired));
+      applyMemoryHints(result);
       return {
         restartRequired: Boolean(result.restartRequired),
         appliedMaxContext: applied,
@@ -85,6 +133,11 @@ export function useSettings() {
     defaults,
     appliedMaxContext,
     maxContextRestartRequired,
+    hostMemoryClass,
+    recommendedMaxContext,
+    maxContextAboveRecommendation,
+    memoryRecommendedPreset,
+    settingsMatchMemoryRecommendation,
     error,
     load,
     save,

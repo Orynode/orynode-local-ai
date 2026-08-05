@@ -2,17 +2,18 @@
 
 import { useState } from "react";
 import type { KnowledgeDocument } from "../../../services/types";
-import {
-  processingErrorLabel,
-  statusLabel,
-} from "../../../services/knowledge/status";
+import type { KnowledgeDocumentViewStatus } from "../../../services/knowledge/status";
+import { documentViewStatus } from "../../../services/knowledge/status";
 import { Icon } from "../ui/Icon";
 
 interface DocumentCardProps {
   document: KnowledgeDocument;
   selected: boolean;
   reindexing: boolean;
-  showReindex: boolean;
+  /** 是否开启语义检索（决定徽章文案与「重建」按钮） */
+  semanticEnabled: boolean;
+  /** 可选：父级已算好的投影，避免列表重复计算 */
+  viewStatus?: KnowledgeDocumentViewStatus;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onReindex: (id: string) => void;
@@ -25,7 +26,8 @@ export function DocumentCard({
   document,
   selected,
   reindexing,
-  showReindex,
+  semanticEnabled,
+  viewStatus: viewStatusProp,
   onSelect,
   onDelete,
   onReindex,
@@ -34,10 +36,13 @@ export function DocumentCard({
   onPreview,
 }: DocumentCardProps) {
   const status = document.status ?? "ready";
+  const viewStatus =
+    viewStatusProp ?? documentViewStatus(document, semanticEnabled);
   const canReprocess =
-    Boolean(onReprocess) && status === "processing_error";
+    Boolean(onReprocess) && viewStatus.canRetryProcessing;
   const canReindex =
-    showReindex &&
+    semanticEnabled &&
+    viewStatus.content === "usable" &&
     !canReprocess &&
     (status === "ready" || status === "indexed" || status === "error");
   const [editing, setEditing] = useState(false);
@@ -61,11 +66,25 @@ export function DocumentCard({
   }
 
   return (
-    <article className={`knowledge-card ${selected ? "selected" : ""}`}>
+    <article
+      className={[
+        "knowledge-card",
+        selected ? "selected" : "",
+        `is-${viewStatus.severity}`,
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
       <button
-        className="knowledge-select"
+        className={`knowledge-select ${viewStatus.canAttach ? "" : "is-unavailable"}`}
+        aria-disabled={!viewStatus.canAttach}
+        title={
+          viewStatus.canAttach
+            ? "选择用于对话"
+            : "该文件尚无可检索文本，只能预览原件"
+        }
         onClick={() => {
-          if (!editing) onSelect(document.id);
+          if (!editing && viewStatus.canAttach) onSelect(document.id);
         }}
       >
         <span className="knowledge-file-icon">
@@ -98,15 +117,17 @@ export function DocumentCard({
           ) : (
             <strong>{document.name}</strong>
           )}
+          <span className="knowledge-status-row">
+            <span
+              className={`knowledge-status-badge is-${viewStatus.severity}`}
+            >
+              {viewStatus.label}
+            </span>
+          </span>
           <small>
             {document.pageCount} 页 ·{" "}
             {(document.size / 1024 / 1024).toFixed(1)} MB ·{" "}
-            {document.chunkCount} 片段 · {statusLabel(status)}
-            {status === "processing_error" && document.errorMessage
-              ? `（${processingErrorLabel(document.errorMessage)}）`
-              : document.errorMessage && status !== "processing"
-                ? `（${document.errorMessage}）`
-                : ""}
+            {document.chunkCount} 片段
             {document.originalName && document.originalName !== document.name
               ? ` · 原文件 ${document.originalName}`
               : ""}
@@ -170,6 +191,19 @@ export function DocumentCard({
           <Icon name="trash" />
         </button>
       </div>
+      {viewStatus.severity === "danger" ||
+      viewStatus.severity === "warning" ? (
+        <div
+          className={`knowledge-card-alert is-${viewStatus.severity}`}
+          role="status"
+        >
+          <Icon name="alert" />
+          <span>
+            <strong>{viewStatus.label}</strong>
+            <small>{viewStatus.detail}</small>
+          </span>
+        </div>
+      ) : null}
     </article>
   );
 }

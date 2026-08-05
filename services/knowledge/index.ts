@@ -38,8 +38,8 @@ export type { IngestTarget, IngestResult } from "./ingest";
 export {
   hashContent,
   resolveDisplayName,
-  isUsableLibraryDocument,
 } from "./hash";
+export { isUsableLibraryDocument } from "./status";
 export type { RetrievalScope, DocumentNamespace } from "./types";
 
 export {

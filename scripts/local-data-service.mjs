@@ -29,6 +29,7 @@ import {
   createIndexBuildStore,
 } from "./data-service/index-builds.mjs";
 import { createResourceCoordinator } from "./data-service/resource-coordinator.mjs";
+import { createEmbedLifecycle } from "./data-service/embed-lifecycle.mjs";
 import { startIndexWorker } from "./data-service/worker.mjs";
 import { createSourcesRepository } from "./data-service/sources.mjs";
 import { createVectorEntryStore } from "./data-service/vector-entries.mjs";
@@ -37,12 +38,14 @@ import { createAgentSpaceStore } from "./data-service/agent-spaces.mjs";
 import { createLanAuthStore } from "./data-service/lan-auth-store.mjs";
 import { createProcessingBuildStore } from "./data-service/processing-builds.mjs";
 import { createDocumentBlockStore } from "./data-service/document-blocks.mjs";
+import { sqlInSearchableStatuses, SEARCHABLE_DOCUMENT_STATUSES } from "./data-service/searchable-document-statuses.mjs";
 import {
   EMBEDDING_CONFIG,
   applyEmbeddingTemplate,
   embeddingConfigFingerprint,
   getActiveEmbeddingArtifact,
 } from "./data-service/embed-config.mjs";
+import { recommendedRuntimePreset } from "./data-service/host-memory.mjs";
 import { exportKnowledgePackage } from "./data-service/export-package.mjs";
 
 // Knowledge parsing/chunking/retrieval orchestration live in services/knowledge.
@@ -147,6 +150,11 @@ const terminologyRepository = createTerminologyRepository(database);
 const indexBuildStore = createIndexBuildStore(database);
 const vectorEntryStore = createVectorEntryStore(database);
 const resourceCoordinator = createResourceCoordinator();
+const embedLifecycle = createEmbedLifecycle({
+  resourceCoordinator,
+  idleUnloadMs: Number(process.env.ORYNODE_EMBED_IDLE_UNLOAD_MS ?? 90_000),
+  unloadOnChat: "low_only",
+});
 const sourcesRepository = createSourcesRepository(database);
 const agentSpaceStore = createAgentSpaceStore(database);
 const lanAuthStore = createLanAuthStore({ projectRoot });
@@ -725,7 +733,7 @@ const listKnowledgeChunksByDocuments = database.prepare(`
   INNER JOIN knowledge_documents
     ON knowledge_documents.id = knowledge_chunks.document_id
   WHERE knowledge_chunks.document_id IN (SELECT value FROM json_each(?))
-    AND knowledge_documents.status IN ('ready', 'embedding', 'indexed', 'error')
+    AND ${sqlInSearchableStatuses("knowledge_documents.status")}
     AND knowledge_chunks.document_id NOT IN (
       SELECT document_id FROM library_search_exclusions
     )
@@ -742,7 +750,7 @@ const listAllKnowledgeChunks = database.prepare(`
   FROM knowledge_chunks
   INNER JOIN knowledge_documents
     ON knowledge_documents.id = knowledge_chunks.document_id
-  WHERE knowledge_documents.status IN ('ready', 'embedding', 'indexed', 'error')
+  WHERE ${sqlInSearchableStatuses("knowledge_documents.status")}
     AND knowledge_chunks.document_id NOT IN (
       SELECT document_id FROM library_search_exclusions
     )
@@ -770,7 +778,7 @@ const listChunksWithVectorsByDocuments = database.prepare(`
     ON vector_entries.index_build_id = index_builds.id
     AND vector_entries.chunk_id = knowledge_chunks.id
   WHERE knowledge_chunks.document_id IN (SELECT value FROM json_each(?))
-    AND knowledge_documents.status IN ('ready', 'embedding', 'indexed', 'error')
+    AND ${sqlInSearchableStatuses("knowledge_documents.status")}
     AND knowledge_chunks.document_id NOT IN (
       SELECT document_id FROM library_search_exclusions
     )
@@ -798,7 +806,7 @@ const listAllChunksWithVectors = database.prepare(`
   LEFT JOIN vector_entries
     ON vector_entries.index_build_id = index_builds.id
     AND vector_entries.chunk_id = knowledge_chunks.id
-  WHERE knowledge_documents.status IN ('ready', 'embedding', 'indexed', 'error')
+  WHERE ${sqlInSearchableStatuses("knowledge_documents.status")}
     AND knowledge_chunks.document_id NOT IN (
       SELECT document_id FROM library_search_exclusions
     )
@@ -911,7 +919,7 @@ const listConversationChunksByFiles = database.prepare(`
     ON conversation_files.id = conversation_file_chunks.file_id
   WHERE conversation_file_chunks.file_id IN (SELECT value FROM json_each(?))
     AND conversation_files.conversation_id = ?
-    AND conversation_files.status IN ('ready', 'embedding', 'indexed', 'error')
+    AND ${sqlInSearchableStatuses("conversation_files.status")}
   ORDER BY conversation_files.name, conversation_file_chunks.page_number,
     conversation_file_chunks.position
 `);
@@ -938,7 +946,7 @@ const listConversationChunksWithVectorsByFiles = database.prepare(`
     AND vector_entries.chunk_id = conversation_file_chunks.id
   WHERE conversation_file_chunks.file_id IN (SELECT value FROM json_each(?))
     AND conversation_files.conversation_id = ?
-    AND conversation_files.status IN ('ready', 'embedding', 'indexed', 'error')
+    AND ${sqlInSearchableStatuses("conversation_files.status")}
     AND COALESCE(vector_entries.embedding, conversation_file_chunks.embedding) IS NOT NULL
   ORDER BY conversation_files.name, conversation_file_chunks.page_number,
     conversation_file_chunks.position
@@ -1699,7 +1707,7 @@ function getLibraryVectorCoverage() {
   const searchable = docs.filter(
     (doc) =>
       (doc.chunkCount ?? 0) > 0 &&
-      ["ready", "embedding", "indexed", "error"].includes(doc.status),
+      SEARCHABLE_DOCUMENT_STATUSES.includes(doc.status),
   );
   const indexed = searchable.filter((doc) => doc.status === "indexed");
   const total = searchable.length;
@@ -2351,15 +2359,72 @@ function normalizeRuntimeSettings(input = {}) {
 
 function readRuntimeSettings() {
   try {
+    if (!existsSync(settingsPath)) {
+      return initializeRuntimeSettingsFromMemory();
+    }
     const raw = JSON.parse(readFileSync(settingsPath, "utf8"));
     return normalizeRuntimeSettings(raw);
-  } catch {
-    return { ...DEFAULT_RUNTIME_SETTINGS };
+  } catch (error) {
+    // 文件存在但损坏：绝不覆盖用户文件，仅内存回退到本机推荐
+    if (existsSync(settingsPath)) {
+      console.warn(
+        "Runtime settings unreadable; using in-memory memory preset without overwrite:",
+        error instanceof Error ? error.message : error,
+      );
+      const resources = resourceCoordinator.snapshot();
+      const preset = recommendedRuntimePreset(resources.hostMemoryClass);
+      return normalizeRuntimeSettings({
+        ...DEFAULT_RUNTIME_SETTINGS,
+        ...preset.settings,
+      });
+    }
+    return initializeRuntimeSettingsFromMemory();
   }
+}
+
+/**
+ * 首次无 settings 文件时按本机内存档写入推荐配置。
+ * 已有用户文件绝不覆盖——只提供「套用本机推荐」入口。
+ */
+function initializeRuntimeSettingsFromMemory() {
+  const resources = resourceCoordinator.snapshot();
+  const preset = recommendedRuntimePreset(resources.hostMemoryClass);
+  const settings = normalizeRuntimeSettings({
+    ...DEFAULT_RUNTIME_SETTINGS,
+    ...preset.settings,
+  });
+  try {
+    mkdirSync(dirname(settingsPath), { recursive: true });
+    writeFileSync(
+      settingsPath,
+      `${JSON.stringify(
+        {
+          ...settings,
+          _orynode: {
+            initializedFrom: "host_memory",
+            hostMemoryClass: preset.hostMemoryClass,
+            initializedAt: new Date().toISOString(),
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    console.log(
+      `Runtime settings initialized from ${preset.label} (${preset.settings.maxContext} context)`,
+    );
+  } catch (error) {
+    console.warn(
+      "Failed to persist memory-initialized settings:",
+      error instanceof Error ? error.message : error,
+    );
+  }
+  return settings;
 }
 
 function writeRuntimeSettings(input) {
   const settings = normalizeRuntimeSettings(input);
+  mkdirSync(dirname(settingsPath), { recursive: true });
   writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
   return settings;
 }
@@ -2374,8 +2439,20 @@ function readAppliedMaxContext() {
   }
 }
 
+function settingsMatchMemoryRecommendation(settings, preset) {
+  return (
+    Number(settings.maxContext) === Number(preset.settings.maxContext) &&
+    String(settings.knowledgeTier) === String(preset.settings.knowledgeTier) &&
+    String(settings.ocrMode || "auto") === String(preset.settings.ocrMode)
+  );
+}
+
 function settingsResponsePayload(settings) {
   const appliedMaxContext = readAppliedMaxContext();
+  const resources = resourceCoordinator.snapshot();
+  const preset =
+    resources.memoryRecommendedPreset ??
+    recommendedRuntimePreset(resources.hostMemoryClass);
   return {
     settings,
     settingsPath,
@@ -2384,6 +2461,15 @@ function settingsResponsePayload(settings) {
     appliedMaxContext,
     maxContextRestartRequired:
       appliedMaxContext != null && appliedMaxContext !== settings.maxContext,
+    hostMemoryClass: resources.hostMemoryClass,
+    recommendedMaxContext: resources.recommendedMaxContext,
+    maxContextAboveRecommendation:
+      Number(settings.maxContext) > Number(resources.recommendedMaxContext),
+    memoryRecommendedPreset: preset,
+    settingsMatchMemoryRecommendation: settingsMatchMemoryRecommendation(
+      settings,
+      preset,
+    ),
   };
 }
 
@@ -2396,48 +2482,60 @@ const activeEmbedArtifact = getActiveEmbeddingArtifact();
 const EMBED_MODEL = activeEmbedArtifact.xenovaModelId;
 const EMBED_DIM = activeEmbedArtifact.dimension;
 const EMBED_REVISION = activeEmbedArtifact.revision;
-let embedPipelinePromise = null;
 let embedUnavailableReason = null;
+/** transformers 包是否可 import（不加载模型权重） */
+let transformersProbe = null;
+
+async function probeTransformersImport() {
+  if (transformersProbe) return transformersProbe;
+  transformersProbe = (async () => {
+    try {
+      await import("@xenova/transformers");
+      return { ok: true };
+    } catch {
+      return {
+        ok: false,
+        reason:
+          "未安装 @xenova/transformers。执行: npm install @xenova/transformers",
+      };
+    }
+  })();
+  return transformersProbe;
+}
+
+async function loadEmbedExtractor() {
+  const probe = await probeTransformersImport();
+  if (!probe.ok) {
+    embedUnavailableReason = probe.reason;
+    throw new Error(embedUnavailableReason);
+  }
+  const { pipeline, env } = await import("@xenova/transformers");
+  try {
+    env.cacheDir = resolve(projectRoot, ".orynode/models/transformers");
+  } catch {
+    // older package shapes may not expose env; continue
+  }
+  console.log(
+    `Loading embedding artifact ${activeEmbedArtifact.id} (${EMBED_MODEL})...`,
+  );
+  const extractor = await pipeline("feature-extraction", EMBED_MODEL);
+  console.log("Embedding model ready");
+  return extractor;
+}
 
 async function resolveEmbedPipeline() {
   if (embedUnavailableReason) {
     throw new Error(embedUnavailableReason);
   }
-  if (!embedPipelinePromise) {
-    embedPipelinePromise = (async () => {
-      let pipeline;
-      try {
-        ({ pipeline } = await import("@xenova/transformers"));
-      } catch {
-        embedUnavailableReason =
-          "未安装 @xenova/transformers。执行: npm install @xenova/transformers";
-        throw new Error(embedUnavailableReason);
-      }
-      // Prefer project-local cache under .orynode
-      try {
-        const { env } = await import("@xenova/transformers");
-        env.cacheDir = resolve(projectRoot, ".orynode/models/transformers");
-      } catch {
-        // older package shapes may not expose env; continue
-      }
-      console.log(
-        `Loading embedding artifact ${activeEmbedArtifact.id} (${EMBED_MODEL})...`,
-      );
-      const extractor = await pipeline("feature-extraction", EMBED_MODEL);
-      console.log("Embedding model ready");
-      return extractor;
-    })().catch((error) => {
-      embedPipelinePromise = null;
-      throw error;
-    });
-  }
-  return embedPipelinePromise;
+  return embedLifecycle.resolve(loadEmbedExtractor);
 }
 
 function embedStatusBase(extra = {}) {
   return {
     available: false,
     ready: false,
+    resident: false,
+    enabled: SEARCH_CONFIG_ENABLED(),
     artifactId: activeEmbedArtifact.id,
     model: activeEmbedArtifact.id,
     xenovaModelId: EMBED_MODEL,
@@ -2451,23 +2549,51 @@ function embedStatusBase(extra = {}) {
   };
 }
 
+function SEARCH_CONFIG_ENABLED() {
+  return (
+    process.env.ORYNODE_SEMANTIC_SEARCH === "1" ||
+    process.env.ORYNODE_SEMANTIC_SEARCH === "true"
+  );
+}
+
+/**
+ * 状态探测不得加载模型权重（8GB：capabilities / UI 轮询不能把 e5 拉进内存）。
+ * available = 主机允许且包可导入；ready/resident = 当前已驻留。
+ */
 async function getEmbedStatus() {
+  const life = embedLifecycle.snapshot();
+  if (!SEARCH_CONFIG_ENABLED()) {
+    return embedStatusBase({
+      reason: "ORYNODE_SEMANTIC_SEARCH 未开启",
+      enabled: false,
+      resident: life.resident,
+      ready: life.ready,
+      lastUnloadReason: life.lastUnloadReason,
+    });
+  }
   if (embedUnavailableReason) {
     return embedStatusBase({
       reason: embedUnavailableReason,
+      resident: false,
+      ready: false,
+      lastUnloadReason: life.lastUnloadReason,
     });
   }
-  try {
-    await resolveEmbedPipeline();
+  const probe = await probeTransformersImport();
+  if (!probe.ok) {
+    embedUnavailableReason = probe.reason;
     return embedStatusBase({
-      available: true,
-      ready: true,
+      reason: probe.reason,
+      lastUnloadReason: life.lastUnloadReason,
     });
-  } catch (error) {
-    const reason =
-      error instanceof Error ? error.message : "向量模型不可用";
-    return embedStatusBase({ reason });
   }
+  return embedStatusBase({
+    available: true,
+    ready: life.ready,
+    resident: life.resident,
+    lastUnloadReason: life.lastUnloadReason,
+    idleUnloadMs: life.idleUnloadMs,
+  });
 }
 
 /**
@@ -2475,10 +2601,16 @@ async function getEmbedStatus() {
  * @param {"query" | "passage"} [mode]
  */
 async function embedTexts(texts, mode = "passage") {
-  // Chat 生成占用时拒绝加载/运行 embedding，避免与 Gemma 争 8GB 余量
-  if (resourceCoordinator.snapshot().chatActive) {
+  // Chat / 重活占用时拒绝加载/运行 embedding，避免与 Gemma / OCR 争 8GB 余量
+  const resources = resourceCoordinator.snapshot();
+  if (resources.chatActive) {
     const error = new Error("EMBED_DEFERRED_CHAT");
     error.code = "EMBED_DEFERRED_CHAT";
+    throw error;
+  }
+  if (resources.heavyKind === "ocr" || resources.heavyKind === "embedding") {
+    const error = new Error("EMBED_DEFERRED_HEAVY");
+    error.code = "EMBED_DEFERRED_HEAVY";
     throw error;
   }
   const extractor = await resolveEmbedPipeline();
@@ -2495,6 +2627,7 @@ async function embedTexts(texts, mode = "passage") {
     });
     vectors.push(Array.from(result.data));
   }
+  embedLifecycle.touch();
   return vectors;
 }
 
@@ -2791,6 +2924,7 @@ const server = createServer(async (request, response) => {
         ) {
           json(response, 200, {
             ...resourceCoordinator.snapshot(),
+            embed: embedLifecycle.snapshot(),
             token: existing,
           });
           return;
@@ -2798,15 +2932,40 @@ const server = createServer(async (request, response) => {
         const token = resourceCoordinator.markChatActive(
           Number.isFinite(ttl) && ttl > 0 ? ttl : 120_000,
         );
-        json(response, 200, { ...resourceCoordinator.snapshot(), token });
+        // 8GB：对话开始时释放 e5，把余量还给 Gemma
+        embedLifecycle.onChatActive();
+        json(response, 200, {
+          ...resourceCoordinator.snapshot(),
+          embed: embedLifecycle.snapshot(),
+          token,
+        });
         return;
       }
-      json(response, 200, resourceCoordinator.snapshot());
+      json(response, 200, {
+        ...resourceCoordinator.snapshot(),
+        embed: embedLifecycle.snapshot(),
+      });
       return;
     }
 
     if (request.method === "GET" && url.pathname === "/resources") {
-      json(response, 200, resourceCoordinator.snapshot());
+      json(response, 200, {
+        ...resourceCoordinator.snapshot(),
+        embed: embedLifecycle.snapshot(),
+      });
+      return;
+    }
+
+    if (
+      request.method === "POST" &&
+      url.pathname === "/knowledge/embed/unload"
+    ) {
+      const unloaded = embedLifecycle.unload("api");
+      json(response, 200, {
+        unloaded,
+        ...embedLifecycle.snapshot(),
+        resources: resourceCoordinator.snapshot(),
+      });
       return;
     }
 
@@ -3099,6 +3258,18 @@ const server = createServer(async (request, response) => {
           json(response, 503, {
             error: "对话进行中，已推迟向量计算",
             code: "EMBED_DEFERRED_CHAT",
+          });
+          return;
+        }
+        if (
+          error &&
+          typeof error === "object" &&
+          (error.code === "EMBED_DEFERRED_HEAVY" ||
+            error.message === "EMBED_DEFERRED_HEAVY")
+        ) {
+          json(response, 503, {
+            error: "OCR 或索引占用中，已推迟向量计算",
+            code: "EMBED_DEFERRED_HEAVY",
           });
           return;
         }

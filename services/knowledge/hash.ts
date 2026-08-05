@@ -23,21 +23,8 @@ function decodeMaybeUriComponent(value: string): string {
   }
 }
 
-/** 资料库去重短路：仅完整可用文档可复用（有分块且非处理中） */
-export function isUsableLibraryDocument(doc: {
-  status?: string | null;
-  chunkCount?: number | null;
-}): boolean {
-  if (
-    doc.status === "awaiting_chunks" ||
-    doc.status === "stored" ||
-    doc.status === "processing" ||
-    doc.status === "processing_error"
-  ) {
-    return false;
-  }
-  return typeof doc.chunkCount === "number" && doc.chunkCount > 0;
-}
+/** @deprecated 真源在 status.ts；保留 re-export 避免破坏既有 import */
+export { isUsableLibraryDocument } from "./status";
 
 /** 规范化用户显示名；空则回退到 originalName */
 export function resolveDisplayName(

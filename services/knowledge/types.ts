@@ -67,6 +67,7 @@ export interface VectorStore {
     options?: {
       topK?: number;
       scope?: Exclude<RetrievalScope, { mode: "none" }>;
+      maxScanChunks?: number;
     },
   ): Promise<SearchResult[]>;
 }

@@ -84,6 +84,11 @@ export const SEARCH_CONFIG = {
    */
   minVectorCosineSolo: 0.85,
   /**
+   * blob_scan 单次拉取带向量 chunk 的软上限（防 8GB 峰值）。
+   * 超出时仍返回前 N 条参与余弦；有 FTS 收窄时通常远低于此值。
+   */
+  maxVectorScanChunks: 4_000,
+  /**
    * 主机是否启用向量模型加载（data-service）。
    * 与 knowledgeTier 配合：档位请求语义 + 本开关为真 → 才走 hybrid。
    */

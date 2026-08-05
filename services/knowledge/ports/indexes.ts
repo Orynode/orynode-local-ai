@@ -85,6 +85,8 @@ export interface VectorSearchOptions {
   topK: number;
   spaceIds?: string[];
   documentIds?: string[];
+  /** blob_scan：单次参与余弦的 chunk 上限 */
+  maxScanChunks?: number;
 }
 
 export interface VectorIndex {

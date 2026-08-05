@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
 import { Icon } from "./Icon";
+import { ModalShell } from "./ModalShell";
 
 interface AlertDialogProps {
   open: boolean;
@@ -19,25 +19,8 @@ export function AlertDialog({
   confirmLabel = "知道了",
   onClose,
 }: AlertDialogProps) {
-  useEffect(() => {
-    if (!open) return;
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape" || event.key === "Enter") onClose();
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
-  if (!open) return null;
-
   return (
-    <div
-      className="modal-backdrop confirm-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.currentTarget === event.target) onClose();
-      }}
-    >
+    <ModalShell open={open} onClose={onClose} layer="alert">
       <section
         className="confirm-dialog"
         role="alertdialog"
@@ -68,6 +51,6 @@ export function AlertDialog({
           </button>
         </div>
       </section>
-    </div>
+    </ModalShell>
   );
 }

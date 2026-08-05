@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../ui/Icon";
+import { ModalShell } from "../ui/ModalShell";
 import type {
   ConversationFile,
   KnowledgeDocument,
@@ -16,6 +17,7 @@ import {
   toggleDraftConversationFile,
   toggleDraftDocument,
 } from "../../lib/attachments";
+import { isUsableLibraryDocument } from "../../../services/knowledge/status";
 
 type PanelMode = "closed" | "actions" | "library" | "params";
 
@@ -256,6 +258,8 @@ export function Composer({
 
   const pendingAttachments = uploadState ? [] : draftAttachments;
   const useAllDocuments = draftAttachments.some(isLibraryAll);
+  // 单篇选择仅列出可检索文档；「全部资料」仍用 library_all（FTS 会过滤不可用篇）
+  const usableLibraryDocuments = documents.filter(isUsableLibraryDocument);
   const selectedLibraryIds = draftAttachments
     .filter((item) => item.kind === "library")
     .map((item) => item.id);
@@ -296,6 +300,9 @@ export function Composer({
           <span className="knowledge-chip-label">
             <strong>{uploadState.fileName}</strong>
             <small>
+              {uploadState.batchTotal
+                ? `${uploadState.batchIndex}/${uploadState.batchTotal} · `
+                : ""}
               {uploadState.phase === "uploading"
                 ? `上传中 ${uploadState.percent}%`
                 : uploadState.phase === "ocr"
@@ -315,8 +322,8 @@ export function Composer({
               </span>
               <span className="composer-attachment-name">
                 {item.kind === "library_all"
-                  ? documents.length > 0
-                    ? `全部资料（${documents.length}）`
+                  ? usableLibraryDocuments.length > 0
+                    ? `全部资料（可检索 ${usableLibraryDocuments.length}）`
                     : "全部资料"
                   : item.kind === "conversation_file"
                     ? `${item.name}（本对话）`
@@ -451,11 +458,12 @@ export function Composer({
                 </ul>
               </>
             ) : null}
-            {documents.length === 0 && conversationFiles.length === 0 ? (
+            {usableLibraryDocuments.length === 0 &&
+            conversationFiles.length === 0 ? (
               <p className="composer-picker-empty">
                 还没有可检索内容。可先「上传文件」，或到资料库页面导入。
               </p>
-            ) : documents.length > 0 ? (
+            ) : usableLibraryDocuments.length > 0 ? (
               <>
                 <p className="composer-picker-section">资料库</p>
                 <ul className="composer-picker-list">
@@ -463,6 +471,7 @@ export function Composer({
                     <button
                       type="button"
                       className={useAllDocuments ? "active" : ""}
+                      title="检索整个资料库；无法索引的文件会被自动跳过"
                       onClick={() => {
                         // 保留已选会话附件；仅替换资料库侧选中为「全部」
                         const conversationOnly = draftAttachments.filter(
@@ -475,10 +484,10 @@ export function Composer({
                       }}
                     >
                       <span>全部资料</span>
-                      <small>{documents.length} 篇</small>
+                      <small>可检索 {usableLibraryDocuments.length} 篇</small>
                     </button>
                   </li>
-                  {documents.map((doc) => {
+                  {usableLibraryDocuments.map((doc) => {
                     const active =
                       !useAllDocuments && selectedLibraryIds.includes(doc.id);
                     return (
@@ -733,15 +742,7 @@ export function Composer({
       </div>
 
       {paramsHelpOpen ? (
-        <div
-          className="composer-params-help-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
-              setParamsHelpOpen(false);
-            }
-          }}
-        >
+        <ModalShell open onClose={() => setParamsHelpOpen(false)}>
           <div
             className="composer-params-help"
             role="dialog"
@@ -878,7 +879,7 @@ export function Composer({
               </button>
             </footer>
           </div>
-        </div>
+        </ModalShell>
       ) : null}
     </div>
   );

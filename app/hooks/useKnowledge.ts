@@ -23,6 +23,9 @@ export type KnowledgeUploadState = {
   percent: number;
   phase: "uploading" | "processing" | "ocr";
   detail?: string;
+  /** 批量时：当前序号（1-based）与总数 */
+  batchIndex?: number;
+  batchTotal?: number;
 };
 
 export type KnowledgeUploadResult = {
@@ -30,6 +33,90 @@ export type KnowledgeUploadResult = {
   deduplicated: boolean;
   jobId?: string | null;
 };
+
+export type KnowledgeBatchUploadResult = {
+  total: number;
+  uploaded: number;
+  duplicates: KnowledgeDocument[];
+  failed: Array<{ fileName: string; error: string }>;
+  skipped: Array<{ fileName: string; error: string }>;
+};
+
+function postKnowledgeFile(
+  file: File,
+  kind: NonNullable<ReturnType<typeof detectBrowserFileKind>>,
+  options: {
+    displayName?: string;
+    onProgress?: (percent: number) => void;
+    onUploaded?: () => void;
+  } = {},
+): Promise<KnowledgeUploadResult> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/knowledge");
+    xhr.setRequestHeader("content-type", mimeForKind(kind));
+    xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
+    if (options.displayName?.trim()) {
+      xhr.setRequestHeader(
+        "x-display-name",
+        encodeURIComponent(options.displayName.trim()),
+      );
+    }
+    xhr.setRequestHeader("x-file-kind", kind);
+    xhr.responseType = "json";
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      const percent = Math.max(
+        0,
+        Math.min(99, Math.round((event.loaded / event.total) * 100)),
+      );
+      options.onProgress?.(percent);
+    };
+
+    xhr.upload.onload = () => {
+      options.onUploaded?.();
+    };
+
+    xhr.onload = () => {
+      const body = xhr.response ?? {};
+      if (xhr.status >= 200 && xhr.status < 300 && body.document) {
+        resolve({
+          document: body.document as KnowledgeDocument,
+          deduplicated: Boolean(body.deduplicated),
+          jobId: typeof body.jobId === "string" ? body.jobId : null,
+        });
+        return;
+      }
+      reject(
+        new Error(typeof body.error === "string" ? body.error : "导入失败"),
+      );
+    };
+    xhr.onerror = () => reject(new Error("资料导入失败"));
+    xhr.onabort = () => reject(new Error("上传已取消"));
+    xhr.send(file);
+  });
+}
+
+function summarizeBatch(result: KnowledgeBatchUploadResult): {
+  text: string;
+  isError: boolean;
+} {
+  const parts: string[] = [];
+  if (result.uploaded > 0) parts.push(`新增 ${result.uploaded}`);
+  if (result.duplicates.length > 0) {
+    parts.push(`已存在 ${result.duplicates.length}`);
+  }
+  if (result.skipped.length > 0) parts.push(`跳过 ${result.skipped.length}`);
+  if (result.failed.length > 0) parts.push(`失败 ${result.failed.length}`);
+  if (parts.length === 0) {
+    return { text: "没有可导入的文件", isError: true };
+  }
+  return {
+    text: `批量导入完成：${parts.join("，")}`,
+    isError: result.failed.length > 0 && result.uploaded === 0,
+  };
+}
 
 function summarizeReindex(
   results: Array<{ id: string; status: string; reason?: string }>,
@@ -259,63 +346,23 @@ export function useKnowledge(options?: { onJobsChanged?: () => void }) {
       });
 
       try {
-        const result = await new Promise<KnowledgeUploadResult>(
-          (resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            xhr.open("POST", "/api/knowledge");
-            xhr.setRequestHeader("content-type", mimeForKind(kind));
-            xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
-            if (options?.displayName?.trim()) {
-              xhr.setRequestHeader(
-                "x-display-name",
-                encodeURIComponent(options.displayName.trim()),
-              );
-            }
-            xhr.setRequestHeader("x-file-kind", kind);
-            xhr.responseType = "json";
-
-            xhr.upload.onprogress = (event) => {
-              if (!event.lengthComputable) return;
-              const percent = Math.max(
-                0,
-                Math.min(99, Math.round((event.loaded / event.total) * 100)),
-              );
-              setUploadState({
-                fileName: label,
-                percent,
-                phase: "uploading",
-              });
-            };
-
-            xhr.upload.onload = () => {
-              setUploadState({
-                fileName: label,
-                percent: 100,
-                phase: "processing",
-              });
-            };
-
-            xhr.onload = () => {
-              const body = xhr.response ?? {};
-              if (xhr.status >= 200 && xhr.status < 300 && body.document) {
-                resolve({
-                  document: body.document as KnowledgeDocument,
-                  deduplicated: Boolean(body.deduplicated),
-                  jobId: typeof body.jobId === "string" ? body.jobId : null,
-                });
-                return;
-              }
-              reject(
-                new Error(
-                  typeof body.error === "string" ? body.error : "导入失败",
-                ),
-              );
-            };
-            xhr.onerror = () => reject(new Error("资料导入失败"));
-            xhr.onabort = () => reject(new Error("上传已取消"));
-            xhr.send(file);
+        const result = await postKnowledgeFile(file, kind, {
+          displayName: options?.displayName,
+          onProgress: (percent) => {
+            setUploadState({
+              fileName: label,
+              percent,
+              phase: "uploading",
+            });
           },
-        );
+          onUploaded: () => {
+            setUploadState({
+              fileName: label,
+              percent: 100,
+              phase: "processing",
+            });
+          },
+        });
 
         await refresh();
         if (!result.deduplicated) {
@@ -343,6 +390,153 @@ export function useKnowledge(options?: { onJobsChanged?: () => void }) {
       }
     },
     [flash, onJobsChanged, pollJobProgress, refresh, startStatusPolling],
+  );
+
+  /**
+   * 客户端批量：顺序调用现有单文件入库 API（并发 1）。
+   * 显示名仅在单文件时可用；多文件一律用各自文件名，导入后可重命名。
+   */
+  const uploadMany = useCallback(
+    async (
+      files: File[],
+      options?: { displayName?: string },
+    ): Promise<KnowledgeBatchUploadResult | null> => {
+      const list = files.filter(Boolean);
+      if (list.length === 0) return null;
+      if (list.length === 1) {
+        const single = await upload(list[0], options);
+        if (!single) {
+          return {
+            total: 1,
+            uploaded: 0,
+            duplicates: [],
+            failed: [{ fileName: list[0].name, error: "导入失败" }],
+            skipped: [],
+          };
+        }
+        return {
+          total: 1,
+          uploaded: single.deduplicated ? 0 : 1,
+          duplicates: single.deduplicated ? [single.document] : [],
+          failed: [],
+          skipped: [],
+        };
+      }
+
+      setUploading(true);
+      setError("");
+      setNotice("");
+
+      const duplicates: KnowledgeDocument[] = [];
+      const failed: Array<{ fileName: string; error: string }> = [];
+      const skipped: Array<{ fileName: string; error: string }> = [];
+      let uploaded = 0;
+      let anyJob = false;
+      let lastPdfJob: { jobId: string; label: string } | null = null;
+
+      try {
+        for (let i = 0; i < list.length; i++) {
+          const file = list[i];
+          const label = file.name;
+          const batchIndex = i + 1;
+          const batchTotal = list.length;
+
+          const kind = detectBrowserFileKind(file);
+          if (!kind) {
+            skipped.push({
+              fileName: label,
+              error: "仅支持 PDF、TXT、Markdown",
+            });
+            continue;
+          }
+          if (file.size > MAX_KNOWLEDGE_FILE_SIZE) {
+            skipped.push({
+              fileName: label,
+              error: `超过 ${MAX_KNOWLEDGE_FILE_SIZE_LABEL}`,
+            });
+            continue;
+          }
+
+          setUploadState({
+            fileName: label,
+            percent: 0,
+            phase: "uploading",
+            batchIndex,
+            batchTotal,
+            detail: `${batchIndex}/${batchTotal}`,
+          });
+          setNotice(`正在导入 ${batchIndex}/${batchTotal}：${label}`);
+
+          try {
+            const result = await postKnowledgeFile(file, kind, {
+              onProgress: (percent) => {
+                setUploadState({
+                  fileName: label,
+                  percent,
+                  phase: "uploading",
+                  batchIndex,
+                  batchTotal,
+                  detail: `${batchIndex}/${batchTotal}`,
+                });
+              },
+              onUploaded: () => {
+                setUploadState({
+                  fileName: label,
+                  percent: 100,
+                  phase: "processing",
+                  batchIndex,
+                  batchTotal,
+                  detail: `${batchIndex}/${batchTotal}`,
+                });
+              },
+            });
+            if (result.deduplicated) {
+              duplicates.push(result.document);
+            } else {
+              uploaded += 1;
+              if (result.jobId) {
+                anyJob = true;
+                lastPdfJob = { jobId: result.jobId, label };
+              }
+            }
+          } catch (e) {
+            failed.push({
+              fileName: label,
+              error: e instanceof Error ? e.message : "导入失败",
+            });
+          }
+        }
+
+        await refresh();
+        if (uploaded > 0) startStatusPolling();
+        if (anyJob) onJobsChanged?.();
+        if (lastPdfJob) {
+          pollJobProgress(lastPdfJob.jobId, lastPdfJob.label);
+        }
+
+        const batch: KnowledgeBatchUploadResult = {
+          total: list.length,
+          uploaded,
+          duplicates,
+          failed,
+          skipped,
+        };
+        const summary = summarizeBatch(batch);
+        flash(summary.text, summary.isError);
+        return batch;
+      } finally {
+        setUploading(false);
+        setUploadState(null);
+      }
+    },
+    [
+      flash,
+      onJobsChanged,
+      pollJobProgress,
+      refresh,
+      startStatusPolling,
+      upload,
+    ],
   );
 
   const rename = useCallback(
@@ -571,6 +765,7 @@ export function useKnowledge(options?: { onJobsChanged?: () => void }) {
     notice,
     refresh,
     upload,
+    uploadMany,
     rename,
     remove,
     reindex,

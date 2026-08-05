@@ -3,9 +3,11 @@
 import { useMemo, useRef, useState } from "react";
 import type { KnowledgeDocument, MessageAttachment } from "../../../services/types";
 import type { RetrievalHit } from "../../../services/knowledge/types";
-import type { KnowledgeMeta } from "../../hooks/useKnowledge";
+import type {
+  KnowledgeMeta,
+  KnowledgeUploadState,
+} from "../../hooks/useKnowledge";
 import {
-  allDocumentsAttachment,
   attachmentFromDocument,
 } from "../../lib/attachments";
 import {
@@ -15,19 +17,28 @@ import {
 import { MAX_KNOWLEDGE_FILE_SIZE_LABEL } from "../../../config/defaults";
 import { useDocumentPreview } from "../../lib/document-preview";
 import { Icon } from "../ui/Icon";
+import { ModalShell } from "../ui/ModalShell";
 import { DocumentCard } from "./DocumentCard";
 import {
   summarizeDegradedReasons,
 } from "../../../services/knowledge/retrieval/degraded-labels";
+import { documentViewStatus } from "../../../services/knowledge/status";
 
 const PAGE_SIZE = 12;
 const SEARCH_PAGE_SIZE = 8;
 const SEARCH_PREVIEW_LIMIT = 64;
 
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 interface KnowledgeViewProps {
   documents: KnowledgeDocument[];
   meta: KnowledgeMeta | null;
   uploading: boolean;
+  uploadState?: KnowledgeUploadState | null;
   reindexing: boolean;
   notice?: string;
   error?: string;
@@ -36,8 +47,10 @@ interface KnowledgeViewProps {
   onReprocess?: (id: string) => void;
   onReindexAll: () => void;
   onRename: (id: string, name: string) => void | Promise<unknown>;
-  /** 导入；displayName 可选，默认文件名；内容哈希去重与名字无关 */
-  onImport: (file: File, options?: { displayName?: string }) => void;
+  /**
+   * 导入一或多个文件。单文件时可传 displayName；多文件一律用各自文件名。
+   */
+  onImport: (files: File[], options?: { displayName?: string }) => void;
   onImportWeb: (url: string) => void;
   onImportGitHub: (input: {
     owner: string;
@@ -59,6 +72,7 @@ export function KnowledgeView({
   documents,
   meta,
   uploading,
+  uploadState = null,
   reindexing,
   notice = "",
   error = "",
@@ -76,9 +90,8 @@ export function KnowledgeView({
   const { openPreview } = useDocumentPreview();
   const fileInput = useRef<HTMLInputElement>(null);
   const [pickedIds, setPickedIds] = useState<string[]>([]);
-  const [pickAll, setPickAll] = useState(false);
   const [page, setPage] = useState(1);
-  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [displayName, setDisplayName] = useState("");
   const [connectorMode, setConnectorMode] = useState<"web" | "github" | null>(
     null,
@@ -99,15 +112,33 @@ export function KnowledgeView({
   const [searchDiag, setSearchDiag] = useState<string>("");
 
   const semanticOn = meta?.semanticSearchEnabled === true;
+  const documentViews = useMemo(
+    () =>
+      documents.map((doc) => ({
+        document: doc,
+        view: documentViewStatus(doc, semanticOn),
+      })),
+    [documents, semanticOn],
+  );
   const indexedCount = documents.filter((doc) => doc.status === "indexed").length;
-  const searchableCount = documents.filter(
-    (doc) =>
-      (doc.chunkCount ?? 0) > 0 &&
-      doc.status != null &&
-      ["ready", "embedding", "indexed", "error"].includes(doc.status),
+  const searchableCount = documentViews.filter(
+    ({ view }) => view.content === "usable",
   ).length;
+  const unavailableCount = documentViews.filter(
+    ({ view }) => view.content === "unavailable",
+  ).length;
+  const semanticFailedCount = documentViews.filter(
+    ({ view }) => view.semantic === "failed",
+  ).length;
+  const usableDocuments = useMemo(
+    () => documentViews.filter(({ view }) => view.canAttach).map(({ document }) => document),
+    [documentViews],
+  );
   const feedback = error || notice;
-  const hasSelection = pickAll || pickedIds.length > 0;
+  const hasSelection = pickedIds.length > 0;
+  const allUsableSelected =
+    usableDocuments.length > 0 &&
+    usableDocuments.every((doc) => pickedIds.includes(doc.id));
   const searchTotalPages = Math.max(
     1,
     Math.ceil(searchHits.length / SEARCH_PAGE_SIZE),
@@ -120,10 +151,10 @@ export function KnowledgeView({
 
   const totalPages = Math.max(1, Math.ceil(documents.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
-  const pageDocuments = useMemo(() => {
+  const pageDocumentViews = useMemo(() => {
     const start = (safePage - 1) * PAGE_SIZE;
-    return documents.slice(start, start + PAGE_SIZE);
-  }, [documents, safePage]);
+    return documentViews.slice(start, start + PAGE_SIZE);
+  }, [documentViews, safePage]);
 
   const metaLine = (() => {
     if (documents.length === 0) {
@@ -141,30 +172,34 @@ export function KnowledgeView({
     }
     if (semanticOn) {
       if (searchableCount > 0 && indexedCount >= searchableCount) {
-        return `已就绪 · 关键词 + 语义 · ${indexedCount} 篇`;
+        return `已就绪 · 关键词 + 语义 · ${indexedCount} 篇${
+          unavailableCount > 0 ? ` · ${unavailableCount} 篇无法检索` : ""
+        }`;
       }
       if (searchableCount > 0 && indexedCount < searchableCount) {
         return `关键词可用 · 语义 ${indexedCount}/${searchableCount} · 可点右上角查看队列`;
       }
       return `关键词 + 语义 · ${indexedCount} 篇已索引`;
     }
-    return `仅关键词 · ${documents.length} 篇可检索`;
+    return `仅关键词 · ${searchableCount} 篇可检索${
+      unavailableCount > 0 ? ` · ${unavailableCount} 篇无法检索` : ""
+    }`;
   })();
 
   function togglePick(id: string) {
-    setPickAll(false);
     setPickedIds((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
     );
   }
 
+  function selectAllUsable() {
+    setPickedIds(usableDocuments.map((doc) => doc.id));
+  }
+
   function goChat() {
-    if (pickAll) {
-      onAttachToChat([allDocumentsAttachment()]);
-      return;
-    }
-    const attachments = documents
-      .filter((doc) => pickedIds.includes(doc.id))
+    const selected = new Set(pickedIds);
+    const attachments = usableDocuments
+      .filter((doc) => selected.has(doc.id))
       .map(attachmentFromDocument);
     if (attachments.length === 0) return;
     onAttachToChat(attachments);
@@ -174,21 +209,30 @@ export function KnowledgeView({
     fileInput.current?.click();
   }
 
-  function onFileChosen(file: File) {
-    setPendingFile(file);
-    setDisplayName(file.name.replace(/\.[^.]+$/, "") || file.name);
+  function onFilesChosen(files: File[]) {
+    if (files.length === 0) return;
+    setPendingFiles(files);
+    if (files.length === 1) {
+      setDisplayName(files[0].name.replace(/\.[^.]+$/, "") || files[0].name);
+    } else {
+      setDisplayName("");
+    }
   }
 
   function confirmImport() {
-    if (!pendingFile || uploading) return;
-    const name = displayName.trim();
-    onImport(pendingFile, name ? { displayName: name } : undefined);
-    setPendingFile(null);
+    if (pendingFiles.length === 0 || uploading) return;
+    if (pendingFiles.length === 1) {
+      const name = displayName.trim();
+      onImport(pendingFiles, name ? { displayName: name } : undefined);
+    } else {
+      onImport(pendingFiles);
+    }
+    setPendingFiles([]);
     setDisplayName("");
   }
 
   function cancelImport() {
-    setPendingFile(null);
+    setPendingFiles([]);
     setDisplayName("");
   }
 
@@ -280,14 +324,12 @@ export function KnowledgeView({
           {documents.length > 0 && (
             <>
               <button
-                className={`knowledge-scope-btn ${pickAll ? "active" : ""}`}
+                className={`knowledge-scope-btn ${allUsableSelected ? "active" : ""}`}
                 type="button"
-                onClick={() => {
-                  setPickAll(true);
-                  setPickedIds([]);
-                }}
+                disabled={usableDocuments.length === 0}
+                onClick={selectAllUsable}
               >
-                全选资料
+                全部可检索资料
               </button>
               <button
                 className="knowledge-scope-btn"
@@ -316,7 +358,11 @@ export function KnowledgeView({
             disabled={uploading}
           >
             <Icon name="plus" />
-            {uploading ? "正在解析..." : "导入资料"}
+            {uploading
+              ? uploadState?.batchTotal
+                ? `导入中 ${uploadState.batchIndex}/${uploadState.batchTotal}`
+                : "正在解析..."
+              : "导入资料"}
           </button>
           <button
             className="knowledge-scope-btn"
@@ -339,10 +385,11 @@ export function KnowledgeView({
           ref={fileInput}
           className="visually-hidden"
           type="file"
+          multiple
           accept="application/pdf,.pdf,text/plain,.txt,text/markdown,.md,.markdown"
           onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) onFileChosen(file);
+            const files = Array.from(event.target.files ?? []);
+            if (files.length > 0) onFilesChosen(files);
             if (fileInput.current) fileInput.current.value = "";
           }}
         />
@@ -355,6 +402,42 @@ export function KnowledgeView({
         >
           {feedback}
         </p>
+      ) : null}
+
+      {uploading && uploadState ? (
+        <div className="knowledge-batch-progress" role="status">
+          <div className="knowledge-batch-progress-bar">
+            <span style={{ width: `${uploadState.percent}%` }} />
+          </div>
+          <p>
+            {uploadState.batchTotal
+              ? `${uploadState.batchIndex}/${uploadState.batchTotal} · `
+              : null}
+            <strong>{uploadState.fileName}</strong>
+            {uploadState.phase === "uploading"
+              ? ` · 上传 ${uploadState.percent}%`
+              : " · 处理中…"}
+          </p>
+        </div>
+      ) : null}
+
+      {unavailableCount > 0 || semanticFailedCount > 0 ? (
+        <div className="knowledge-library-alert" role="alert">
+          <Icon name="alert" />
+          <div>
+            <strong>资料库中有需要处理的文件</strong>
+            <p>
+              {unavailableCount > 0
+                ? `${unavailableCount} 篇没有可检索文本，只能预览原件`
+                : null}
+              {unavailableCount > 0 && semanticFailedCount > 0 ? "；" : null}
+              {semanticFailedCount > 0
+                ? `${semanticFailedCount} 篇语义索引失败，但仍可关键词检索`
+                : null}
+              。问题文件已在下方显眼标出。
+            </p>
+          </div>
+        </div>
       ) : null}
 
       {documents.length > 0 ? (
@@ -486,20 +569,21 @@ export function KnowledgeView({
           </span>
           <strong>导入第一份资料</strong>
           <small>
-            支持 PDF、TXT、Markdown，单个文件最大 {MAX_KNOWLEDGE_FILE_SIZE_LABEL}
-            ；相同内容不会重复入库
+            支持一次选择多个 PDF、TXT、Markdown，单个文件最大{" "}
+            {MAX_KNOWLEDGE_FILE_SIZE_LABEL}；相同内容不会重复入库
           </small>
         </button>
       ) : (
         <>
           <div className="knowledge-list">
-            {pageDocuments.map((doc) => (
+            {pageDocumentViews.map(({ document: doc, view }) => (
               <DocumentCard
                 key={doc.id}
                 document={doc}
-                selected={pickAll || pickedIds.includes(doc.id)}
+                selected={pickedIds.includes(doc.id)}
                 reindexing={reindexing}
-                showReindex={semanticOn}
+                semanticEnabled={semanticOn}
+                viewStatus={view}
                 onSelect={togglePick}
                 onDelete={onDelete}
                 onReindex={onReindex}
@@ -545,36 +629,65 @@ export function KnowledgeView({
         </>
       )}
 
-      {pendingFile ? (
-        <div
-          className="knowledge-import-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) cancelImport();
-          }}
-        >
+      {pendingFiles.length > 0 ? (
+        <ModalShell open onClose={cancelImport}>
           <div
-            className="knowledge-import-dialog"
+            className="knowledge-import-dialog knowledge-import-dialog--batch"
             role="dialog"
+            aria-modal="true"
             aria-labelledby="knowledge-import-title"
           >
-            <h2 id="knowledge-import-title">导入到资料库</h2>
-            <p className="knowledge-import-file">文件：{pendingFile.name}</p>
-            <label className="knowledge-import-label">
-              显示名称（可选）
-              <input
-                type="text"
-                value={displayName}
-                maxLength={180}
-                onChange={(event) => setDisplayName(event.target.value)}
-                placeholder={pendingFile.name}
-              />
-            </label>
-            <p className="knowledge-import-hint">
-              去重按文件内容，与显示名称无关；导入后仍可重命名。
-            </p>
+            <h2 id="knowledge-import-title">
+              {pendingFiles.length === 1
+                ? "导入到资料库"
+                : `导入 ${pendingFiles.length} 个文件`}
+            </h2>
+            {pendingFiles.length === 1 ? (
+              <>
+                <p className="knowledge-import-file">
+                  文件：{pendingFiles[0].name}
+                </p>
+                <label className="knowledge-import-label">
+                  显示名称（可选）
+                  <input
+                    type="text"
+                    value={displayName}
+                    maxLength={180}
+                    onChange={(event) => setDisplayName(event.target.value)}
+                    placeholder={pendingFiles[0].name}
+                  />
+                </label>
+                <p className="knowledge-import-hint">
+                  去重按文件内容，与显示名称无关；导入后仍可重命名。单文件上限{" "}
+                  {MAX_KNOWLEDGE_FILE_SIZE_LABEL}。
+                </p>
+              </>
+            ) : (
+              <>
+                <ul className="knowledge-import-file-list">
+                  {pendingFiles.map((file) => (
+                    <li key={`${file.name}-${file.size}-${file.lastModified}`}>
+                      <span className="knowledge-import-file-name">
+                        {file.name}
+                      </span>
+                      <span className="knowledge-import-file-size">
+                        {formatFileSize(file.size)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="knowledge-import-hint">
+                  将按顺序入库，显示名默认用文件名（导入后可重命名）。相同内容只会保留一份；单文件上限{" "}
+                  {MAX_KNOWLEDGE_FILE_SIZE_LABEL}。
+                </p>
+              </>
+            )}
             <div className="knowledge-import-actions">
-              <button type="button" className="knowledge-scope-btn" onClick={cancelImport}>
+              <button
+                type="button"
+                className="knowledge-scope-btn"
+                onClick={cancelImport}
+              >
                 取消
               </button>
               <button
@@ -583,24 +696,21 @@ export function KnowledgeView({
                 disabled={uploading}
                 onClick={confirmImport}
               >
-                确认导入
+                {pendingFiles.length === 1
+                  ? "确认导入"
+                  : `确认导入 ${pendingFiles.length} 个`}
               </button>
             </div>
           </div>
-        </div>
+        </ModalShell>
       ) : null}
 
       {connectorMode ? (
-        <div
-          className="knowledge-import-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setConnectorMode(null);
-          }}
-        >
+        <ModalShell open onClose={() => setConnectorMode(null)}>
           <div
             className="knowledge-import-dialog"
             role="dialog"
+            aria-modal="true"
             aria-labelledby="connector-import-title"
           >
             <h2 id="connector-import-title">
@@ -707,7 +817,7 @@ export function KnowledgeView({
               </button>
             </div>
           </div>
-        </div>
+        </ModalShell>
       ) : null}
       </div>
     </section>

@@ -115,7 +115,7 @@ test("resolveRetrievalProfile: quality 无 reranker → balanced", () => {
   assert.ok(profile.degradedReasons.includes("RERANKER_UNAVAILABLE"));
 });
 
-test("resolveRetrievalProfile: quality 资源压力 → balanced", () => {
+test("resolveRetrievalProfile: quality 资源压力 → lite（8GB Chat 优先）", () => {
   const profile = resolveRetrievalProfile("quality", {
     ...baseCaps,
     embedding: true,
@@ -124,8 +124,21 @@ test("resolveRetrievalProfile: quality 资源压力 → balanced", () => {
     memoryTier: "quality",
     resourcePressure: "high",
   });
-  assert.equal(profile.effectiveTier, "balanced");
+  assert.equal(profile.effectiveTier, "lite");
   assert.ok(profile.degradedReasons.includes("RESOURCE_PRESSURE"));
+});
+
+test("resolveKnowledgeTier: auto 资源压力 → lite", () => {
+  const resolved = resolveKnowledgeTier("auto", {
+    ...baseCaps,
+    embedding: true,
+    vectorIndexReady: true,
+    reranker: true,
+    memoryTier: "quality",
+    resourcePressure: "high",
+  });
+  assert.equal(resolved.effectiveTier, "lite");
+  assert.ok(resolved.degradedReasons.includes("RESOURCE_PRESSURE"));
 });
 
 test("resolveRetrievalProfile: 主机 memoryTier 封顶", () => {

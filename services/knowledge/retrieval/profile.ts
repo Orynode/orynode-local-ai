@@ -128,10 +128,6 @@ export function resolveKnowledgeTier(
     if (!semanticReady) {
       effective = "lite";
       degradedReasons.push(semanticUnavailableReason(caps));
-    } else if (pressure === "high") {
-      effective = "balanced";
-      degradedReasons.push("RESOURCE_PRESSURE");
-      degradedReasons.push("QUALITY_RETRIEVAL_UNAVAILABLE");
     } else if (!caps.reranker) {
       effective = "balanced";
       degradedReasons.push("RERANKER_UNAVAILABLE");
@@ -139,6 +135,13 @@ export function resolveKnowledgeTier(
     } else {
       effective = "quality";
     }
+  }
+
+  // 8GB 余量保护：Chat / OCR / embed 重活或低配主机压力下，强制关键词路径，
+  // 避免查询时再跑 e5 与 Gemma 争统一内存（正式档 ≠ 查询 CE，也不赌 hybrid）。
+  if (effective !== "lite" && pressure === "high") {
+    effective = "lite";
+    degradedReasons.push("RESOURCE_PRESSURE");
   }
 
   effective = capEffectiveTier(effective, caps.memoryTier, degradedReasons);

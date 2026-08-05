@@ -5,6 +5,7 @@
  * 避免 Knowledge Engine 核心直接依赖 macOS 细节。
  */
 
+import { totalmem } from "node:os";
 import { resolve } from "node:path";
 import type {
   CredentialStore,
@@ -13,6 +14,10 @@ import type {
   ProcessSupervisor,
   RuntimePaths,
 } from "../types";
+import {
+  classifyHostMemory,
+  hostKnowledgeCeiling,
+} from "../host-memory";
 import { probeAppleVisionOcrCapability } from "./apple-vision-ocr";
 
 const unsupportedCredentials: CredentialStore = {
@@ -59,6 +64,7 @@ export function createMacosHostRuntime(
         process.env.ORYNODE_SEMANTIC_SEARCH === "1" ||
         process.env.ORYNODE_SEMANTIC_SEARCH === "true";
       const ocrCap = await probeAppleVisionOcrCapability(projectRoot);
+      const hostClass = classifyHostMemory(totalmem());
       return {
         platform: "macos",
         modelRuntime: true,
@@ -66,7 +72,7 @@ export function createMacosHostRuntime(
         reranker: false,
         ocr: ocrCap.available,
         ftsTokenizer: null,
-        memoryTier: semantic ? "balanced" : "lite",
+        memoryTier: hostKnowledgeCeiling(hostClass, semantic),
         externalConnectors: { web: true, github: true },
       };
     },

@@ -4,6 +4,10 @@
  * - library / library_all：持久资料库
  * - conversation_file：本会话附件
  * 草稿选中只作用于本条消息；会话文件本身绑 conversationId 可再选。
+ *
+ * library_all 表示「整库检索范围」。无法检索的文档（processing_error 等）
+ * 仍会被 FTS / chunk 查询白名单过滤，不会当成证据返回。
+ * 资料库页的「全部可检索资料」则显式枚举当前可用 id，语义更窄。
  */
 
 import type {

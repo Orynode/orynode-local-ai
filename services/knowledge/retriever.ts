@@ -23,6 +23,7 @@ import {
 import { Fts5KeywordIndex } from "./adapters/keyword-fts5";
 import { BlobScanVectorIndex } from "./adapters/vector-blob-scan";
 import type { IndexCandidate, KeywordQuery } from "./ports/indexes";
+import { planVectorScanScope } from "./retrieval/vector-scan-scope";
 
 type ChunkRow = {
   id: string;
@@ -386,9 +387,19 @@ export class HybridRetriever implements Retriever {
     }
 
     const queryVector = await embedder.embed(query);
+    const keywordDocIds =
+      keywordRanked.length > 0
+        ? keywordRanked
+            .map((id) => byId.get(id)?.documentId)
+            .filter((id): id is string => Boolean(id))
+        : [];
+    const scanPlan = planVectorScanScope(scope, keywordDocIds);
+    // 有关键词命中时只扫命中文档的向量；无命中则保持原 scope 做纯向量兜底
     const semanticResults = await this.vectorIndex.search(queryVector, {
       topK: topK * 2,
-      scope,
+      scope: scanPlan.scope,
+      documentIds: scanPlan.documentIds,
+      maxScanChunks: SEARCH_CONFIG.maxVectorScanChunks,
     });
     for (const item of semanticResults) {
       if (!byId.has(item.chunkId)) {

@@ -21,6 +21,7 @@ import {
   SEARCH_CONFIG,
 } from "../../config/defaults";
 import type { ConversationFile, KnowledgeDocument } from "../types";
+import { isUsableLibraryDocument } from "./status";
 
 export type IndexStatus =
   | "indexed"
@@ -302,12 +303,7 @@ export async function enqueuePendingVectorBackfill(): Promise<VectorBackfillResu
   }
   const list = await listResponse.json();
   const documents: KnowledgeDocument[] = list.documents ?? [];
-  const searchable = documents.filter(
-    (doc) =>
-      (doc.chunkCount ?? 0) > 0 &&
-      doc.status != null &&
-      ["ready", "embedding", "indexed", "error"].includes(doc.status),
-  );
+  const searchable = documents.filter(isUsableLibraryDocument);
   const indexed = searchable.filter((doc) => doc.status === "indexed");
   const pending = searchable.filter((doc) => doc.status !== "indexed");
 

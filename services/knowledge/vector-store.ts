@@ -4,6 +4,7 @@
  * 经 data-service HTTP 读写 SQLite BLOB；本类不直接打开数据库。
  * - insert：写入 chunk embedding（按 namespace）
  * - search：按 RetrievalScope 拉取带向量的 chunks，JS 余弦 Top-K
+ * - 8GB：支持 maxScanChunks，避免单次把过大向量工作集拉进堆
  */
 
 import type {
@@ -13,7 +14,7 @@ import type {
   VectorDocument,
   VectorStore,
 } from "./types";
-import { ORYNODE_DATA_URL, HTTP_TIMEOUT } from "../../config/defaults";
+import { ORYNODE_DATA_URL, HTTP_TIMEOUT, SEARCH_CONFIG } from "../../config/defaults";
 
 function float32ToNumberArray(vector: Float32Array): number[] {
   return Array.from(vector);
@@ -66,6 +67,7 @@ export class SQLiteVectorStore implements VectorStore {
     options: {
       topK?: number;
       scope?: Exclude<RetrievalScope, { mode: "none" }>;
+      maxScanChunks?: number;
     } = {},
   ): Promise<SearchResult[]> {
     const topK = options.topK ?? 8;
@@ -73,6 +75,10 @@ export class SQLiteVectorStore implements VectorStore {
       mode: "sources" as const,
       library: "all" as const,
     };
+    const maxScanChunks = Math.max(
+      topK,
+      options.maxScanChunks ?? SEARCH_CONFIG.maxVectorScanChunks,
+    );
 
     const response = await fetch(`${this.dataUrl}/retrieval/chunks/query`, {
       method: "POST",
@@ -113,25 +119,32 @@ export class SQLiteVectorStore implements VectorStore {
       processingBuildId?: string;
     }> = result.chunks ?? [];
 
-    const scored = chunks
-      .filter((chunk) => chunk.embedding && chunk.embedding.length > 0)
-      .map((chunk) => ({
-        chunk: {
-          id: chunk.id,
-          documentId: chunk.documentId,
-          documentName: chunk.documentName,
-          pageNumber: chunk.pageNumber,
-          position: chunk.position,
-          content: chunk.content,
-          source: chunk.source ?? "library",
-          revisionId: chunk.revisionId,
-          processingBuildId: chunk.processingBuildId,
-        },
-        score: cosineSimilarity(
-          queryVector,
-          new Float32Array(chunk.embedding!),
-        ),
-      }));
+    const withVectors = chunks.filter(
+      (chunk) => chunk.embedding && chunk.embedding.length > 0,
+    );
+    // 8GB：限制单次余弦工作集；优先保留靠前（库序）条目
+    const scanSlice =
+      withVectors.length > maxScanChunks
+        ? withVectors.slice(0, maxScanChunks)
+        : withVectors;
+
+    const scored = scanSlice.map((chunk) => ({
+      chunk: {
+        id: chunk.id,
+        documentId: chunk.documentId,
+        documentName: chunk.documentName,
+        pageNumber: chunk.pageNumber,
+        position: chunk.position,
+        content: chunk.content,
+        source: chunk.source ?? "library",
+        revisionId: chunk.revisionId,
+        processingBuildId: chunk.processingBuildId,
+      },
+      score: cosineSimilarity(
+        queryVector,
+        new Float32Array(chunk.embedding!),
+      ),
+    }));
 
     scored.sort((a, b) => b.score - a.score);
     return scored.slice(0, topK);

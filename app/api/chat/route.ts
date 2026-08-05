@@ -113,8 +113,19 @@ export async function POST(request: Request) {
       budget.historyBudgetTokens,
     );
 
-    const { knowledgePrompt, retrieval, context } =
-      await buildChatKnowledgeContext(engine, {
+    // 必须先于 RAG：抬升 resourcePressure → 检索强制 lite，并（低配）卸载 e5，
+    // 避免对话路径上 hybrid 与 Gemma 争统一内存。
+    const chatResourceToken = await markChatResourceActive(HTTP_TIMEOUT.chat);
+
+    let knowledgePrompt: string;
+    let retrieval: Awaited<
+      ReturnType<typeof buildChatKnowledgeContext>
+    >["retrieval"];
+    let context: Awaited<
+      ReturnType<typeof buildChatKnowledgeContext>
+    >["context"];
+    try {
+      const built = await buildChatKnowledgeContext(engine, {
         messages: body.messages,
         retrievalScope: body.retrievalScope,
         knowledgeScope: body.knowledgeScope,
@@ -124,6 +135,13 @@ export async function POST(request: Request) {
         knowledgeTier,
         knowledgeBudgetTokens: budget.knowledgeBudgetTokens,
       });
+      knowledgePrompt = built.knowledgePrompt;
+      retrieval = built.retrieval;
+      context = built.context;
+    } catch (error) {
+      await markChatResourceIdle(chatResourceToken);
+      throw error;
+    }
 
     const systemContent = buildSystemPrompt(knowledgePrompt);
 
@@ -143,8 +161,6 @@ export async function POST(request: Request) {
           ? request.signal
           : AbortSignal.timeout(HTTP_TIMEOUT.chat);
 
-    await markChatResourceActive(HTTP_TIMEOUT.chat);
-
     const runtime = createRuntimeServices();
     let upstream: ReadableStream<Uint8Array>;
     try {
@@ -156,7 +172,7 @@ export async function POST(request: Request) {
         signal,
       });
     } catch (error) {
-      await markChatResourceIdle();
+      await markChatResourceIdle(chatResourceToken);
       throw error;
     }
 
@@ -185,7 +201,7 @@ export async function POST(request: Request) {
           ),
         }),
         onFinally: () => {
-          void markChatResourceIdle();
+          void markChatResourceIdle(chatResourceToken);
         },
       },
     );

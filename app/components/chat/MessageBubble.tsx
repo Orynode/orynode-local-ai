@@ -230,7 +230,6 @@ function CiteRefChip({
         left,
         width,
         maxHeight,
-        zIndex: 1200,
       });
     };
 

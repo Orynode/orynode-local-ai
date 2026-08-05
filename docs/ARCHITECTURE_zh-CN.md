@@ -573,16 +573,68 @@ ORYNODE_SEMANTIC_SEARCH=1                        # 可选语义向量；包已�
 
 ## 低配 Mac 的内存策略
 
-项目为 **8GB 统一内存 MacBook Air** 设计，有三层内存控制策略：
+项目以 **8GB 统一内存** 为否决基线（必须能跑完「检索 + 对话」且占得下），**16GB / 32GB+** 走同一管道、更高档更少打断。不是两套产品。
+
+### 设计原则
+
+| 原则 | 说明 |
+|------|------|
+| **占用小是否决项** | 正式档不加查询时 CE；默认可不加载 embedding |
+| **完整 RAG 次之** | 摄取→召回→融合→装箱→LLM→引用可降级不断链 |
+| **同一管道分档** | `hostMemoryClass` 驱动推荐与封顶，不硬锁「只能 8GB」 |
+| **扩展既有协调器** | 不另建 MemoryGovernor；信号进 `ResourceCoordinator` → `CapabilitySnapshot` → `resolveKnowledgeTier` |
+
+### 信号词汇（勿混用）
+
+| 信号 | 含义 | 来源 |
+|------|------|------|
+| `hostMemoryClass` | 物理机档 low / medium / high（≤10GiB / ≤18GiB / 更大） | `os.totalmem` |
+| `memoryPressure` | 瞬时压力 normal / critical（chat 或 OCR/embed lease） | ResourceCoordinator |
+| `resourcePressure` | normal / high（供检索档位） | 由 memoryPressure 映射 |
+| `memoryTier` | 检索执行封顶 lite / balanced / quality | Host + 语义能力 |
+| `embedResident` | e5 是否驻留（仅观测；不单独永久抬压） | embed-lifecycle |
+
+### 闭环时序（必须成立）
+
+```text
+Host classifyHostMemory
+  → ResourceCoordinator（hostMemoryClass / memoryPressure / preset）
+  → GET /resources → probeCapabilitySnapshot.resourcePressure
+  → resolveKnowledgeTier（high → 强制 lite + RESOURCE_PRESSURE）
+  → Retriever（lite 不跑 query embed）
+
+/api/chat：
+  1. markChatResourceActive   ← 先抬压（并在 low 主机卸载 e5）
+  2. buildChatKnowledgeContext / retrieve  ← 此时必见 resourcePressure=high
+  3. ModelRuntime.chat（Gemma）
+  4. markChatResourceIdle（流结束 / 失败）
+```
+
+对话路径若先 RAG 再 markChat，则 `RESOURCE_PRESSURE` 对 Chat 内检索不生效——**已定为缺陷并修复**。
+
+### 控制层
 
 | 策略 | 说明 |
 |------|------|
-| **零额外开销（默认）** | 无 Embedder，仅 FTS5 关键词；`knowledgeTier=auto` 常落在 lite |
-| **按需加载** | `ORYNODE_SEMANTIC_SEARCH=1` 后才加载 e5-small ONNX；失败 / Chat 占用回退 keyword |
-| **不加查询时 CE** | **正式档不接** Cross-Encoder / `bge-reranker`；Quality = 多查询 + **词法**重排；CE 仅属更高内存实验方向，**不是** 8GB 产品承诺 |
-| **不加 sqlite-vec 默认** | 避免原生扩展成为开源安装负担；个人/中小规模 `blob_scan` 足够，**大量数据瓶颈时再评估** |
+| **零额外开销（默认）** | 无 Embedder，仅 FTS5；`knowledgeTier=auto` 常落在 lite |
+| **按需加载** | `ORYNODE_SEMANTIC_SEARCH=1` 后才加载 e5；status **不**预热加载 |
+| **Chat / 重活 defer embed** | `chatActive` → `EMBED_DEFERRED_CHAT`；`heavyKind=ocr|embedding` → `EMBED_DEFERRED_HEAVY` |
+| **e5 生命周期** | 空闲卸载（默认 90s，`ORYNODE_EMBED_IDLE_UNLOAD_MS`）；low 主机对话开始卸载 |
+| **blob_scan 收窄** | hybrid 有 FTS 命中时只扫命中文档；`maxVectorScanChunks` 软顶 |
+| **OCR 超页截断** | 前 `maxOcrPagesPerDocument` 页入检索（`OCR_PAGE_TRUNCATED`），不再整本失败 |
+| **不加查询时 CE** | Quality = 多查询 + **词法**重排 |
+| **不加 sqlite-vec 默认** | 大量数据且评测证明瓶颈后再评估 |
 
-对话与向量争用：Chat active 时 data-service **推迟 embed**（`EMBED_DEFERRED_CHAT`）。可用 `npm run test:smoke-rag` 做离线冒烟。
+### 本机配置初始化
+
+| 场景 | 行为 |
+|------|------|
+| 首次无 `runtime-settings.json` | 按内存档写入推荐（8GB→8K，16GB→16K，32GB+→32K；`knowledgeTier=auto`） |
+| 已有用户文件 | **绝不覆盖** |
+| 文件损坏无法解析 | 内存回退推荐，**不写盘覆盖** |
+| Settings UI | 「恢复默认」= 产品全局默认；「套用本机推荐」= 当前机器档预设后再保存 |
+
+空闲时 16GB+ 可 hybrid；对话中一律关键词优先（压力降档）。可用 `npm run test:smoke-rag` 做离线冒烟。
 
 ---
 
@@ -614,8 +666,11 @@ ORYNODE_SEMANTIC_SEARCH=1                        # 可选语义向量；包已�
 | POST | `/knowledge/chunks/query` | 旧版仅资料库导出（兼容保留） |
 | GET | `/knowledge/:id/chunks` | 单文档 chunks |
 | POST | `/knowledge/vectors` | 批量写入 embedding BLOB |
-| GET | `/knowledge/embed/status` | 向量模型是否可用 |
-| POST | `/knowledge/embed` | 文本批量向量化（Node/ONNX） |
+| GET | `/knowledge/embed/status` | 向量是否**可加载**（不预热权重）；`ready`/`resident` 表示已驻留 |
+| POST | `/knowledge/embed` | 文本批量向量化（Node/ONNX）；Chat/重活时 503 |
+| POST | `/knowledge/embed/unload` | 主动卸载 e5 pipeline |
+| GET | `/resources` | ResourceCoordinator 快照（chatActive / memoryPressure / hostMemoryClass / preset） |
+| POST | `/resources/chat` | 标记 Chat 活跃 / 空闲（抬压与低配卸载 e5） |
 | GET | `/knowledge/vector-coverage` | 向量索引覆盖率（indexed/total） |
 | GET/POST | `/terminology/entries` | 可学习术语表 list / upsert |
 | POST | `/terminology/entries/hit` | 术语命中计数 |

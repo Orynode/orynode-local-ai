@@ -9,6 +9,7 @@ import {
   persistDisplayName,
 } from "../../lib/displayName";
 import { Icon } from "../ui/Icon";
+import { ModalShell } from "../ui/ModalShell";
 import { summarizeDegradedReasons } from "../../../services/knowledge/retrieval/degraded-labels";
 
 type LanSessionRow = {
@@ -58,6 +59,16 @@ interface SettingsPanelProps {
   defaults: RuntimeSettings;
   appliedMaxContext: number | null;
   maxContextRestartRequired: boolean;
+  hostMemoryClass?: "low" | "medium" | "high" | null;
+  recommendedMaxContext?: number | null;
+  maxContextAboveRecommendation?: boolean;
+  memoryRecommendedPreset?: {
+    hostMemoryClass: "low" | "medium" | "high";
+    label: string;
+    summary: string;
+    settings: Pick<RuntimeSettings, "maxContext" | "knowledgeTier" | "ocrMode">;
+  } | null;
+  settingsMatchMemoryRecommendation?: boolean;
   displayName: string;
   onDisplayNameChange: (name: string) => void;
   settingsError?: string;
@@ -76,6 +87,11 @@ export function SettingsPanel({
   defaults,
   appliedMaxContext,
   maxContextRestartRequired,
+  hostMemoryClass = null,
+  recommendedMaxContext = null,
+  maxContextAboveRecommendation = false,
+  memoryRecommendedPreset = null,
+  settingsMatchMemoryRecommendation = false,
   displayName,
   onDisplayNameChange,
   settingsError = "",
@@ -290,13 +306,7 @@ export function SettingsPanel({
       settingsDraft.maxContext !== appliedMaxContext);
 
   return (
-    <div
-      className="modal-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.currentTarget === event.target) onClose();
-      }}
-    >
+    <ModalShell open={open} onClose={onClose}>
       <section
         className="settings-panel"
         role="dialog"
@@ -476,6 +486,9 @@ export function SettingsPanel({
                       {appliedMaxContext != null
                         ? ` · 进程中 ${formatContext(appliedMaxContext)}`
                         : " · 进程值未知，重启模型后可对齐"}
+                      {recommendedMaxContext != null
+                        ? ` · 本机推荐 ${formatContext(recommendedMaxContext)}`
+                        : ""}
                       ）
                     </span>
                     <select
@@ -490,11 +503,42 @@ export function SettingsPanel({
                       {MAX_CONTEXT_OPTIONS.map((option) => (
                         <option key={option.value} value={option.value}>
                           {option.label}
+                          {recommendedMaxContext === option.value
+                            ? "（本机推荐）"
+                            : ""}
                         </option>
                       ))}
                     </select>
                   </label>
                 </div>
+
+                {memoryRecommendedPreset ? (
+                  <div className="settings-restart-hint">
+                    本机内存档：
+                    {hostMemoryClass === "low"
+                      ? "约 8GB"
+                      : hostMemoryClass === "medium"
+                        ? "约 16GB"
+                        : hostMemoryClass === "high"
+                          ? "32GB+"
+                          : "未知"}
+                    。{memoryRecommendedPreset.summary}
+                    {settingsMatchMemoryRecommendation
+                      ? "（当前已是本机推荐）"
+                      : ""}
+                  </div>
+                ) : null}
+
+                {hostMemoryClass === "low" &&
+                (maxContextAboveRecommendation ||
+                  settingsDraft.maxContext >
+                    (recommendedMaxContext ?? 8192)) ? (
+                  <div className="settings-restart-hint">
+                    当前设备约 8GB 统一内存：上下文大于{" "}
+                    {formatContext(recommendedMaxContext ?? 8192)}{" "}
+                    会与对话模型争用内存，可能变卡或触发换页。能跑通优先选推荐值。
+                  </div>
+                ) : null}
 
                 {(restartHint || contextMismatch) && (
                   <div className="settings-restart-hint">
@@ -518,6 +562,30 @@ export function SettingsPanel({
                   }}
                 >
                   恢复默认
+                </button>
+                <button
+                  type="button"
+                  className="settings-secondary"
+                  disabled={
+                    saving ||
+                    !memoryRecommendedPreset ||
+                    (settingsDraft.maxContext ===
+                      memoryRecommendedPreset.settings.maxContext &&
+                      settingsDraft.knowledgeTier ===
+                        memoryRecommendedPreset.settings.knowledgeTier &&
+                      (settingsDraft.ocrMode ?? "auto") ===
+                        memoryRecommendedPreset.settings.ocrMode)
+                  }
+                  onClick={() => {
+                    if (!memoryRecommendedPreset) return;
+                    setSettingsDraft((s) => ({
+                      ...s,
+                      ...memoryRecommendedPreset.settings,
+                    }));
+                    setRestartHint("");
+                  }}
+                >
+                  套用本机推荐
                 </button>
                 <button
                   type="button"
@@ -957,6 +1025,6 @@ export function SettingsPanel({
           ) : null}
         </div>
       </section>
-    </div>
+    </ModalShell>
   );
 }

@@ -53,6 +53,7 @@ export class BlobScanVectorIndex implements VectorIndex {
     const hits = await this.store.search(vector, {
       topK: options.topK,
       scope,
+      maxScanChunks: options.maxScanChunks,
     });
     return hits.map((hit) => ({
       chunkId: hit.chunk.id,

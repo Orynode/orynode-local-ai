@@ -20,6 +20,7 @@ import {
   escapeFtsToken,
   extractSearchTerms,
 } from "./search-text.mjs";
+import { sqlInSearchableStatuses } from "./searchable-document-statuses.mjs";
 
 /**
  * 词项 MATCH：汉字简繁变体用 OR 并列，再按 AND/OR 连接词项。
@@ -639,7 +640,7 @@ function searchLibrary(database, { useV2, match, library, candidateLimit, byId }
     INNER JOIN knowledge_documents AS docs
       ON docs.id = ${fts}.document_id
     WHERE ${fts} MATCH ?
-      AND docs.status IN ('ready', 'embedding', 'indexed', 'error')
+      AND ${sqlInSearchableStatuses("docs.status")}
       AND ${fts}.document_id NOT IN (
         SELECT document_id FROM library_search_exclusions
       )
@@ -703,7 +704,7 @@ function searchConversation(
     WHERE ${fts} MATCH ?
       AND files.conversation_id = ?
       AND ${fts}.document_id IN (SELECT value FROM json_each(?))
-      AND files.status IN ('ready', 'embedding', 'indexed', 'error')
+      AND ${sqlInSearchableStatuses("files.status")}
     ORDER BY rank
     LIMIT ?
   `;

@@ -160,14 +160,6 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setSettingsOpen(false);
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, []);
-
   // ---- Save conversation helper ----
   async function saveConversation(
     messages: Message[],
@@ -310,14 +302,28 @@ export default function Home() {
     }
   }
 
-  /** 导入资料库：不自动挂草稿；内容去重，显示名可选 */
+  /** 导入资料库：支持多选；内容去重，单文件时可改显示名 */
   async function handleUploadKnowledge(
-    file: File,
+    files: File[],
     options?: { displayName?: string },
   ) {
-    const result = await knowledge.upload(file, options);
-    if (result?.deduplicated) {
-      setDuplicateNotice(result.document);
+    if (files.length === 0) return;
+    if (files.length === 1) {
+      const result = await knowledge.upload(files[0], options);
+      if (result?.deduplicated) {
+        setDuplicateNotice(result.document);
+      }
+      return;
+    }
+    const batch = await knowledge.uploadMany(files);
+    if (
+      batch &&
+      batch.duplicates.length === 1 &&
+      batch.uploaded === 0 &&
+      batch.failed.length === 0 &&
+      batch.skipped.length === 0
+    ) {
+      setDuplicateNotice(batch.duplicates[0]);
     }
   }
 
@@ -582,6 +588,7 @@ export default function Home() {
             documents={knowledge.documents}
             meta={knowledge.meta}
             uploading={knowledge.uploading}
+            uploadState={knowledge.uploadState}
             reindexing={knowledge.reindexing}
             notice={knowledge.notice}
             error={knowledge.error}
@@ -590,8 +597,8 @@ export default function Home() {
             onReprocess={(id) => { void knowledge.reprocess(id); }}
             onReindexAll={() => { void knowledge.reindexAll(); }}
             onRename={(id, name) => knowledge.rename(id, name)}
-            onImport={(file, options) => {
-              void handleUploadKnowledge(file, options);
+            onImport={(files, options) => {
+              void handleUploadKnowledge(files, options);
             }}
             onImportWeb={(url) => {
               void knowledge.importWeb(url);
@@ -781,6 +788,15 @@ export default function Home() {
         defaults={settingsHook.defaults}
         appliedMaxContext={settingsHook.appliedMaxContext}
         maxContextRestartRequired={settingsHook.maxContextRestartRequired}
+        hostMemoryClass={settingsHook.hostMemoryClass}
+        recommendedMaxContext={settingsHook.recommendedMaxContext}
+        maxContextAboveRecommendation={
+          settingsHook.maxContextAboveRecommendation
+        }
+        memoryRecommendedPreset={settingsHook.memoryRecommendedPreset}
+        settingsMatchMemoryRecommendation={
+          settingsHook.settingsMatchMemoryRecommendation
+        }
         displayName={displayName}
         onDisplayNameChange={setDisplayName}
         settingsError={settingsHook.error}

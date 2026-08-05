@@ -5,6 +5,7 @@
  * OCR：KE-034 预留（见 `ocr-reserved.ts` + artifacts）；capability.ocr 恒为 false。
  */
 
+import { totalmem } from "node:os";
 import { resolve } from "node:path";
 import type {
   CredentialStore,
@@ -13,6 +14,10 @@ import type {
   ProcessSupervisor,
   RuntimePaths,
 } from "../types";
+import {
+  classifyHostMemory,
+  hostKnowledgeCeiling,
+} from "../host-memory";
 
 const unsupportedCredentials: CredentialStore = {
   async get() {
@@ -65,6 +70,7 @@ export function createWindowsHostRuntime(
     platform: "windows",
     paths: () => paths,
     async capabilities(): Promise<HostCapabilities> {
+      const hostClass = classifyHostMemory(totalmem());
       return {
         platform: "windows",
         modelRuntime: false,
@@ -72,7 +78,8 @@ export function createWindowsHostRuntime(
         reranker: false,
         ocr: false,
         ftsTokenizer: null,
-        memoryTier: "lite",
+        // stub 阶段 embedding runtime 未落地
+        memoryTier: hostKnowledgeCeiling(hostClass, false),
         externalConnectors: { web: true, github: true },
       };
     },

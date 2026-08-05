@@ -482,13 +482,25 @@ ORYNODE_DATA_URL=http://127.0.0.1:4318
 
 ## Memory Strategy for Low-Resource Macs
 
-The project is designed for 8 GB MacBook Air with three memory control layers:
+**Baseline:** 8 GB unified memory must complete retrieve + chat without thrashing.  
+**Same pipeline:** 16 GB / 32 GB+ use higher presets and less interruption—not a fork.
 
-| Strategy | Description |
-|----------|-------------|
-| **Zero overhead (default)** | No Embedder; keyword retrieval only |
-| **Lazy loading** | Data-service loads the active embedding artifact on first embed request |
-| **Automatic fallback** | Semantic failure → keyword fallback |
+| Signal | Meaning |
+|--------|---------|
+| `hostMemoryClass` | Physical tier: low / medium / high |
+| `memoryPressure` → `resourcePressure` | Transient (chat / OCR / embed lease) |
+| `memoryTier` | Retrieval ceiling (lite / balanced / quality) |
+
+**Closed loop (required):** `/api/chat` calls `markChatResourceActive` **before** RAG so `resourcePressure=high` forces keyword-only retrieve; low hosts also unload e5. Idle unload + `ORYNODE_EMBED_IDLE_UNLOAD_MS`. First-run settings init from memory preset; existing files are never overwritten.
+
+| Layer | Behavior |
+|-------|----------|
+| Zero overhead default | FTS only; no embedder |
+| Lazy load | `ORYNODE_SEMANTIC_SEARCH=1`; status does **not** warm-load |
+| Defer embed | `EMBED_DEFERRED_CHAT` / `EMBED_DEFERRED_HEAVY` |
+| blob_scan | Narrow to FTS-hit docs; `maxVectorScanChunks` soft cap |
+| OCR over limit | Truncate searchable pages (`OCR_PAGE_TRUNCATED`), do not fail whole doc |
+| No query-time CE | Official quality = multi-query + lexical rerank |
 
 **Memory timeline (8 GB Mac)**:
 
@@ -497,14 +509,12 @@ Startup:
   Gemma 4 (2 GB) + OS (3 GB) + Node.js + Browser (~700 MB)
   = ~5.7 GB, ~2.3 GB free
 
-PDF import (semantic):
-  Startup + ONNX model (150 MB) + pdfjs-dist
-  = ~5.85 GB, ~2.15 GB free ✓
-
-Normal chat:
-  Startup (no extra loading)
+Normal chat (keyword RAG under pressure):
+  Startup (e5 unloaded on low hosts)
   = ~5.7 GB ✓
 ```
+
+Offline smoke: `npm run test:smoke-rag`.
 
 ---
 
@@ -526,8 +536,11 @@ Normal chat:
 | POST | `/knowledge/chunks/query` | Export chunks by scope |
 | GET | `/knowledge/:id/chunks` | Get document chunks (text only) |
 | POST | `/knowledge/vectors` | Batch insert vectors (Float32Array → BLOB) |
-| GET | `/knowledge/embed/status` | Whether ONNX embedder is available |
-| POST | `/knowledge/embed` | Compute vectors for text batch |
+| GET | `/knowledge/embed/status` | Whether embedder can load (no warm-load); `ready`/`resident` if loaded |
+| POST | `/knowledge/embed` | Compute vectors for text batch; 503 when chat/heavy busy |
+| POST | `/knowledge/embed/unload` | Unload e5 pipeline |
+| GET | `/resources` | ResourceCoordinator snapshot |
+| POST | `/resources/chat` | Mark chat active/idle |
 | DELETE | `/knowledge/:id` | Delete document and its index |
 | GET | `/knowledge/by-hash/:hash` | Lookup library doc by content hash |
 | PATCH | `/knowledge/:id` | Rename display name only |

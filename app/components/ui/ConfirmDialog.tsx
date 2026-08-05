@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
 import { Icon } from "./Icon";
+import { ModalShell } from "./ModalShell";
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -24,25 +24,8 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  useEffect(() => {
-    if (!open) return;
-    function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") onCancel();
-    }
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, onCancel]);
-
-  if (!open) return null;
-
   return (
-    <div
-      className="modal-backdrop confirm-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.currentTarget === event.target) onCancel();
-      }}
-    >
+    <ModalShell open={open} onClose={onCancel} layer="alert">
       <section
         className="confirm-dialog"
         role="alertdialog"
@@ -76,6 +59,6 @@ export function ConfirmDialog({
           </button>
         </div>
       </section>
-    </div>
+    </ModalShell>
   );
 }

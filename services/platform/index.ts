@@ -7,6 +7,23 @@ export type {
   OcrEngine,
   RuntimePaths,
 } from "./types";
+export type {
+  HostMemoryClass,
+  KnowledgeMemoryTier,
+  MemoryPressure,
+  MemoryRuntimePreset,
+} from "./host-memory";
+export {
+  classifyHostMemory,
+  recommendedMaxContext,
+  recommendedRuntimePreset,
+  hostMemoryClassLabel,
+  hostKnowledgeCeiling,
+  resolveMemoryPressure,
+  memoryPressureToResourcePressure,
+  HOST_MEMORY_LOW_MAX_BYTES,
+  HOST_MEMORY_MEDIUM_MAX_BYTES,
+} from "./host-memory";
 export { createMacosHostRuntime } from "./macos/index";
 export { createWindowsHostRuntime } from "./windows/index";
 export {

@@ -1,10 +1,22 @@
 /**
- * 本机资源协调（Phase 2 + KE-P0-04）
+ * 本机资源协调（Phase 2 + KE-P0-04 + 8GB memoryPressure）
  *
  * - Chat 使用引用计数；单个请求结束不会误清其它并发 Chat
  * - 重型任务使用唯一 leaseId；release 必须匹配，禁止误释放
  * - 同一 owner 不可重入占用 heavy lock
+ * - 内存预算信号走 memoryPressure（勿再塞假 memoryTier 字符串）
+ *
+ * 不另建 MemoryGovernor 进程：预算裁决留在 CapabilitySnapshot.resolveKnowledgeTier。
  */
+
+import { totalmem } from "node:os";
+import {
+  classifyHostMemory,
+  recommendedMaxContext,
+  recommendedRuntimePreset,
+  resolveMemoryPressure,
+  memoryPressureToResourcePressure,
+} from "./host-memory.mjs";
 
 /**
  * @typedef {'chat' | 'embedding' | 'ocr' | 'rerank'} ResourceKind
@@ -12,12 +24,19 @@
 
 export function createResourceCoordinator(options = {}) {
   const nowFn = typeof options.now === "function" ? options.now : () => Date.now();
+  const totalBytes =
+    typeof options.totalmemBytes === "number"
+      ? options.totalmemBytes
+      : totalmem();
+  const hostClass =
+    options.hostMemoryClass ?? classifyHostMemory(totalBytes);
 
   /** @type {Map<string, number>} token -> expiresAt */
   const chatTokens = new Map();
   let heavyLeaseId = null;
   let heavyKind = null;
   let heavyOwner = null;
+  let embedResident = false;
 
   function pruneChat() {
     const t = nowFn();
@@ -29,6 +48,31 @@ export function createResourceCoordinator(options = {}) {
   function isChatActive() {
     pruneChat();
     return chatTokens.size > 0;
+  }
+
+  function buildPressureSnapshot() {
+    pruneChat();
+    const memoryPressure = resolveMemoryPressure({
+      hostClass,
+      chatActive: isChatActive(),
+      heavyKind,
+      embedResident,
+    });
+    return {
+      chatActive: isChatActive(),
+      chatTokenCount: chatTokens.size,
+      chatActiveUntil:
+        chatTokens.size > 0 ? Math.max(...chatTokens.values()) : null,
+      heavyOwner,
+      heavyKind,
+      heavyLeaseId,
+      hostMemoryClass: hostClass,
+      recommendedMaxContext: recommendedMaxContext(hostClass),
+      memoryRecommendedPreset: recommendedRuntimePreset(hostClass),
+      embedResident,
+      memoryPressure,
+      resourcePressure: memoryPressureToResourcePressure(memoryPressure),
+    };
   }
 
   return {
@@ -60,20 +104,13 @@ export function createResourceCoordinator(options = {}) {
       chatTokens.delete(token);
     },
 
+    /** ONNX embed pipeline 已驻留进程时标记（卸载前保持 true） */
+    setEmbedResident(resident) {
+      embedResident = Boolean(resident);
+    },
+
     snapshot() {
-      pruneChat();
-      return {
-        chatActive: isChatActive(),
-        chatTokenCount: chatTokens.size,
-        chatActiveUntil:
-          chatTokens.size > 0
-            ? Math.max(...chatTokens.values())
-            : null,
-        heavyOwner,
-        heavyKind,
-        heavyLeaseId,
-        memoryTier: "conservative",
-      };
+      return buildPressureSnapshot();
     },
 
     /**

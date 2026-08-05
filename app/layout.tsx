@@ -17,7 +17,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN">
-      <body>{children}</body>
+      <body>
+        {children}
+        <div id="overlay-root" />
+      </body>
     </html>
   );
 }

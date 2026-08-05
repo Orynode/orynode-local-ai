@@ -20,6 +20,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createResourceCoordinator } from "../data-service/resource-coordinator.mjs";
+import { createEmbedLifecycle } from "../data-service/embed-lifecycle.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const failures = [];
@@ -124,7 +125,9 @@ function assertNoCeWiring() {
 }
 
 function assertChatPriority() {
-  const rc = createResourceCoordinator();
+  const rc = createResourceCoordinator({
+    totalmemBytes: 8 * 1024 ** 3,
+  });
   const token = rc.markChatActive(10_000);
   const acquire = rc.tryAcquire({ kind: "embedding", owner: "smoke" });
   if (acquire.ok || acquire.reason !== "chat_priority") {
@@ -132,14 +135,59 @@ function assertChatPriority() {
     rc.markChatIdle(token);
     return;
   }
+  if (rc.snapshot().memoryPressure !== "critical") {
+    fail(`Chat 时应为 critical pressure: ${JSON.stringify(rc.snapshot())}`);
+    rc.markChatIdle(token);
+    return;
+  }
   rc.markChatIdle(token);
-  ok("ResourceCoordinator：Chat active 时 embedding 被拒绝");
+  ok("ResourceCoordinator：Chat active 时 embedding 被拒绝且 pressure=critical");
+}
+
+async function assertEmbedUnloadOnChat() {
+  const rc = createResourceCoordinator({
+    totalmemBytes: 8 * 1024 ** 3,
+  });
+  const life = createEmbedLifecycle({
+    resourceCoordinator: rc,
+    idleUnloadMs: 0,
+    unloadOnChat: "low_only",
+    log: () => undefined,
+  });
+  await life.resolve(async () => ({ id: "smoke-pipe" }));
+  if (!life.snapshot().ready) {
+    fail("embed lifecycle 未就绪");
+    return;
+  }
+  const unloaded = life.onChatActive();
+  if (!unloaded || life.snapshot().ready) {
+    fail("低配机 Chat 应卸载 embedding pipeline");
+    return;
+  }
+  ok("EmbedLifecycle：8GB Chat 优先卸载 e5");
+}
+
+function assertChatMarksBeforeRagDoc() {
+  // 契约：/api/chat 执行路径须先 markChat 再 RAG（避免 import 行干扰，用 await 调用序）
+  const routePath = join(root, "app/api/chat/route.ts");
+  const text = readFileSync(routePath, "utf8");
+  const markCall = text.indexOf("await markChatResourceActive");
+  const ragCall = text.indexOf("await buildChatKnowledgeContext");
+  if (markCall < 0 || ragCall < 0 || markCall > ragCall) {
+    fail(
+      "/api/chat 必须在 buildChatKnowledgeContext 之前 await markChatResourceActive",
+    );
+    return;
+  }
+  ok("/api/chat：markChatResourceActive 位于 RAG 之前（源码顺序）");
 }
 
 console.log("=== RAG 8GB offline smoke (RU-001) ===\n");
 runEval();
 assertNoCeWiring();
 assertChatPriority();
+await assertEmbedUnloadOnChat();
+assertChatMarksBeforeRagDoc();
 
 console.log("\n真机验收：在 8GB Mac 上手动跑通 上传→检索→对话→引用预览（见架构文档 · 低配 Mac 内存策略）");
 

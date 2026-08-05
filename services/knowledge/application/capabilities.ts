@@ -14,11 +14,17 @@ import {
 } from "../../../config/defaults";
 import type { HostCapabilities, OcrCapability } from "../../platform/types";
 import { createRuntimeServices } from "../../platform/composition-root";
+import {
+  classifyHostMemory,
+  hostKnowledgeCeiling,
+} from "../../platform/host-memory";
+import { totalmem } from "node:os";
 import type {
   CapabilitySnapshot,
   EffectiveKnowledgeTier,
   RerankerCapabilityType,
 } from "../retrieval/profile";
+import { isUsableLibraryDocument } from "../status";
 
 export type KnowledgeOcrCapability = {
   available: boolean;
@@ -168,11 +174,7 @@ export async function probeVectorCoverage(): Promise<VectorCoverage> {
     const body = (await response.json()) as {
       documents?: Array<{ status?: string; chunkCount?: number }>;
     };
-    const searchable = (body.documents ?? []).filter(
-      (doc) =>
-        (doc.chunkCount ?? 0) > 0 &&
-        ["ready", "embedding", "indexed", "error"].includes(doc.status ?? ""),
-    );
+    const searchable = (body.documents ?? []).filter(isUsableLibraryDocument);
     const indexed = searchable.filter((doc) => doc.status === "indexed");
     const total = searchable.length;
     return {
@@ -201,13 +203,21 @@ async function probeResourcePressure(): Promise<"normal" | "high"> {
     const body = (await response.json()) as {
       chatActive?: boolean;
       heavyKind?: string | null;
-      memoryTier?: string;
+      resourcePressure?: "normal" | "high";
+      memoryPressure?: "normal" | "constrained" | "critical";
     };
+    if (body.resourcePressure === "high" || body.resourcePressure === "normal") {
+      return body.resourcePressure;
+    }
+    // 兼容旧字段
     if (body.chatActive) return "high";
     if (body.heavyKind === "embedding" || body.heavyKind === "ocr") {
       return "high";
     }
-    if (body.memoryTier === "constrained" || body.memoryTier === "critical") {
+    if (
+      body.memoryPressure === "constrained" ||
+      body.memoryPressure === "critical"
+    ) {
       return "high";
     }
     return "normal";
@@ -216,11 +226,19 @@ async function probeResourcePressure(): Promise<"normal" | "high"> {
   }
 }
 
-function memoryTierFromEnv(embedding: boolean): EffectiveKnowledgeTier {
+function memoryTierFromHost(
+  embedding: boolean,
+  hostCeiling: EffectiveKnowledgeTier,
+): EffectiveKnowledgeTier {
   if (process.env.ORYNODE_KNOWLEDGE_TIER === "quality") return "quality";
   if (process.env.ORYNODE_KNOWLEDGE_TIER === "balanced") return "balanced";
   if (process.env.ORYNODE_KNOWLEDGE_TIER === "lite") return "lite";
-  return embedding ? "quality" : "lite";
+  // 环境未强制时：取「有语义时可走的档」与主机封顶的较低者
+  const fromEmbed: EffectiveKnowledgeTier = embedding ? "quality" : "lite";
+  const order: EffectiveKnowledgeTier[] = ["lite", "balanced", "quality"];
+  return order[
+    Math.min(order.indexOf(fromEmbed), order.indexOf(hostCeiling))
+  ]!;
 }
 
 export async function probeCapabilitySnapshot(): Promise<CapabilitySnapshot> {
@@ -234,6 +252,8 @@ export async function probeCapabilitySnapshot(): Promise<CapabilitySnapshot> {
   const role = EMBEDDING_CONFIG.role;
   // role===default 表示当前推荐的多语言 artifact（如 multilingual-e5-small）
   const wantsMultilingualDefault = role === "default";
+  const hostClass = classifyHostMemory(totalmem());
+  const hostCeiling = hostKnowledgeCeiling(hostClass, embedding);
   return {
     embedding,
     vectorIndexReady: embedding ? coverage.vectorIndexReady : false,
@@ -241,7 +261,7 @@ export async function probeCapabilitySnapshot(): Promise<CapabilitySnapshot> {
     reranker: true,
     rerankerType: "lexical",
     ftsTokenizer,
-    memoryTier: memoryTierFromEnv(embedding),
+    memoryTier: memoryTierFromHost(embedding, hostCeiling),
     externalConnectors: { web: true, github: true },
     resourcePressure,
     embeddingArtifactId: EMBEDDING_CONFIG.artifactId,

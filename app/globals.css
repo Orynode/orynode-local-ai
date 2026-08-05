@@ -11,6 +11,13 @@
   --signal: #d9ff69;
   /* 设置弹窗 / 采样说明等共用宽度 */
   --modal-dialog-width: 640px;
+  /* 统一 Overlay 层级：业务组件不得再写魔法 z-index */
+  --z-sticky: 20;
+  --z-popover: 40;
+  --z-drawer: 80;
+  --z-modal: 100;
+  --z-alert: 120;
+  --z-toast: 140;
 }
 
 * {
@@ -377,7 +384,7 @@ button {
   right: 0;
   bottom: calc(100% + 8px);
   left: 0;
-  z-index: 12;
+  z-index: var(--z-popover);
   padding: 12px;
   border: 1px solid rgb(255 255 255 / 16%);
   border-radius: 12px;
@@ -441,7 +448,7 @@ button {
 
 .topbar {
   position: relative;
-  z-index: 30;
+  z-index: var(--z-sticky);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -703,7 +710,7 @@ button {
   position: absolute;
   top: calc(100% + 8px);
   right: 0;
-  z-index: 1;
+  z-index: var(--z-popover);
   width: min(420px, calc(100vw - 48px));
   max-height: min(70vh, 520px);
   overflow: auto;
@@ -961,6 +968,36 @@ button {
   color: #843f34;
 }
 
+.knowledge-library-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid #d59a90;
+  border-radius: 12px;
+  background: #fff1ed;
+  color: #7f2f26;
+}
+
+.knowledge-library-alert > .icon {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+}
+
+.knowledge-library-alert strong {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 13px;
+}
+
+.knowledge-library-alert p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .knowledge-upload {
   display: flex;
   flex: 0 0 auto;
@@ -1084,6 +1121,18 @@ button {
   background: rgb(252 251 247 / 82%);
 }
 
+.knowledge-card.is-danger {
+  border-color: #d59a90;
+  box-shadow: inset 4px 0 #b94b3d;
+  background: #fff9f7;
+}
+
+.knowledge-card.is-warning {
+  border-color: #d8b36a;
+  box-shadow: inset 4px 0 #bc7f16;
+  background: #fffbf2;
+}
+
 .knowledge-card.selected {
   border-color: #7f9b88;
   box-shadow: inset 3px 0 var(--green);
@@ -1099,6 +1148,15 @@ button {
   background: transparent;
   cursor: pointer;
   text-align: left;
+}
+
+.knowledge-select.is-unavailable {
+  cursor: default;
+}
+
+.knowledge-select.is-unavailable .knowledge-file-icon {
+  background: #f6e4e0;
+  color: #a33f33;
 }
 
 .knowledge-select > span:last-child {
@@ -1120,11 +1178,86 @@ button {
   font-size: 10px;
 }
 
+.knowledge-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.knowledge-status-badge {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--green-soft);
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.knowledge-status-badge.is-info {
+  background: #e8eef5;
+  color: #48657f;
+}
+
+.knowledge-status-badge.is-warning {
+  background: #fff0c7;
+  color: #805815;
+}
+
+.knowledge-status-badge.is-danger {
+  background: #f8dfda;
+  color: #963b30;
+}
+
 .knowledge-card-actions {
   display: flex;
   align-items: center;
   gap: 4px;
   margin-right: 8px;
+}
+
+.knowledge-card-alert {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0 10px 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+}
+
+.knowledge-card-alert.is-danger {
+  background: #f8dfda;
+  color: #7f2f26;
+}
+
+.knowledge-card-alert.is-warning {
+  background: #fff0c7;
+  color: #714b0e;
+}
+
+.knowledge-card-alert .icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.knowledge-card-alert > span {
+  display: grid;
+  gap: 2px;
+}
+
+.knowledge-card-alert strong {
+  font-size: 12px;
+}
+
+.knowledge-card-alert small {
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .knowledge-reindex {
@@ -1160,16 +1293,6 @@ button {
   font-weight: 650;
 }
 
-.knowledge-import-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(12, 18, 16, 0.35);
-}
-
 .knowledge-import-dialog {
   width: min(100%, 420px);
   padding: 20px 22px;
@@ -1177,6 +1300,10 @@ button {
   background: var(--panel);
   border: 1px solid var(--line);
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
+}
+
+.knowledge-import-dialog--batch {
+  width: min(100%, 480px);
 }
 
 .knowledge-import-dialog h2 {
@@ -1189,6 +1316,81 @@ button {
   color: var(--muted);
   font-size: 0.86rem;
   word-break: break-all;
+}
+
+.knowledge-import-file-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  max-height: min(40vh, 280px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.knowledge-import-file-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.84rem;
+}
+
+.knowledge-import-file-list li:last-child {
+  border-bottom: none;
+}
+
+.knowledge-import-file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 550;
+}
+
+.knowledge-import-file-size {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.knowledge-batch-progress {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.knowledge-batch-progress-bar {
+  height: 4px;
+  margin-bottom: 8px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.knowledge-batch-progress-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--green);
+  transition: width 120ms ease-out;
+}
+
+.knowledge-batch-progress p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
+.knowledge-batch-progress strong {
+  color: var(--text);
+  font-weight: 650;
 }
 
 .knowledge-import-label {
@@ -1641,6 +1843,7 @@ button {
 
 /* 点击打开；portal 到 body，避免贴底被裁切、可滚动 */
 .cite-ref-popover {
+  z-index: var(--z-popover);
   display: grid;
   gap: 8px;
   overflow: auto;
@@ -1944,7 +2147,7 @@ button {
 
 .composer-drop-overlay {
   position: fixed;
-  z-index: 35;
+  z-index: var(--z-drawer);
   inset: 0;
   display: grid;
   place-items: center;
@@ -1987,7 +2190,7 @@ button {
   right: 0;
   bottom: calc(100% + 8px);
   left: 0;
-  z-index: 20;
+  z-index: var(--z-popover);
   max-height: min(360px, 50vh);
   overflow: auto;
   padding: 10px;
@@ -2002,7 +2205,7 @@ button {
   right: 0;
   bottom: calc(100% + 8px);
   left: 0;
-  z-index: 20;
+  z-index: var(--z-popover);
   display: grid;
   gap: 4px;
   padding: 8px;
@@ -2074,7 +2277,7 @@ button {
   right: 0;
   bottom: calc(100% + 8px);
   left: auto;
-  z-index: 20;
+  z-index: var(--z-popover);
   width: min(320px, 100%);
   padding: 10px;
   border: 1px solid var(--line);
@@ -2112,17 +2315,6 @@ button {
   border-color: #b8c6bb;
   background: #edf3ed;
   color: var(--green);
-}
-
-.composer-params-help-backdrop {
-  position: fixed;
-  z-index: 40;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  padding: 22px;
-  background: rgb(13 21 16 / 54%);
-  backdrop-filter: blur(5px);
 }
 
 .composer-params-help {
@@ -2772,21 +2964,29 @@ button {
   text-align: center;
 }
 
-.modal-backdrop {
+.overlay-backdrop {
   position: fixed;
-  z-index: 20;
   inset: 0;
   display: grid;
   place-items: center;
+  overflow-y: auto;
   padding: 22px;
   background: rgb(13 21 16 / 54%);
   backdrop-filter: blur(5px);
 }
 
+.overlay-backdrop--modal {
+  z-index: var(--z-modal);
+}
+
+.overlay-backdrop--alert {
+  z-index: var(--z-alert);
+}
+
 /* 文档原件预览：右侧抽屉 */
 .doc-preview-backdrop {
   position: fixed;
-  z-index: 40;
+  z-index: var(--z-drawer);
   inset: 0;
   display: flex;
   justify-content: flex-end;
@@ -2988,10 +3188,6 @@ button {
   .doc-preview-header {
     flex-direction: column;
   }
-}
-
-.confirm-backdrop {
-  z-index: 50;
 }
 
 .confirm-dialog {
