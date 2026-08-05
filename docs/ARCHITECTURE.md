@@ -4,7 +4,7 @@
 
 This document describes the **service architecture, data flow, module layering, extension interfaces**, and **knowledge base / RAG system** design of Orynode Local AI (current implementation as of **1.2.0**).
 
-For Knowledge Engine design depth and completion status, see [knowledge-engine/](knowledge-engine/README.md) (zh-CN). The Chinese architecture doc is the source of truth for implementation detail: [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md). Release notes: [CHANGELOG 1.2.0](../CHANGELOG.md#120--2026-08-05).
+The Chinese architecture doc is the source of truth for implementation detail: [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md). Release notes: [CHANGELOG 1.2.0](../CHANGELOG.md#120--2026-08-05).
 
 Target audience: developers who want to understand the internals, reuse modules, or extend functionality.
 
@@ -262,11 +262,11 @@ orynode-local-ai/
 | OCR (reserved) | PP-OCR mobile + ONNX metadata | Windows stub / `OCR_UNAVAILABLE` |
 | App stack | Next.js · React · vinext · TypeScript · SQLite | Web + Data Service |
 
-See `config/embedding-artifacts.ts` and [CHANGELOG 1.1.0](../CHANGELOG.md).
+See `config/embedding-artifacts.ts` and [CHANGELOG 1.2.0](../CHANGELOG.md#120--2026-08-05).
 
 ## Knowledge Base / RAG System
 
-> **1.1.0:** RAG is organized as a Knowledge Engine. Workspace uses **Search**; Chat uses **Retrieve + buildContext**; both share `HybridRetriever`. See [CHANGELOG](../CHANGELOG.md) and [knowledge-engine/](knowledge-engine/README.md).
+> **1.2.0:** RAG retrieval closed loop on top of the 1.1.0 Knowledge Engine (learnable rewrite, lexical ladder, jobs UI). Workspace uses **Search**; Chat uses **Retrieve + buildContext**; both share `HybridRetriever`. See [CHANGELOG](../CHANGELOG.md) and [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md).
 
 
 The full RAG pipeline is implemented across five modules in `services/knowledge/`:
@@ -593,5 +593,5 @@ Full product experience targets **Apple Silicon Mac**. Cross-platform boundaries
 - **Knowledge Engine** — no OS branches in RAG business logic
 - Paths/exports use relative paths and cross-platform fixtures
 
-Details: [implementation plan §16.10](knowledge-engine/KNOWLEDGE_ENGINE_IMPLEMENTATION_PLAN_zh-CN.md) (zh-CN).
+Details: [CHANGELOG](../CHANGELOG.md#120--2026-08-05) and [ARCHITECTURE_zh-CN.md — Windows](ARCHITECTURE_zh-CN.md#windows-兼容预留).
 

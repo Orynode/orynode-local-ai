@@ -4,9 +4,7 @@
 
 本文档详细描述 Orynode Local AI 的**服务架构、数据流、模块分层、扩展接口**以及**知识库/RAG 系统**设计。
 
-本文以**当前实现**为准。面向 Chat、Agent、多数据源与可版本化索引的长期目标设计，请参阅 [AI Knowledge Engine 长期架构](knowledge-engine/KNOWLEDGE_ENGINE_ARCHITECTURE_zh-CN.md)；当前代码与目标架构的差距、整改顺序及验收标准见 [架构符合性审计与整改实施计划](knowledge-engine/KNOWLEDGE_ENGINE_IMPLEMENTATION_PLAN_zh-CN.md)。Knowledge Engine 文档目录见 [knowledge-engine/](knowledge-engine/README.md)。
-
-面向：想要理解内部实现、复用模块或扩展功能的开发者。
+本文以**当前实现**为准，面向想要理解内部实现、复用模块或扩展功能的开发者。发布变更见根目录 [CHANGELOG](../CHANGELOG.md)。
 
 ---
 
@@ -179,8 +177,6 @@ query + RetrievalScope + knowledgeTier
   → Context packing + Citations → LLM（Chat）或预览（Search）
 ```
 
-权威闭环与否决项见 [RAG 升级闭环](knowledge-engine/RAG_UPGRADE_CLOSED_LOOP_zh-CN.md)。
-
 ---
 
 ## 目录结构
@@ -265,7 +261,8 @@ orynode-local-ai/
 ├── package.json
 └── docs/
     ├── ARCHITECTURE_zh-CN.md
-    └── knowledge-engine/             # KE 设计 / 标准 / 实施（见 README）
+    ├── ARCHITECTURE.md
+    └── …
 ```
 
 ---
@@ -293,7 +290,7 @@ orynode-local-ai/
 
 ## 知识库 / RAG 系统
 
-> **1.2.0**：在 1.1.0 Knowledge Engine 上闭合检索升级——可学习 Rewrite、词法阶梯、处理队列与诚实 diagnostics。工作台走 **Search**；Chat 走 **Retrieve + buildContext**；共用 `HybridRetriever`。完成度见 [knowledge-engine/](knowledge-engine/README.md) 与 [RAG 升级闭环](knowledge-engine/RAG_UPGRADE_CLOSED_LOOP_zh-CN.md)。
+> **1.2.0**：在 1.1.0 Knowledge Engine 上闭合检索升级——可学习 Rewrite、词法阶梯、处理队列与诚实 diagnostics。工作台走 **Search**；Chat 走 **Retrieve + buildContext**；共用 `HybridRetriever`。细节见下文与 [CHANGELOG 1.2.0](../CHANGELOG.md#120--2026-08-05)。
 
 ```
 上传 PDF / TXT / MD（或 Web/GitHub Connector）
@@ -582,10 +579,10 @@ ORYNODE_SEMANTIC_SEARCH=1                        # 可选语义向量；包已�
 |------|------|
 | **零额外开销（默认）** | 无 Embedder，仅 FTS5 关键词；`knowledgeTier=auto` 常落在 lite |
 | **按需加载** | `ORYNODE_SEMANTIC_SEARCH=1` 后才加载 e5-small ONNX；失败 / Chat 占用回退 keyword |
-| **不加查询时 CE** | **正式档不接** Cross-Encoder / `bge-reranker`；Quality = 多查询 + **词法**重排。完整 CE Hybrid 见知识引擎文档附录「≥16GB 实验档」，**不是** 8GB 产品承诺 |
+| **不加查询时 CE** | **正式档不接** Cross-Encoder / `bge-reranker`；Quality = 多查询 + **词法**重排；CE 仅属更高内存实验方向，**不是** 8GB 产品承诺 |
 | **不加 sqlite-vec 默认** | 避免原生扩展成为开源安装负担；个人/中小规模 `blob_scan` 足够，**大量数据瓶颈时再评估** |
 
-对话与向量争用：Chat active 时 data-service **推迟 embed**（`EMBED_DEFERRED_CHAT`）。真机冒烟清单见 [`docs/knowledge-engine/RAG_8GB_SMOKE_CHECKLIST_zh-CN.md`](knowledge-engine/RAG_8GB_SMOKE_CHECKLIST_zh-CN.md)。
+对话与向量争用：Chat active 时 data-service **推迟 embed**（`EMBED_DEFERRED_CHAT`）。可用 `npm run test:smoke-rag` 做离线冒烟。
 
 ---
 
@@ -720,5 +717,5 @@ CREATE TABLE terminology_entries (
 - **Knowledge Engine**：无 `if (windows)` 业务分支；未来换 adapter 即可
 - **路径 / 导出**：相对路径与跨平台 fixture，避免 Mac 绝对路径假设
 
-详见 [实施计划 §16.10](knowledge-engine/KNOWLEDGE_ENGINE_IMPLEMENTATION_PLAN_zh-CN.md) 与 [CHANGELOG](../CHANGELOG.md#120--2026-08-05)。
+详见 [CHANGELOG](../CHANGELOG.md#120--2026-08-05)（Windows 预留与平台边界说明）。
 

@@ -1,7 +1,5 @@
 /**
  * FTS5 用 search_text / MATCH 查询构造（与 services/knowledge/retrieval 算法对齐）
- *
- * 对齐 docs/knowledge-engine/MULTILINGUAL_RETRIEVAL_ARCHITECTURE_zh-CN.md §6.3/6.4
  */
 
 const MAX_SEARCH_TERMS = 40;

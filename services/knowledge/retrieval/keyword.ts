@@ -1,7 +1,6 @@
 /**
  * 关键词召回与 RRF 融合（纯函数，无 I/O）
  *
- * 对齐 docs/knowledge-engine/MULTILINGUAL_RETRIEVAL_ARCHITECTURE_zh-CN.md：
  * - 英文/技术词用 Unicode + 技术 tokenizer，保留 C++ / Node.js 等
  * - 中文按信息量预算选词，避免长问句 bigram 挤掉核心词
  */

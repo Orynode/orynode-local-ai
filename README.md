@@ -91,7 +91,7 @@ V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复�
 
 > **评测说明**：CI `test:retrieval-eval` 以关键词门禁为主；真实 embedding 召回质量评测另开里程碑。
 
-当前实现：[架构文档](docs/ARCHITECTURE_zh-CN.md)。RAG 设计与完成度：[Knowledge Engine](docs/knowledge-engine/README.md)、[RAG 升级闭环](docs/knowledge-engine/RAG_UPGRADE_CLOSED_LOOP_zh-CN.md)、[CHANGELOG](CHANGELOG.md)。
+当前实现与 RAG 说明：[架构文档](docs/ARCHITECTURE_zh-CN.md)、[CHANGELOG](CHANGELOG.md)。
 
 ## 系统要求
 
@@ -180,7 +180,7 @@ orynode-local-ai/
 │   └── models/                   #   Gemma 4
 └── docs/
     ├── ARCHITECTURE_zh-CN.md
-    └── knowledge-engine/         #   RAG / KE 设计与完成度（1.2.0）
+    └── …
 ```
 
 ### 三层服务架构
@@ -214,9 +214,6 @@ orynode-local-ai/
 - [隐私说明](PRIVACY.md)
 - [安全说明](SECURITY.md)
 - [架构文档](docs/ARCHITECTURE_zh-CN.md)
-- [Knowledge Engine 文档索引](docs/knowledge-engine/README.md)
-- [AI Knowledge Engine 长期架构](docs/knowledge-engine/KNOWLEDGE_ENGINE_ARCHITECTURE_zh-CN.md)
-- [AI Knowledge Engine 架构符合性审计与整改实施计划](docs/knowledge-engine/KNOWLEDGE_ENGINE_IMPLEMENTATION_PLAN_zh-CN.md)
 - [故障排查](docs/TROUBLESHOOTING_zh-CN.md)
 
 ## 贡献说明

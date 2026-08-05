@@ -141,8 +141,7 @@ runEval();
 assertNoCeWiring();
 assertChatPriority();
 
-const checklist = "docs/knowledge-engine/RAG_8GB_SMOKE_CHECKLIST_zh-CN.md";
-console.log(`\n真机清单（须在 8GB Mac 上手动勾选）：${checklist}`);
+console.log("\n真机验收：在 8GB Mac 上手动跑通 上传→检索→对话→引用预览（见架构文档 · 低配 Mac 内存策略）");
 
 if (failures.length > 0) {
   console.error(`\nsmoke-rag-8gb FAILED (${failures.length})`);

@@ -91,7 +91,7 @@ After switching an embedding artifact you **must rebuild** the vector index—ne
 
 > **Eval note:** CI `test:retrieval-eval` gates on keyword retrieval; real embedding quality evals are a later milestone.
 
-See [Architecture](docs/ARCHITECTURE.md), [Knowledge Engine docs](docs/knowledge-engine/README.md), and [CHANGELOG](CHANGELOG.md).
+See [Architecture](docs/ARCHITECTURE.md) and [CHANGELOG](CHANGELOG.md).
 
 ## Requirements
 
@@ -176,7 +176,7 @@ orynode-local-ai/
 │   └── models/                   #   Gemma 4 model
 └── docs/                         # Documentation
     ├── ARCHITECTURE.md           #   Current architecture
-    └── knowledge-engine/         #   KE design notes (zh-CN, since 1.1.0)
+    └── …
 ```
 
 ### Three-tier service design
@@ -215,7 +215,6 @@ Before distributing a build, read:
 - [Privacy policy](PRIVACY.md)
 - [Security policy](SECURITY.md)
 - [Architecture Reference](docs/ARCHITECTURE.md)
-- [Knowledge Engine docs index](docs/knowledge-engine/README.md) (zh-CN)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 ## Contributing

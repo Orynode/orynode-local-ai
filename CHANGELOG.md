@@ -6,7 +6,7 @@
 
 ## 1.2.0 — 2026-08-05
 
-**本版核心：RAG 检索闭环收紧**（相对 `1.1.1`）。闭合可学习 Query Rewrite、词法阶梯准入、处理队列 UX，并修正诊断误报；正式权威说明见 [RAG 升级闭环](docs/knowledge-engine/RAG_UPGRADE_CLOSED_LOOP_zh-CN.md)。
+**本版核心：RAG 检索闭环收紧**（相对 `1.1.1`）。闭合可学习 Query Rewrite、词法阶梯准入、处理队列 UX，并修正诊断误报；实现说明见 [架构文档 · 知识库/RAG](docs/ARCHITECTURE_zh-CN.md#知识库--rag-系统)。
 
 > **范围**  
 > 在 1.1.0 Knowledge Engine 主链路上，把「开放世界同义」从手写术语表堆叠改为 **术语库 →（未命中）本地 LLM → 写回 SQLite**；词法召回禁止无条件 OR；8GB 仍否决查询时 Cross-Encoder。
@@ -32,9 +32,8 @@
 - 顶栏「处理中心」：`KnowledgeJobsMenu` + Job API；页眉订阅 active；空闲停轮询
 - 弹层 stacking：顶栏 `z-index` 高于资料库检索栏，避免透出「检索/清空」
 
-#### 文档与冒烟
+#### 冒烟
 
-- [RAG_UPGRADE_CLOSED_LOOP_zh-CN.md](docs/knowledge-engine/RAG_UPGRADE_CLOSED_LOOP_zh-CN.md)、[RAG_8GB_SMOKE_CHECKLIST_zh-CN.md](docs/knowledge-engine/RAG_8GB_SMOKE_CHECKLIST_zh-CN.md)
 - `npm run test:smoke-rag`
 
 ### Changed / 变更
@@ -43,7 +42,7 @@
 - 高亮共用 `hansHantVariants`；`applyRewriteExcludes` 共用 `containsTerm`（拉丁词界）
 - phrase 短路仅关键词时 **不再误报** `VECTOR_INDEX_NOT_READY`
 - Markdown 标题感知分块 / citation locator 优先
-- 查询语义 / 多语言架构文档对齐可学习术语库表述
+- 架构文档检索流与术语/Jobs API 对齐本版
 
 ### Fixed / 修复
 
@@ -105,11 +104,11 @@
 
 从「路由内拼检索」升级为本地 **Knowledge Engine**：统一 Scope 授权、Hybrid 检索（关键词 + 可选语义 + RRF）、结构化 Citation、ProcessingBuild / Job、OCR 进索引、Search/Retrieve 职责分离，以及 Chat SSE v1 引用协议。同步落地 macOS OCR、**Windows 跨平台适配预留**、Trusted-LAN、ModelRuntime 与对话·附件状态机闭环。
 
-> **范围说明（与 `docs/knowledge-engine` 一致）**  
-> 这是一次 **RAG 主链路的全面升级与可用发布**，对应实施计划 **Phase 0～3 首批**；**不是**宣称「完整 RAG 长期架构已全部闭环」。  
+> **范围说明**  
+> 这是一次 **RAG 主链路的全面升级与可用发布**（Knowledge Engine Phase 0～3 首批）；**不是**宣称长期目标架构已全部闭环。  
 > 当前首发与完整体验仍是 **Apple Silicon Mac**；Windows 走 adapter 预留，**本版不提供可用的 Windows 推理/OCR 产品体验**。  
 > 仍缺 / 仅骨架：CredentialStore、Agent 规划器 UI、Windows 真实 OCR/推理后端、评测 CI 全矩阵等。  
-> 向量索引：**本版生产固定 `blob_scan`（SQLite BLOB + JS 余弦）**；`sqlite-vec` 仅 adapter 占位，**未启用**。仅当资料量很大、评测证明 BLOB 扫描成为延迟/内存瓶颈时，才考虑接入。详见 [整改实施计划 §1](docs/knowledge-engine/KNOWLEDGE_ENGINE_IMPLEMENTATION_PLAN_zh-CN.md)。
+> 向量索引：**本版生产固定 `blob_scan`（SQLite BLOB + JS 余弦）**；`sqlite-vec` 仅 adapter 占位，**未启用**。仅当资料量很大、评测证明 BLOB 扫描成为延迟/内存瓶颈时，才考虑接入。详见 [架构文档](docs/ARCHITECTURE_zh-CN.md)。
 
 ### Added / 新增
 
@@ -166,7 +165,7 @@
 | 路径 / 导出 / Schema | 相对路径、跨平台 fixture、无 Mac 绝对路径假设 | 便于日后 Windows 解析 Mac 导出包 |
 | Contract 测试 | fake Windows backend 与 OpenAI backend 共用前端协议测试 | 保证协议不绑死 TurboFieldfare |
 
-详见实施计划 [§16.10 Windows 预留](docs/knowledge-engine/KNOWLEDGE_ENGINE_IMPLEMENTATION_PLAN_zh-CN.md) 与长期架构跨平台边界。
+详见 [架构文档 · Windows 兼容预留](docs/ARCHITECTURE_zh-CN.md#windows-兼容预留) 与平台 adapter 边界。
 
 #### Platform / 访问控制
 
@@ -188,7 +187,7 @@
 
 ### Changed / 变更
 
-- **Search vs Retrieve**：工作台 = Search 预览；Chat = Retrieve + 上下文；共用唯一 `HybridRetriever`（见长期架构 §6.0 / §8.3 / §10）
+- **Search vs Retrieve**：工作台 = Search 预览；Chat = Retrieve + 上下文；共用唯一 `HybridRetriever`
 - Trusted-LAN 默认需配对；`ORYNODE_TRUSTED_LAN_UNSAFE=1` 为不安全预览
 - `processingBuildId` 禁止回退冒充 IndexBuild id；Agent space 以 Data Service 为权威源
 - 移除 `services/inference` 与未使用 `ACCESS_MODE` 常量
@@ -196,17 +195,7 @@
 
 ### Docs / 文档
 
-统一归档至 [`docs/knowledge-engine/`](docs/knowledge-engine/README.md)（与本版代码对照阅读）：
-
-| 文档 | 性质 | 与本版关系 |
-|---|---|---|
-| [长期架构](docs/knowledge-engine/KNOWLEDGE_ENGINE_ARCHITECTURE_zh-CN.md) | 目标架构 | 指导边界；本版按 Phase 0～3 首批落地 |
-| [整改实施计划](docs/knowledge-engine/KNOWLEDGE_ENGINE_IMPLEMENTATION_PLAN_zh-CN.md) | 执行基线 + 完成度 | §1.2 / OCR §16 对照「已落地」表；**仍列未闭环项** |
-| [多语言检索架构](docs/knowledge-engine/MULTILINGUAL_RETRIEVAL_ARCHITECTURE_zh-CN.md) | 实施方案 | 词法 / planner / expansion 等已部分进代码；完整跨语言评测门禁仍在推进 |
-| [查询语义标准](docs/knowledge-engine/KNOWLEDGE_QUERY_SEMANTICS_STANDARD_zh-CN.md) | 语义规范 | 实施基线；约束 phrase / exact-terms / 禁止虚假凑 topK |
-| [检索档位 UX](docs/knowledge-engine/KNOWLEDGE_RETRIEVAL_TIER_UX_ADJUSTMENT_PLAN_zh-CN.md) | UX 方案 | 设置页 Auto / Lite / Quality 文案与降级语义已对齐 |
-
-另有 [`docs/README.md`](docs/README.md) 总索引；当前实现总览仍在 [`docs/ARCHITECTURE_zh-CN.md`](docs/ARCHITECTURE_zh-CN.md)。
+当前实现总览见 [`docs/ARCHITECTURE_zh-CN.md`](docs/ARCHITECTURE_zh-CN.md)；文档索引见 [`docs/README.md`](docs/README.md)。
 
 ### Fixed / 修复（对话 · 附件状态机闭环）
 
