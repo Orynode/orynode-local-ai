@@ -146,7 +146,6 @@ test("FTS: 完全不匹配 / 部分匹配 bboxDegraded 仅 page locator", () => 
     const database = new DatabaseSync(dbPath);
     migrateDatabase(database);
     const blocks = createDocumentBlockStore(database);
-    const processing = createProcessingBuildStore(database);
     const builds = createIndexBuildStore(database);
 
     const versioning = builds.recordKeywordReady({

@@ -38,6 +38,8 @@ const CitationUiContext = createContext<{
 
 export function BrandLogo() {
   return (
+    // 静态本地 SVG，无需 next/image 优化管线
+    // eslint-disable-next-line @next/next/no-img-element -- brand mark from /public
     <img className="brand-logo" src="/logo.svg" alt="" aria-hidden="true" />
   );
 }
@@ -189,6 +191,8 @@ function CiteRefChip({
     ? `查看 ${citationIds.length} 条引用依据`
     : `查看来源：${fullTitle}`;
 
+  const citationIdsKey = citationIds.join(",");
+
   useLayoutEffect(() => {
     if (!active || !wrapRef.current || !popoverRef.current) {
       setPopoverStyle(null);
@@ -240,7 +244,7 @@ function CiteRefChip({
       window.removeEventListener("resize", place);
       window.removeEventListener("scroll", place, true);
     };
-  }, [active, citationIds.join(",")]);
+  }, [active, citationIdsKey]);
 
   useEffect(() => {
     if (!active) return;
@@ -431,12 +435,11 @@ export function MessageBubble({
     [message.content, message.citations],
   );
 
-  const citations = message.citations ?? [];
   const citationById = useMemo(() => {
     const map = new Map<string, MessageCitation>();
-    for (const item of citations) map.set(item.id, item);
+    for (const item of message.citations ?? []) map.set(item.id, item);
     return map;
-  }, [citations]);
+  }, [message.citations]);
 
   const citationUi = useMemo(
     () => ({

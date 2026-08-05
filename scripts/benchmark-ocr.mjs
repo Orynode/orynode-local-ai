@@ -8,7 +8,7 @@
  * 用法：npm run ocr:bench
  */
 
-import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { writeFileSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { createFakeOcrEngine } from "../services/platform/ocr/fake-ocr.ts";

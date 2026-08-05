@@ -27,4 +27,5 @@ export class DOMMatrix {
   }
 }
 
-export default { createCanvas, DOMMatrix };
+const napiRsCanvasStub = { createCanvas, DOMMatrix };
+export default napiRsCanvasStub;

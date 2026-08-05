@@ -121,8 +121,6 @@ export const AGENT_SPACE_DEFAULTS = {
 };
 
 import {
-  DEFAULT_EMBEDDING_ARTIFACT_ID,
-  COMPAT_BASELINE_ARTIFACT_ID,
   resolveEmbeddingArtifact,
   type EmbeddingArtifact,
 } from "./embedding-artifacts";

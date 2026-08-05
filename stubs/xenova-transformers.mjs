@@ -8,4 +8,5 @@ export async function pipeline() {
   );
 }
 
-export default { pipeline };
+const xenovaTransformersStub = { pipeline };
+export default xenovaTransformersStub;
