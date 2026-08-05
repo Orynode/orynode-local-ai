@@ -124,6 +124,54 @@ export function formatJobProgress(
   return phase;
 }
 
+export type KnowledgeJobsSnapshot = {
+  jobs: KnowledgeJob[];
+  summary: KnowledgeJobsSummary;
+};
+
+type FetchResult =
+  | { ok: true; data: KnowledgeJobsSnapshot }
+  | { ok: false; error: string };
+
+/** 纯取数：不触碰 React 状态，便于在 effect 中先 await 再落状态 */
+async function fetchJobsSnapshot(): Promise<FetchResult> {
+  try {
+    const response = await fetch(
+      "/api/knowledge/v1/jobs?includeRecent=1&limit=50",
+      { cache: "no-store" },
+    );
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      return {
+        ok: false,
+        error:
+          typeof body.error === "string" ? body.error : "无法读取处理队列",
+      };
+    }
+    const jobs: KnowledgeJob[] = Array.isArray(body.jobs) ? body.jobs : [];
+    const summary: KnowledgeJobsSummary = {
+      ...EMPTY_SUMMARY,
+      ...(body.summary && typeof body.summary === "object" ? body.summary : {}),
+    };
+    // 以列表为准校正 active，避免 summary 与条目短暂不一致
+    const activeFromList = jobs.filter((j) => isActiveJobStatus(j.status)).length;
+    summary.active = Math.max(Number(summary.active) || 0, activeFromList);
+    return { ok: true, data: { jobs, summary } };
+  } catch (e) {
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : "无法读取处理队列",
+    };
+  }
+}
+
+function snapshotHasActive(snapshot: KnowledgeJobsSnapshot): boolean {
+  return (
+    (snapshot.summary.active ?? 0) > 0 ||
+    snapshot.jobs.some((j) => isActiveJobStatus(j.status))
+  );
+}
+
 /**
  * 资料库处理中心：拉取 / 轮询全局 Job 队列。
  * 轮询仅在有 active 任务时持续；空闲后停止，避免「一直在更新」的错觉。
@@ -143,55 +191,27 @@ export function useKnowledgeJobs() {
     }
   }, []);
 
-  const refreshJobs = useCallback(async (options?: { quiet?: boolean }) => {
-    const quiet = Boolean(options?.quiet);
-    try {
-      if (!quiet) setLoading(true);
-      const response = await fetch(
-        "/api/knowledge/v1/jobs?includeRecent=1&limit=50",
-        { cache: "no-store" },
-      );
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        setError(
-          typeof body.error === "string"
-            ? body.error
-            : "无法读取处理队列",
-        );
-        return null;
-      }
-      const nextJobs: KnowledgeJob[] = Array.isArray(body.jobs) ? body.jobs : [];
-      const nextSummary: KnowledgeJobsSummary = {
-        ...EMPTY_SUMMARY,
-        ...(body.summary && typeof body.summary === "object"
-          ? body.summary
-          : {}),
-      };
-      // 以列表为准校正 active，避免 summary 与条目短暂不一致
-      const activeFromList = nextJobs.filter((j) =>
-        isActiveJobStatus(j.status),
-      ).length;
-      nextSummary.active = Math.max(
-        Number(nextSummary.active) || 0,
-        activeFromList,
-      );
-      setJobs(nextJobs);
-      setSummary(nextSummary);
-      setError("");
-      return { jobs: nextJobs, summary: nextSummary };
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "无法读取处理队列");
+  const applySnapshot = useCallback((result: FetchResult) => {
+    if (!result.ok) {
+      setError(result.error);
       return null;
-    } finally {
-      if (!quiet) setLoading(false);
     }
+    setJobs(result.data.jobs);
+    setSummary(result.data.summary);
+    setError("");
+    return result.data;
   }, []);
 
-  const hasActive = useCallback(
-    (result: { jobs: KnowledgeJob[]; summary: KnowledgeJobsSummary }) =>
-      (result.summary.active ?? 0) > 0 ||
-      result.jobs.some((j) => isActiveJobStatus(j.status)),
-    [],
+  const refreshJobs = useCallback(
+    async (options?: { quiet?: boolean }) => {
+      const quiet = Boolean(options?.quiet);
+      if (!quiet) setLoading(true);
+      const result = await fetchJobsSnapshot();
+      const applied = applySnapshot(result);
+      if (!quiet) setLoading(false);
+      return applied;
+    },
+    [applySnapshot],
   );
 
   const startPolling = useCallback(() => {
@@ -199,18 +219,18 @@ export function useKnowledgeJobs() {
     pollRef.current = setInterval(() => {
       void refreshJobs({ quiet: true }).then((result) => {
         if (!result) return;
-        if (!hasActive(result)) stopPolling();
+        if (!snapshotHasActive(result)) stopPolling();
       });
     }, 1500);
-  }, [refreshJobs, stopPolling, hasActive]);
+  }, [refreshJobs, stopPolling]);
 
   const openPanel = useCallback(() => {
     setOpen(true);
     void refreshJobs().then((result) => {
-      if (result && hasActive(result)) startPolling();
+      if (result && snapshotHasActive(result)) startPolling();
       else stopPolling();
     });
-  }, [refreshJobs, startPolling, stopPolling, hasActive]);
+  }, [refreshJobs, startPolling, stopPolling]);
 
   const closePanel = useCallback(() => setOpen(false), []);
 
@@ -219,30 +239,36 @@ export function useKnowledgeJobs() {
       const next = !prev;
       if (next) {
         void refreshJobs().then((result) => {
-          if (result && hasActive(result)) startPolling();
+          if (result && snapshotHasActive(result)) startPolling();
           else stopPolling();
         });
       }
       return next;
     });
-  }, [refreshJobs, startPolling, stopPolling, hasActive]);
+  }, [refreshJobs, startPolling, stopPolling]);
 
   /** 入队后：刷新角标；有任务时展开顶栏下拉并轮询 */
   const notifyJobsChanged = useCallback(() => {
     setOpen(true);
     void refreshJobs().then((result) => {
-      if (result && hasActive(result)) startPolling();
+      if (result && snapshotHasActive(result)) startPolling();
       else stopPolling();
     });
-  }, [refreshJobs, startPolling, stopPolling, hasActive]);
+  }, [refreshJobs, startPolling, stopPolling]);
 
   useEffect(() => {
-    void refreshJobs().then((result) => {
-      if (!result) return;
-      if (hasActive(result)) startPolling();
-    });
-    return () => stopPolling();
-  }, [refreshJobs, startPolling, stopPolling, hasActive]);
+    let cancelled = false;
+    void (async () => {
+      const result = await fetchJobsSnapshot();
+      if (cancelled) return;
+      const applied = applySnapshot(result);
+      if (applied && snapshotHasActive(applied)) startPolling();
+    })();
+    return () => {
+      cancelled = true;
+      stopPolling();
+    };
+  }, [applySnapshot, startPolling, stopPolling]);
 
   const { activeJobs, recentJobs } = useMemo(
     () => partitionKnowledgeJobs(jobs),

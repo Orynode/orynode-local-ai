@@ -38,6 +38,7 @@ test("migrateDatabase: 全新库应用 001_baseline", () => {
       "011_processing_build_pages",
       "012_chunk_locators",
       "013_fts_v2_multilingual",
+      "014_terminology_entries",
     ]);
     assert.equal(tableExists(database, "schema_migrations"), true);
     assert.equal(tableExists(database, "knowledge_documents"), true);
@@ -54,6 +55,7 @@ test("migrateDatabase: 全新库应用 001_baseline", () => {
     assert.equal(tableExists(database, "processing_builds"), true);
     assert.equal(tableExists(database, "knowledge_spaces"), true);
     assert.equal(tableExists(database, "storage_staging"), true);
+    assert.equal(tableExists(database, "terminology_entries"), true);
     assert.ok(getAppliedMigrations(database).has("001_baseline"));
     assert.ok(getAppliedMigrations(database).has("002_fts5_keyword_index"));
     assert.ok(getAppliedMigrations(database).has("004_jobs_and_versioned_index"));
