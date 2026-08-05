@@ -26,6 +26,7 @@ import {
   webUrlFromCitation,
 } from "../../lib/document-preview";
 import { Icon } from "../ui/Icon";
+import { summarizeDegradedReasons } from "../../../services/knowledge/retrieval/degraded-labels";
 
 /** 引用胶囊 UI 状态；必须用稳定的 Markdown `a` 组件读取，避免每次渲染换函数类型导致 remount */
 const CitationUiContext = createContext<{
@@ -481,6 +482,29 @@ export function MessageBubble({
               {message.retrievalDiagnostics ? (
                 <div className="message-sources" aria-label="检索诊断">
                   <div className="message-diagnostics">
+                    {(() => {
+                      const degradedSummary = summarizeDegradedReasons(
+                        message.retrievalDiagnostics.degradedReasons ??
+                          message.retrievalDiagnostics.degradedCapabilities,
+                      );
+                      const tierHint =
+                        message.retrievalDiagnostics.requestedTier &&
+                        message.retrievalDiagnostics.effectiveTier &&
+                        message.retrievalDiagnostics.requestedTier !==
+                          message.retrievalDiagnostics.effectiveTier
+                          ? `请求 ${message.retrievalDiagnostics.requestedTier} → 实际 ${message.retrievalDiagnostics.effectiveTier}`
+                          : null;
+                      if (!degradedSummary && !tierHint) return null;
+                      return (
+                        <p className="message-diagnostics-summary">
+                          {degradedSummary
+                            ? `检索降级：${degradedSummary}`
+                            : null}
+                          {degradedSummary && tierHint ? " · " : null}
+                          {tierHint}
+                        </p>
+                      );
+                    })()}
                     <button
                       type="button"
                       className="message-diagnostics-toggle"

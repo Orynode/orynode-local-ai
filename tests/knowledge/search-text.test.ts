@@ -21,6 +21,10 @@ test("buildSearchText: 附加技术标识整词", () => {
 
 test("escapeFtsToken / buildFtsMatchQuery", () => {
   assert.equal(escapeFtsToken('a"b'), `"a""b"`);
-  assert.equal(buildFtsMatchQuery(["知识", "engine"]), `"知识" OR "engine"`);
+  assert.equal(buildFtsMatchQuery(["知识", "engine"]), `"知识" AND "engine"`);
+  assert.equal(
+    buildFtsMatchQuery(["知识", "engine"], { operator: "OR" }),
+    `"知识" OR "engine"`,
+  );
   assert.equal(buildFtsMatchQuery([]), null);
 });

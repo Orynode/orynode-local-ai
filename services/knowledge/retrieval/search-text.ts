@@ -32,9 +32,13 @@ export function escapeFtsToken(term: string): string {
   return `"${String(term).replace(/"/g, '""')}"`;
 }
 
-export function buildFtsMatchQuery(terms: string[]): string | null {
+export function buildFtsMatchQuery(
+  terms: string[],
+  options: { operator?: "AND" | "OR" } = {},
+): string | null {
   if (!Array.isArray(terms) || terms.length === 0) return null;
-  return terms.map(escapeFtsToken).join(" OR ");
+  const operator = options.operator === "OR" ? "OR" : "AND";
+  return terms.map(escapeFtsToken).join(` ${operator} `);
 }
 
 export function buildFtsMatchQueryFromUserQuery(query: string): string | null {

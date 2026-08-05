@@ -15,8 +15,10 @@ test("keyword HTTP DTO 端到端保留 phrase 字段", () => {
   );
 
   assert.match(adapter, /phrase:\s*keywordQuery\.phrase/);
+  assert.match(adapter, /lexicalLadder:\s*keywordQuery\.lexicalLadder/);
   assert.match(
     route,
     /phrase:\s*typeof body\.phrase === "string" \? body\.phrase : undefined/,
   );
+  assert.match(route, /lexicalLadder:\s*Array\.isArray\(body\.lexicalLadder\)/);
 });

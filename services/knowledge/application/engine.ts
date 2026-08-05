@@ -40,6 +40,9 @@ import {
   resolveRetrievalProfile,
 } from "../retrieval/profile";
 import { planQuery } from "../query/planner";
+import { applyRewriteExcludes } from "../query/query-rewrite";
+import type { StructuredQueryRewrite } from "../query/query-rewrite";
+import { resolveQueryRewrite } from "../query/resolve-rewrite";
 import {
   applyLexicalBoost,
   LexicalReranker,
@@ -64,6 +67,11 @@ export type CreateKnowledgeEngineOptions = {
   knowledgeTier?: KnowledgeTier;
   /** 测试或离线注入；缺省运行时探测 */
   capabilities?: import("../retrieval/profile").CapabilitySnapshot;
+  /**
+   * 注入 Query Rewrite（测试用）。
+   * 缺省走 resolveQueryRewrite（术语库 → LLM → 晋升）。
+   */
+  resolveRewrite?: (query: string) => Promise<StructuredQueryRewrite>;
 };
 
 export function createKnowledgeEngine(
@@ -74,6 +82,7 @@ export function createKnowledgeEngine(
     retriever,
     options.knowledgeTier,
     options.capabilities,
+    options.resolveRewrite,
   );
 }
 
@@ -82,6 +91,9 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
     private readonly retriever: Retriever,
     private readonly fixedTier?: KnowledgeTier,
     private readonly fixedCaps?: import("../retrieval/profile").CapabilitySnapshot,
+    private readonly resolveRewriteFn?: (
+      query: string,
+    ) => Promise<StructuredQueryRewrite>,
   ) {}
 
   async ingest(command: IngestCommand): Promise<IngestReceipt> {
@@ -179,11 +191,15 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
       topK: request.topK,
     });
 
+    const rewrite = this.resolveRewriteFn
+      ? await this.resolveRewriteFn(request.query)
+      : await resolveQueryRewrite(request.query);
     const plan = planQuery(request.query, {
       multiQuery: profile.multiQuery,
       embedding: profile.embedding,
       rerank: profile.rerank,
       topK: profile.topK,
+      rewrite,
     });
     const queries = plan.variants.map((v) => v.text);
 
@@ -192,6 +208,13 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
     const contributingRecallStrategies = new Set<string>();
     let multiQueryFusionApplied = false;
     const pipeline: string[] = ["normalize", "scope_resolve", "query_plan"];
+    if (rewrite.source === "llm") {
+      pipeline.push("query_rewrite_llm");
+      strategies.add("query_rewrite_llm");
+    } else if (rewrite.source === "terminology") {
+      pipeline.push("query_rewrite_cache");
+      strategies.add("query_rewrite_cache");
+    }
     const multilingualDegraded: string[] = [];
     if (plan.language.primary === "undetermined") {
       multilingualDegraded.push("LANGUAGE_UNDETERMINED");
@@ -207,6 +230,8 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
             text: request.query,
             terms: plan.searchTerms,
             phrase: plan.phrase,
+            queryClass: plan.queryClass,
+            lexicalLadder: plan.lexicalLadder,
             exactTerms: plan.exactTerms,
             languagePrimary: plan.language.primary,
           },
@@ -229,7 +254,18 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
               !profile.embedding || variant.kind !== "original",
             keywordQuery: {
               text: variant.text,
-              phrase: variant.kind === "original" ? plan.phrase : undefined,
+              phrase:
+                variant.kind === "original"
+                  ? plan.phrase
+                  : variant.phrase,
+              queryClass:
+                variant.kind === "original"
+                  ? plan.queryClass
+                  : variant.queryClass,
+              lexicalLadder:
+                variant.kind === "original"
+                  ? plan.lexicalLadder
+                  : variant.lexicalLadder,
               terms:
                 variant.kind === "original"
                   ? plan.searchTerms
@@ -268,6 +304,19 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
             .slice(0, profile.topK)
             .map((id) => byId.get(id))
             .filter((hit): hit is RetrievalHit => Boolean(hit));
+        }
+      }
+
+      if (plan.rewrite.exclude.length > 0) {
+        const positives = [
+          request.query,
+          ...(plan.rewrite.synonyms ?? []),
+        ];
+        const before = hits.length;
+        hits = applyRewriteExcludes(hits, positives, plan.rewrite.exclude);
+        if (hits.length < before) {
+          strategies.add("rewrite_exclude");
+          pipeline.push("rewrite_exclude");
         }
       }
 
@@ -310,19 +359,14 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
       searchTerms: plan.searchTerms,
       exactTerms: plan.exactTerms,
       variants: plan.variants,
+      synonyms: plan.rewrite.synonyms,
     });
 
     const citations = citationsFromHits(hits, highlightTerms);
+    // 降级原因只来自 profile/capabilities。
+    // 禁止：profile.embedding=true 但本轮未跑 hybrid（如 phrase 短路）时
+    // 误标 VECTOR_INDEX_NOT_READY——那与页眉「已就绪 · 关键词 + 语义」矛盾。
     const degraded = [...profile.degradedReasons, ...multilingualDegraded];
-    if (!strategies.has("hybrid") && profile.embedding) {
-      if (
-        !degraded.includes("VECTOR_INDEX_NOT_READY") &&
-        !degraded.includes("SEMANTIC_RUNTIME_UNAVAILABLE") &&
-        !degraded.includes("SEMANTIC_SEARCH_DISABLED")
-      ) {
-        degraded.push("VECTOR_INDEX_NOT_READY");
-      }
-    }
 
     let diagnosticStrategies = normalizeDiagnosticStrategies(
       strategies,
@@ -377,6 +421,7 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
                 : "keyword_only",
         embeddingModel: EMBEDDING_CONFIG.artifactId,
         embeddingArtifactRole: EMBEDDING_CONFIG.role,
+        rewriteSource: rewrite.source,
       },
     };
   }

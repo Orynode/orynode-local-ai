@@ -16,6 +16,9 @@ import { MAX_KNOWLEDGE_FILE_SIZE_LABEL } from "../../../config/defaults";
 import { useDocumentPreview } from "../../lib/document-preview";
 import { Icon } from "../ui/Icon";
 import { DocumentCard } from "./DocumentCard";
+import {
+  summarizeDegradedReasons,
+} from "../../../services/knowledge/retrieval/degraded-labels";
 
 const PAGE_SIZE = 12;
 const SEARCH_PAGE_SIZE = 8;
@@ -45,6 +48,8 @@ interface KnowledgeViewProps {
   }) => void;
   /** 将选中资料写入新对话的本轮草稿，并切到助手 */
   onAttachToChat: (attachments: MessageAttachment[]) => void;
+  /** 顶栏处理中心角标用的进行中任务数（页眉进度文案） */
+  jobsActiveCount?: number;
 }
 
 /**
@@ -66,6 +71,7 @@ export function KnowledgeView({
   onImportWeb,
   onImportGitHub,
   onAttachToChat,
+  jobsActiveCount = 0,
 }: KnowledgeViewProps) {
   const { openPreview } = useDocumentPreview();
   const fileInput = useRef<HTMLInputElement>(null);
@@ -125,13 +131,22 @@ export function KnowledgeView({
         ? "语义检索已开启 · 相同内容只会保留一份"
         : "默认关键词检索 · 相同内容只会保留一份";
     }
-    if (semanticOn) {
-      if (searchableCount > 0 && indexedCount < searchableCount) {
-        return `正在增强知识库搜索：${indexedCount}/${searchableCount} 个文档 · 期间仍可使用基础搜索`;
+    // 页眉订阅 Job.active：有进行中任务时显示进度，空闲且全索引则「已就绪」
+    if (jobsActiveCount > 0 || reindexing) {
+      if (semanticOn) {
+        const denom = searchableCount || documents.length;
+        return `语义索引进行中 ${indexedCount}/${denom} · 期间仍可使用基础搜索`;
       }
-      return indexedCount === searchableCount
-        ? `关键词 + 语义 · ${indexedCount} 篇已索引`
-        : `关键词 + 语义 · ${indexedCount}/${searchableCount} 已索引`;
+      return `后台处理中 ${Math.max(jobsActiveCount, 1)} 项 · 资料仍可检索`;
+    }
+    if (semanticOn) {
+      if (searchableCount > 0 && indexedCount >= searchableCount) {
+        return `已就绪 · 关键词 + 语义 · ${indexedCount} 篇`;
+      }
+      if (searchableCount > 0 && indexedCount < searchableCount) {
+        return `关键词可用 · 语义 ${indexedCount}/${searchableCount} · 可点右上角查看队列`;
+      }
+      return `关键词 + 语义 · ${indexedCount} 篇已索引`;
     }
     return `仅关键词 · ${documents.length} 篇可检索`;
   })();
@@ -208,12 +223,22 @@ export function KnowledgeView({
       setSearchHits(body.hits ?? []);
       setSearchPage(1);
       const d = body.diagnostics;
+      const degradedCodes = [
+        ...(Array.isArray(d?.degradedReasons) ? d.degradedReasons : []),
+        ...(Array.isArray(d?.degradedCapabilities)
+          ? d.degradedCapabilities
+          : []),
+      ];
+      const degradedText = summarizeDegradedReasons(degradedCodes);
       setSearchDiag(
         d
           ? `策略 ${ (d.strategy ?? []).join("+") || "—" } · ${d.candidateCount ?? 0} 条 · ${d.elapsedMs ?? 0}ms` +
-              (d.degradedCapabilities?.length
-                ? ` · 降级 ${d.degradedCapabilities.join(", ")}`
+              (d.requestedTier &&
+              d.effectiveTier &&
+              d.requestedTier !== d.effectiveTier
+                ? ` · ${d.requestedTier}→${d.effectiveTier}`
                 : "") +
+              (degradedText ? ` · ${degradedText}` : "") +
               (Array.isArray(body.hits) && body.hits.length === 0
                 ? " · 无可靠命中"
                 : "")

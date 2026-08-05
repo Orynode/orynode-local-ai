@@ -12,12 +12,16 @@ import { ChatView } from "./components/chat/ChatView";
 import { WelcomeScreen } from "./components/chat/WelcomeScreen";
 import { Composer } from "./components/chat/Composer";
 import { KnowledgeView } from "./components/knowledge/KnowledgeView";
+import {
+  KnowledgeJobsMenu,
+} from "./components/knowledge/KnowledgeJobsPanel";
 import { DocumentPreviewShell } from "./components/preview/DocumentPreviewShell";
 import { SettingsPanel } from "./components/settings/SettingsPanel";
 import { useChat } from "./hooks/useChat";
 import { useConversations } from "./hooks/useConversations";
 import { useConversationFiles } from "./hooks/useConversationFiles";
 import { useKnowledge } from "./hooks/useKnowledge";
+import { useKnowledgeJobs } from "./hooks/useKnowledgeJobs";
 import { useSettings } from "./hooks/useSettings";
 import { Icon } from "./components/ui/Icon";
 import { AlertDialog } from "./components/ui/AlertDialog";
@@ -136,7 +140,10 @@ export default function Home() {
   // ---- Hooks ----
   const chat = useChat();
   const conversations = useConversations();
-  const knowledge = useKnowledge();
+  const knowledgeJobs = useKnowledgeJobs();
+  const knowledge = useKnowledge({
+    onJobsChanged: () => knowledgeJobs.notifyJobsChanged(),
+  });
   const conversationFiles = useConversationFiles();
   const settingsHook = useSettings();
 
@@ -536,6 +543,18 @@ export default function Home() {
                     : " · 正在检查模型"}
               </span>
             </div>
+            <KnowledgeJobsMenu
+              open={knowledgeJobs.open}
+              jobs={knowledgeJobs.jobs}
+              activeCount={knowledgeJobs.activeCount}
+              loading={knowledgeJobs.loading}
+              error={knowledgeJobs.error}
+              onToggle={knowledgeJobs.togglePanel}
+              onClose={knowledgeJobs.closePanel}
+              onRefresh={() => {
+                void knowledgeJobs.refreshJobs();
+              }}
+            />
             <a
               className="topbar-icon-btn"
               href={GITHUB_REPO_URL}
@@ -581,6 +600,7 @@ export default function Home() {
               void knowledge.importGitHub(input);
             }}
             onAttachToChat={handleAttachToChat}
+            jobsActiveCount={knowledgeJobs.activeCount}
           />
         ) : chat.messages.length === 0 ? (
           <>

@@ -37,17 +37,24 @@ function summarizeReindex(
   if (results.length === 0) {
     return { text: "没有可索引的文档", isError: false };
   }
+  const queued = results.filter((item) => item.status === "queued");
   const skipped = results.filter((item) => item.status === "skipped");
   const indexed = results.filter((item) => item.status === "indexed");
   const errors = results.filter((item) => item.status === "error");
 
+  if (queued.length === results.length) {
+    return {
+      text: `已入队后台重建 ${queued.length} 篇（可继续关键词检索）`,
+      isError: false,
+    };
+  }
   if (skipped.length === results.length) {
     return {
       text: skipped[0]?.reason || "已跳过索引",
       isError: true,
     };
   }
-  if (errors.length > 0 && indexed.length === 0) {
+  if (errors.length > 0 && indexed.length === 0 && queued.length === 0) {
     return { text: `索引失败 ${errors.length} 篇`, isError: true };
   }
   if (indexed.length === results.length) {
@@ -55,7 +62,10 @@ function summarizeReindex(
   }
   return {
     text:
-      `已更新 ${indexed.length} 篇` +
+      (queued.length ? `已入队 ${queued.length} 篇` : "") +
+      (indexed.length
+        ? `${queued.length ? "，" : ""}已更新 ${indexed.length} 篇`
+        : "") +
       (errors.length ? `，失败 ${errors.length}` : "") +
       (skipped.length ? `，跳过 ${skipped.length}` : ""),
     isError: errors.length > 0,
@@ -66,7 +76,8 @@ function summarizeReindex(
  * 本地资料库：CRUD / 上传（内容去重）/ 显示名重命名 / 索引。
  * 会话附件见 useConversationFiles；本轮检索选中见 draftAttachments。
  */
-export function useKnowledge() {
+export function useKnowledge(options?: { onJobsChanged?: () => void }) {
+  const onJobsChanged = options?.onJobsChanged;
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
   const [meta, setMeta] = useState<KnowledgeMeta | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -112,13 +123,22 @@ export function useKnowledge() {
     }
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<KnowledgeDocument[] | null> => {
     try {
       const response = await fetch("/api/knowledge", { cache: "no-store" });
-      if (!response.ok) throw new Error("无法读取本地资料库");
-      const result = await response.json();
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const message =
+          typeof result.error === "string" && result.error.trim()
+            ? result.error
+            : "无法读取本地资料库";
+        setError(message);
+        // 瞬时失败（如向量重建占满 data-service）不清空已有列表
+        return null;
+      }
       const next: KnowledgeDocument[] = result.documents ?? [];
       setDocuments(next);
+      setError("");
       if (result.meta) {
         setMeta(result.meta as KnowledgeMeta);
         if (result.meta.semanticSearchEnabled) {
@@ -135,7 +155,7 @@ export function useKnowledge() {
           ? e.message
           : "无法读取本地资料库",
       );
-      return [] as KnowledgeDocument[];
+      return null;
     }
   }, []);
 
@@ -145,6 +165,11 @@ export function useKnowledge() {
     pollTimer.current = setInterval(() => {
       ticks += 1;
       void refresh().then((docs) => {
+        if (!docs) {
+          // 读失败时继续轮询，避免向量重建期间一次超时就停
+          if (ticks >= 120) stopPolling();
+          return;
+        }
         const pending = docs.some(
           (doc) =>
             doc.status === "embedding" ||
@@ -298,6 +323,7 @@ export function useKnowledge() {
           if (result.jobId) {
             flash(`正在分析 PDF：${label}`);
             pollJobProgress(result.jobId, label);
+            onJobsChanged?.();
           } else if (
             result.document.status === "ready" ||
             result.document.status === "indexed" ||
@@ -316,7 +342,7 @@ export function useKnowledge() {
         setUploadState(null);
       }
     },
-    [flash, pollJobProgress, refresh, startStatusPolling],
+    [flash, onJobsChanged, pollJobProgress, refresh, startStatusPolling],
   );
 
   const rename = useCallback(
@@ -381,7 +407,10 @@ export function useKnowledge() {
         );
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || "重建索引失败");
-        if (result.status === "skipped") {
+        if (result.status === "queued") {
+          flash(result.reason || "已入队后台向量重建");
+          onJobsChanged?.();
+        } else if (result.status === "skipped") {
           flash(result.reason || "已跳过索引", true);
         } else if (result.status === "indexed") {
           flash("索引已更新");
@@ -398,7 +427,7 @@ export function useKnowledge() {
         setReindexing(false);
       }
     },
-    [flash, refresh, startStatusPolling],
+    [flash, onJobsChanged, refresh, startStatusPolling],
   );
 
   const reprocess = useCallback(
@@ -421,6 +450,7 @@ export function useKnowledge() {
         if (typeof result.jobId === "string") {
           const doc = documents.find((d) => d.id === id);
           pollJobProgress(result.jobId, doc?.name || id);
+          onJobsChanged?.();
         }
         await refresh();
         startStatusPolling();
@@ -430,7 +460,7 @@ export function useKnowledge() {
         setReindexing(false);
       }
     },
-    [documents, flash, pollJobProgress, refresh, startStatusPolling],
+    [documents, flash, onJobsChanged, pollJobProgress, refresh, startStatusPolling],
   );
 
   const reindexAll = useCallback(async () => {
@@ -445,6 +475,14 @@ export function useKnowledge() {
       if (!response.ok) throw new Error(result.error || "批量重建失败");
       const summary = summarizeReindex(result.results ?? []);
       flash(summary.text, summary.isError);
+      if (
+        Array.isArray(result.results) &&
+        result.results.some(
+          (item: { status?: string }) => item.status === "queued",
+        )
+      ) {
+        onJobsChanged?.();
+      }
       await refresh();
       startStatusPolling();
     } catch (e) {
@@ -452,7 +490,7 @@ export function useKnowledge() {
     } finally {
       setReindexing(false);
     }
-  }, [flash, refresh, startStatusPolling]);
+  }, [flash, onJobsChanged, refresh, startStatusPolling]);
 
   const importWeb = useCallback(
     async (url: string) => {
@@ -473,6 +511,7 @@ export function useKnowledge() {
             (sync.errors?.length ? `，失败 ${sync.errors.length}` : ""),
           Boolean(sync.errors?.length),
         );
+        onJobsChanged?.();
         await refresh();
         startStatusPolling();
       } catch (e) {
@@ -481,7 +520,7 @@ export function useKnowledge() {
         setUploading(false);
       }
     },
-    [flash, refresh, startStatusPolling],
+    [flash, onJobsChanged, refresh, startStatusPolling],
   );
 
   const importGitHub = useCallback(
@@ -510,6 +549,7 @@ export function useKnowledge() {
             (sync.errors?.length ? `，失败 ${sync.errors.length}` : ""),
           Boolean(sync.errors?.length),
         );
+        onJobsChanged?.();
         await refresh();
         startStatusPolling();
       } catch (e) {
@@ -518,7 +558,7 @@ export function useKnowledge() {
         setUploading(false);
       }
     },
-    [flash, refresh, startStatusPolling],
+    [flash, onJobsChanged, refresh, startStatusPolling],
   );
 
   return {

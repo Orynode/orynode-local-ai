@@ -9,6 +9,11 @@ import "./pdf-dom-polyfill";
 import type { ParsedDocument, ParsedPage } from "./types";
 import { type KnowledgeFileKind } from "./formats";
 import { loadPdfJs } from "./pdfjs-load";
+import {
+  parseMarkdownHeadingLine,
+  pushHeadingPath,
+  type HeadingStackEntry,
+} from "./indexing/markdown-headings";
 
 export async function parseDocument(
   buffer: ArrayBuffer,
@@ -57,7 +62,7 @@ export async function parsePdf(buffer: ArrayBuffer): Promise<ParsedDocument> {
 
 /**
  * TXT / Markdown → 文本页
- * - 优先按 Markdown 标题切开
+ * - 优先按 Markdown 标题切开，并写入 headingPath / 行号
  * - 否则整篇作为第 1 页（后续由 chunker 再切）
  */
 export function parsePlainText(
@@ -73,19 +78,75 @@ export function parsePlainText(
     return { pageCount: 0, pages: [] };
   }
 
-  const headingSplit = trimmed.split(/\n(?=#{1,3}\s+)/).map((part) => part.trim()).filter(Boolean);
-  const pagesSource =
-    headingSplit.length > 1 ? headingSplit : splitOversizedPage(trimmed);
+  const fullLines = trimmed.split("\n");
+  const headingSplit = trimmed
+    .split(/\n(?=#{1,3}\s+)/)
+    .map((part) => part.trim())
+    .filter(Boolean);
 
-  const pages: ParsedPage[] = pagesSource.map((part, index) => ({
-    pageNumber: index + 1,
-    text: part,
-  }));
+  let pages: ParsedPage[];
+  if (headingSplit.length > 1) {
+    let stack: HeadingStackEntry[] = [];
+    let searchFrom = 0;
+    pages = headingSplit.map((part, index) => {
+      const firstLine = part.split("\n")[0] ?? "";
+      const heading = parseMarkdownHeadingLine(firstLine);
+      let headingPath: string[] | undefined;
+      if (heading) {
+        const pushed = pushHeadingPath(stack, heading);
+        stack = pushed.stack;
+        headingPath = pushed.path;
+      }
+
+      const startLine = findSectionStartLine(fullLines, part, searchFrom);
+      const lineCount = part.split("\n").length;
+      const endLine = startLine + lineCount - 1;
+      searchFrom = startLine + lineCount - 1;
+
+      return {
+        pageNumber: index + 1,
+        text: part,
+        headingPath,
+        startLine,
+        endLine,
+      };
+    });
+  } else {
+    const pagesSource = splitOversizedPage(trimmed);
+    let lineCursor = 1;
+    pages = pagesSource.map((part, index) => {
+      const lineCount = part.split("\n").length;
+      const startLine = lineCursor;
+      const endLine = lineCursor + lineCount - 1;
+      lineCursor = endLine + 1;
+      return {
+        pageNumber: index + 1,
+        text: part,
+        startLine,
+        endLine,
+      };
+    });
+  }
 
   return {
     pageCount: pages.length,
     pages,
   };
+}
+
+/** 在全文行中定位 section 起始行（1-based） */
+function findSectionStartLine(
+  fullLines: string[],
+  section: string,
+  fromIndex: number,
+): number {
+  const first = section.split("\n")[0] ?? "";
+  for (let i = Math.max(0, fromIndex); i < fullLines.length; i += 1) {
+    if (fullLines[i] === first || fullLines[i]?.trim() === first.trim()) {
+      return i + 1;
+    }
+  }
+  return Math.max(1, fromIndex + 1);
 }
 
 /** 无标题的长文按空行块聚合，避免单页过大（仍交 chunker 细切） */

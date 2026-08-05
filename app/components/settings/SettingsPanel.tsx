@@ -9,6 +9,7 @@ import {
   persistDisplayName,
 } from "../../lib/displayName";
 import { Icon } from "../ui/Icon";
+import { summarizeDegradedReasons } from "../../../services/knowledge/retrieval/degraded-labels";
 
 type LanSessionRow = {
   id: string;
@@ -567,8 +568,8 @@ export function SettingsPanel({
                       }
                     >
                       <option value="auto">自动（推荐）</option>
-                      <option value="lite">省资源</option>
-                      <option value="quality">更高质量</option>
+                      <option value="lite">省资源（仅关键词）</option>
+                      <option value="quality">更高质量（词法重排）</option>
                       {settingsDraft.knowledgeTier === "balanced" ? (
                         <option value="balanced">均衡（已保存）</option>
                       ) : null}
@@ -576,12 +577,12 @@ export function SettingsPanel({
                   </label>
                   <p className="model-settings-wide settings-inline-hint">
                     {settingsDraft.knowledgeTier === "lite"
-                      ? "仅使用本地关键词搜索，占用更少资源。"
+                      ? "仅使用本地关键词搜索（BM25），占用最少，适合 8GB 机器。"
                       : settingsDraft.knowledgeTier === "quality"
-                        ? "使用查询扩展和本地重排，响应可能稍慢；能力不足时会自动降级。"
+                        ? "多路关键词查询 + 词汇重叠重排（不是 AI 语义精排模型）。能力不足时会自动降级；不额外加载重排大模型。"
                         : settingsDraft.knowledgeTier === "balanced"
-                          ? "关键词与语义混合召回（你此前保存的档位，可改回自动）。"
-                          : "根据当前设备和索引状态自动选择；默认优先保证可用。"}
+                          ? "关键词与语义向量混合召回（RRF），不做重排；你此前保存的档位，可改回自动。"
+                          : "根据当前设备和索引状态自动选择；默认优先保证可用（通常为关键词，语义就绪时可用混合召回）。"}
                   </p>
                   {knowledgeCaps ? (
                     <div className="model-settings-wide settings-inline-hint knowledge-caps-summary">
@@ -631,16 +632,16 @@ export function SettingsPanel({
                             {" · "}
                             当前模式：
                             {knowledgeCaps.effectiveTier === "quality"
-                              ? "更高质量"
-                              : "均衡"}
+                              ? "更高质量（词法重排）"
+                              : "均衡（混合召回）"}
                             {" · "}
                             向量索引：
                             {knowledgeCaps.indexedDocuments}/
                             {knowledgeCaps.totalDocuments} 个文档
                             {" · "}
-                            本地重排：
+                            精排：
                             {knowledgeCaps.rerankerType === "lexical"
-                              ? "词汇重叠"
+                              ? "词汇重叠（非语义模型）"
                               : knowledgeCaps.rerankerType === "semantic"
                                 ? "语义"
                                 : "关闭"}
@@ -657,6 +658,15 @@ export function SettingsPanel({
                           ) : null}
                         </>
                       )}
+                      {knowledgeCaps.degradedReasons.length > 0 ? (
+                        <p>
+                          降级原因：
+                          {summarizeDegradedReasons(
+                            knowledgeCaps.degradedReasons,
+                            3,
+                          )}
+                        </p>
+                      ) : null}
                     </div>
                   ) : null}
                   <label className="model-settings-wide">
@@ -861,7 +871,7 @@ export function SettingsPanel({
                     <dd>
                       Hybrid：默认 <strong>SQLite FTS5</strong>
                       （中文 bigram / search_text）+ 可选语义向量；RRF 融合；档位 Lite /
-                      Balanced / Quality / Auto
+                      Balanced / Quality（词法重排）/ Auto
                     </dd>
                   </div>
                   <div>

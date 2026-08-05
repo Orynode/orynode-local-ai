@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   resolveKnowledgeTier,
   resolveRetrievalProfile,
+  normalizeDiagnosticStrategies,
 } from "../../services/knowledge/retrieval/profile";
 import { buildMultiQueries } from "../../services/knowledge/retrieval/multi-query";
 import {
@@ -224,4 +225,32 @@ test("Agent space: 配额与 TTL 字段", async () => {
     /上限/,
   );
   assert.equal(getAgentSpace("session-1")?.documentIds.length, 2);
+});
+
+test("normalizeDiagnosticStrategies: 不按 profile 预填 vector/rrf/lexical_rerank", () => {
+  const onlyKeyword = normalizeDiagnosticStrategies(["keyword", "fts5_v2"], {
+    embedding: true,
+    multiQuery: true,
+    rerank: true,
+  });
+  assert.deepEqual(onlyKeyword, ["keyword"]);
+
+  const withHybrid = normalizeDiagnosticStrategies(["keyword", "hybrid"], {
+    embedding: false,
+    multiQuery: false,
+    rerank: false,
+  });
+  assert.ok(withHybrid.includes("keyword"));
+  assert.ok(withHybrid.includes("vector"));
+  assert.ok(withHybrid.includes("rrf"));
+
+  const preserved = normalizeDiagnosticStrategies(
+    ["keyword", "lexical_rerank_preserved"],
+    { embedding: true, multiQuery: true, rerank: true },
+  );
+  assert.deepEqual(preserved, ["keyword"]);
+  assert.ok(!preserved.includes("lexical_rerank"));
+
+  const lexical = normalizeDiagnosticStrategies(["keyword", "lexical_rerank"]);
+  assert.ok(lexical.includes("lexical_rerank"));
 });

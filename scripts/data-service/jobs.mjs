@@ -295,6 +295,88 @@ export function createJobRepository(database) {
     },
 
     /**
+     * 列表（处理中心）
+     * @param {{
+     *   statuses?: string[],
+     *   types?: string[],
+     *   limit?: number,
+     *   offset?: number,
+     *   includeRecent?: boolean,
+     *   recentLimit?: number,
+     * }} [options]
+     */
+    list(options = {}) {
+      const limit = Math.min(
+        200,
+        Math.max(1, Number(options.limit) || 50),
+      );
+      const offset = Math.max(0, Number(options.offset) || 0);
+      const includeRecent = Boolean(options.includeRecent);
+      const recentLimit = Math.min(
+        50,
+        Math.max(1, Number(options.recentLimit) || 20),
+      );
+
+      const activeStatuses =
+        Array.isArray(options.statuses) && options.statuses.length > 0
+          ? options.statuses
+          : ["queued", "running", "retry_wait"];
+
+      const typeFilter =
+        Array.isArray(options.types) && options.types.length > 0
+          ? options.types
+          : null;
+
+      const allRows = database
+        .prepare(
+          `SELECT * FROM jobs ORDER BY updated_at DESC, created_at DESC LIMIT 500`,
+        )
+        .all();
+
+      const matchesType = (row) =>
+        !typeFilter || typeFilter.includes(String(row.type));
+
+      const active = allRows
+        .filter(
+          (row) =>
+            activeStatuses.includes(String(row.status)) && matchesType(row),
+        )
+        .map(mapRow);
+
+      let recent = [];
+      if (includeRecent) {
+        recent = allRows
+          .filter(
+            (row) =>
+              ["succeeded", "failed", "cancelled"].includes(String(row.status)) &&
+              matchesType(row),
+          )
+          .slice(0, recentLimit)
+          .map(mapRow);
+      }
+
+      /** active 优先，再拼 recent（去重） */
+      const seen = new Set();
+      const merged = [];
+      for (const job of [...active, ...recent]) {
+        if (!job || seen.has(job.id)) continue;
+        seen.add(job.id);
+        merged.push(job);
+      }
+      const page = merged.slice(offset, offset + limit);
+
+      const summary = {
+        queued: allRows.filter((r) => r.status === "queued").length,
+        running: allRows.filter((r) => r.status === "running").length,
+        retryWait: allRows.filter((r) => r.status === "retry_wait").length,
+        failedRecent: recent.filter((j) => j.status === "failed").length,
+        active: active.length,
+      };
+
+      return { jobs: page, summary, total: merged.length };
+    },
+
+    /**
      * 原子合并 Job payload（用于写入 revisionId / processingBuildId 供重试续跑）
      * @param {string} jobId
      * @param {Record<string, unknown>} patch

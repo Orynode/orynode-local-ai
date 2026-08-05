@@ -44,6 +44,10 @@ import {
   id as ftsV2Id,
   up as ftsV2Up,
 } from "./013_fts_v2_multilingual.mjs";
+import {
+  id as terminologyId,
+  up as terminologyUp,
+} from "./014_terminology_entries.mjs";
 import { runMigrations } from "./runner.mjs";
 
 /** @type {import("./runner.mjs").Migration[]} */
@@ -61,6 +65,7 @@ export const MIGRATIONS = [
   { id: processingBuildPagesId, up: processingBuildPagesUp },
   { id: chunkLocatorsId, up: chunkLocatorsUp },
   { id: ftsV2Id, up: ftsV2Up },
+  { id: terminologyId, up: terminologyUp },
 ];
 
 /**

@@ -72,15 +72,39 @@ export {
   citationsFromHits,
   findCitation,
 } from "./context/build-context";
-export { resolveRetrievalProfile, resolveKnowledgeTier } from "./retrieval/profile";
+export {
+  resolveRetrievalProfile,
+  resolveKnowledgeTier,
+} from "./retrieval/profile";
+export {
+  formatDegradedReason,
+  formatDegradedReasons,
+  summarizeDegradedReasons,
+} from "./retrieval/degraded-labels";
 export { buildMultiQueries } from "./retrieval/multi-query";
-export { planQuery } from "./query/planner";
+export { planQuery, inferPhraseIntent } from "./query/planner";
+export type {
+  LexicalLadderStep,
+  QueryClass,
+  RetrievalQueryPlan,
+} from "./query/planner";
+export {
+  buildLexicalLadder,
+  classifyQuery,
+  minimumShouldMatchForTermCount,
+  minimumShouldMatchForZhBigrams,
+} from "./query/lexical-coverage";
+
 export { analyzeLanguage } from "./query/language-analyzer";
 export { extractExactTerms } from "./query/exact-terms";
 export {
   BUILTIN_TERMINOLOGY,
-  expandTerminology,
+  TERMINOLOGY_VERSION,
 } from "./query/terminology";
+export type { TerminologyEntry } from "./query/terminology";
+export { applyRewriteExcludes } from "./query/query-rewrite";
+export type { StructuredQueryRewrite } from "./query/query-rewrite";
+export { resolveQueryRewrite } from "./query/resolve-rewrite";
 export {
   buildMultilingualFields,
   ANALYZER_VERSION,

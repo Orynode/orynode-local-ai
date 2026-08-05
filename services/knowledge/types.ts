@@ -123,6 +123,11 @@ export interface ChunkerConfig {
 export interface ParsedPage {
   pageNumber: number;
   text: string;
+  /** Markdown 标题路径（摄取时）；缺省由 chunk 正文推断 */
+  headingPath?: string[];
+  /** 相对全文的起始行号（1-based，可选） */
+  startLine?: number;
+  endLine?: number;
 }
 
 export interface ParsedDocument {

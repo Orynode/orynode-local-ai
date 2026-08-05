@@ -43,28 +43,62 @@ test("planQuery: 精确查询不扩展", () => {
   assert.ok(plan.exactTerms.some((t) => t.kind === "error_code"));
 });
 
-test("planQuery: 关键字生成英文术语扩展供真实召回", () => {
-  const plan = planQuery("关键字", { embedding: true });
-  const expanded = plan.variants.find((v) => v.kind === "term_expansion");
-  assert.ok(expanded);
-  assert.match(expanded.text, /keyword/);
-  assert.equal(expanded.language, "en");
-  assert.ok(expanded.weight < plan.variants[0]!.weight);
+test("planQuery: 注入 rewrite 后生成英文术语扩展", () => {
+  const plan = planQuery("访问令牌", {
+    embedding: true,
+    rewrite: {
+      source: "terminology",
+      synonyms: ["access token", "access-token", "訪問令牌"],
+      exclude: [],
+      matchedEntryIds: ["access-token"],
+    },
+  });
+  const expanded = plan.variants.filter((v) => v.kind === "term_expansion");
+  assert.ok(expanded.length >= 1);
+  assert.ok(expanded.some((v) => /access/i.test(v.text)));
 });
 
 test("planQuery: 术语扩展保留结构化边界，避免复合词被拆成宽泛 OR", () => {
-  const plan = planQuery("原子尺度", { embedding: true });
-  const expansion = plan.variants.find((item) => item.kind === "term_expansion");
-
-  assert.deepEqual(expansion?.terms, ["atomistic", "atomic-scale"]);
-  assert.equal(expansion?.terms?.includes("atomic"), false);
-  assert.equal(expansion?.terms?.includes("scale"), false);
+  const plan = planQuery("钠离子电池", {
+    embedding: true,
+    rewrite: {
+      source: "terminology",
+      synonyms: ["sodium-ion battery", "atomic-scale"],
+      exclude: [],
+      matchedEntryIds: ["sodium-ion-battery"],
+    },
+  });
+  const expansion = plan.variants.filter((item) => item.kind === "term_expansion");
+  assert.ok(expansion.some((e) => e.text === "sodium-ion battery"));
+  for (const item of expansion) {
+    assert.equal(item.terms?.includes("atomic"), false);
+    assert.equal(item.terms?.includes("scale"), false);
+  }
 });
 
 test("planQuery: 短英文术语保留 phrase 意图", () => {
   const plan = planQuery("Passive Mobs", { embedding: true });
   assert.equal(plan.phrase, "Passive Mobs");
+  assert.equal(plan.queryClass, "short_entity");
   assert.deepEqual(plan.searchTerms, ["passive", "mobs"]);
+  assert.ok(plan.lexicalLadder.some((s) => s.mode === "phrase"));
+  assert.ok(plan.lexicalLadder.some((s) => s.mode === "all"));
+  assert.equal(
+    plan.lexicalLadder.some((s) => s.mode === "minimum_match"),
+    false,
+  );
+});
+
+test("planQuery: 中文短复合进入 phrase，且阶梯不含任意词放宽", () => {
+  const plan = planQuery("反向代理");
+  assert.equal(plan.phrase, "反向代理");
+  assert.equal(plan.queryClass, "zh_compound");
+  assert.ok(plan.lexicalLadder.some((s) => s.mode === "phrase"));
+  assert.ok(plan.lexicalLadder.some((s) => s.mode === "all"));
+  assert.equal(
+    plan.lexicalLadder.some((s) => s.mode === "minimum_match"),
+    false,
+  );
 });
 
 test("buildMultilingualFields: 简繁扩展与技术词", () => {

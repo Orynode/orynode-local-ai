@@ -37,9 +37,16 @@ export async function GET(request: Request) {
         embeddingDim: EMBEDDING_CONFIG.dimension,
       },
     });
-  } catch {
+  } catch (error) {
+    const timedOut =
+      error instanceof Error &&
+      (error.name === "TimeoutError" || /aborted|timeout/i.test(error.message));
     return Response.json(
-      { error: "本地资料库服务尚未启动" },
+      {
+        error: timedOut
+          ? "资料库服务繁忙（可能正在重建向量），请稍后重试"
+          : "本地资料库服务尚未启动",
+      },
       { status: 503 },
     );
   }

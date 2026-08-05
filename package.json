@@ -29,6 +29,7 @@
     "test:unit": "tsx --test tests/knowledge/*.test.ts tests/chat/*.test.ts tests/data-service/*.test.mjs tests/platform/*.test.mjs tests/platform/*.test.ts",
     "test:knowledge": "tsx --test tests/knowledge/*.test.ts tests/chat/*.test.ts",
     "test:retrieval-eval": "node --import tsx scripts/knowledge/run-retrieval-eval.ts --json .orynode/eval/latest.json --md .orynode/eval/latest.md",
+    "test:smoke-rag": "node scripts/knowledge/smoke-rag-8gb.mjs",
     "knowledge:benchmark-embedding": "node --import tsx scripts/knowledge/benchmark-embedding-artifacts.ts --dry-run",
     "test:contracts": "tsx --test tests/platform/contracts.test.mjs tests/knowledge/phase5-adapters.test.ts",
     "test:smoke-runtime": "node scripts/smoke-runtime.mjs",

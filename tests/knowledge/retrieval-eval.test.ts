@@ -7,12 +7,19 @@ import test from "node:test";
 import { rrfFusion } from "../../services/knowledge/retrieval/keyword";
 import { runRetrievalEval } from "../../services/knowledge/evaluation";
 
-test("中英 fixture：Recall@8 门禁由 gates.json 驱动", () => {
+test("lexical_rerank / hybrid stub：主策略族可跑通", () => {
   const report = runRetrievalEval({
-    strategies: ["keyword_multilingual_fields"],
+    strategies: [
+      "keyword_multilingual_fields",
+      "lexical_rerank",
+      "hybrid_rrf_lexical_stub",
+    ],
     enforceGates: true,
   });
   assert.equal(report.passed, true, report.failures.join("; "));
+  assert.ok(
+    report.strategies.some((s) => s.strategy === "lexical_rerank"),
+  );
 });
 
 test("无答案查询误召回率受门禁约束", () => {

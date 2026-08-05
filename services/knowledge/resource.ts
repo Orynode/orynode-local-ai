@@ -29,3 +29,18 @@ export async function markChatResourceIdle(): Promise<void> {
     // ignore
   }
 }
+
+/** 查询时探测 Chat 是否占用（失败视为未占用，避免误伤检索） */
+export async function isChatResourceActive(): Promise<boolean> {
+  try {
+    const response = await fetch(`${ORYNODE_DATA_URL}/resources`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
+    });
+    if (!response.ok) return false;
+    const body = (await response.json()) as { chatActive?: boolean };
+    return body.chatActive === true;
+  } catch {
+    return false;
+  }
+}

@@ -5,11 +5,11 @@
 
 import { extractTechnicalTerms } from "../retrieval/keyword";
 
-export const NORMALIZER_VERSION = "ml-normalizer-v1";
+export const NORMALIZER_VERSION = "ml-normalizer-v2";
 export const ANALYZER_VERSION = "fts5-multilingual-v1";
 export const KEYWORD_V2_BUILD_ID = "keyword-fts-v2-global";
 
-/** 简→繁 / 繁→简 高置信常用映射（可版本化扩展，非完整 OpenCC） */
+/** 简→繁 高置信常用映射（IT/RAG 场景；非完整 OpenCC） */
 const S2T: Record<string, string> = {
   国: "國",
   们: "們",
@@ -37,8 +37,6 @@ const S2T: Record<string, string> = {
   应: "應",
   会: "會",
   语: "語",
-  信: "信",
-  息: "息",
   库: "庫",
   检: "檢",
   索: "索",
@@ -49,24 +47,61 @@ const S2T: Record<string, string> = {
   证: "證",
   访: "訪",
   问: "問",
-  令: "令",
-  牌: "牌",
-  向: "向",
-  量: "量",
-  引: "引",
-  擎: "擎",
-  知: "知",
   识: "識",
   资: "資",
   传: "傳",
   数: "數",
   据: "據",
   请: "請",
-  建: "建",
   写: "寫",
-  入: "入",
   机: "機",
   设: "設",
+  备: "備",
+  处: "處",
+  运: "運",
+  启: "啟",
+  动: "動",
+  务: "務",
+  网: "網",
+  络: "絡",
+  连: "連",
+  错: "錯",
+  误: "誤",
+  败: "敗",
+  环: "環",
+  变: "變",
+  权: "權",
+  缓: "緩",
+  览: "覽",
+  页: "頁",
+  预: "預",
+  话: "話",
+  户: "戶",
+  码: "碼",
+  隐: "隱",
+  云: "雲",
+  节: "節",
+  内: "內",
+  结: "結",
+  询: "詢",
+  选: "選",
+  级: "級",
+  闭: "閉",
+  装: "裝",
+  赖: "賴",
+  滚: "滾",
+  复: "復",
+  删: "刪",
+  创: "創",
+  导: "導",
+  别: "別",
+  扫: "掃",
+  图: "圖",
+  优: "優",
+  仅: "僅",
+  载: "載",
+  输: "輸",
+  块: "塊",
 };
 
 const T2S: Record<string, string> = Object.fromEntries(
@@ -97,6 +132,17 @@ function expandHansHant(text: string): string {
   if (toT !== text) parts.add(toT);
   if (toS !== text) parts.add(toS);
   return [...parts].join(" ");
+}
+
+/** 查询词简繁变体（用于 FTS：同义用 OR，避免 AND 强制双形） */
+export function hansHantVariants(term: string): string[] {
+  const raw = String(term ?? "").trim();
+  if (!raw) return [];
+  const expanded = expandHansHant(raw)
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+  return [...new Set(expanded)];
 }
 
 function buildZhText(normalized: string): string {

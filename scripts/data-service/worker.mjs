@@ -34,6 +34,7 @@ export function startIndexWorker(deps) {
     embedTexts,
     writeVectors,
     setDocumentStatus,
+    getDocumentStatus = null,
     runSyncSource = null,
     runGarbageCollect = null,
     runProcessRevision = null,
@@ -48,9 +49,22 @@ export function startIndexWorker(deps) {
     const payload = job.payload ?? {};
     const namespace = payload.namespace === "conversation" ? "conversation" : "library";
     const documentId = String(payload.documentId || "");
+    const force = Boolean(payload.force);
     let buildId = typeof payload.indexBuildId === "string" ? payload.indexBuildId : null;
     if (!documentId) {
       throw new Error("embed_document 缺少 documentId");
+    }
+
+    // 文档已 indexed 时跳过自动补建，避免刷新页面刷出的重复队列空转
+    if (!force && typeof getDocumentStatus === "function") {
+      try {
+        const status = await getDocumentStatus(namespace, documentId);
+        if (status === "indexed") {
+          return { skipped: true, reason: "already_indexed" };
+        }
+      } catch {
+        // 探测失败则继续尝试写入
+      }
     }
 
     if (!buildId) {

@@ -6,7 +6,15 @@ import {
   RETRIEVAL_EMPTY_CONTEXT,
   RETRIEVAL_FAILURE_CONTEXT,
 } from "../../services/knowledge/application/engine";
+import { EMPTY_REWRITE, rewriteFromEntries } from "../../services/knowledge/query/terminology-match";
+import { BUILTIN_TERMINOLOGY } from "../../services/knowledge/query/terminology";
+import type { StructuredQueryRewrite } from "../../services/knowledge/query/query-rewrite";
 import type { Retriever, RetrievalResult } from "../../services/knowledge/types";
+
+/** 单元测试默认不打真实 LLM / 术语 API */
+async function noRewrite(): Promise<StructuredQueryRewrite> {
+  return { ...EMPTY_REWRITE };
+}
 
 function mockRetriever(
   impl: (query: string) => Promise<RetrievalResult> | RetrievalResult,
@@ -22,6 +30,7 @@ test("buildChatKnowledgeContext: scope none 不检索", async () => {
   let called = 0;
   const engine = createKnowledgeEngine({
     knowledgeTier: "lite",
+    resolveRewrite: noRewrite,
     retriever: mockRetriever(() => {
       called += 1;
       return { chunks: [], strategy: "keyword" };
@@ -39,6 +48,7 @@ test("buildChatKnowledgeContext: scope none 不检索", async () => {
 test("buildChatKnowledgeContext: 有命中时组装 context", async () => {
   const engine = createKnowledgeEngine({
     knowledgeTier: "lite",
+    resolveRewrite: noRewrite,
     retriever: mockRetriever(() => ({
       strategy: "keyword",
       chunks: [
@@ -73,6 +83,7 @@ test("buildChatKnowledgeContext: 有命中时组装 context", async () => {
 test("buildChatKnowledgeContext: 检索失败降级文案", async () => {
   const engine = createKnowledgeEngine({
     knowledgeTier: "lite",
+    resolveRewrite: noRewrite,
     retriever: mockRetriever(() => {
       throw new Error("data service down");
     }),
@@ -88,6 +99,7 @@ test("buildChatKnowledgeContext: 检索失败降级文案", async () => {
 test("buildChatKnowledgeContext: 0 命中注入诚实文案并保留 diagnostics", async () => {
   const engine = createKnowledgeEngine({
     knowledgeTier: "lite",
+    resolveRewrite: noRewrite,
     retriever: mockRetriever(() => ({
       strategy: "keyword",
       chunks: [],
@@ -106,6 +118,7 @@ test("buildChatKnowledgeContext: 0 命中注入诚实文案并保留 diagnostics
 test("retrieve: hybrid diagnostics 不含 vector 降级", async () => {
   const engine = createKnowledgeEngine({
     knowledgeTier: "balanced",
+    resolveRewrite: noRewrite,
     capabilities: {
       embedding: true,
       reranker: false,
@@ -140,11 +153,57 @@ test("retrieve: hybrid diagnostics 不含 vector 降级", async () => {
   assert.deepEqual(response.diagnostics.degradedCapabilities, []);
 });
 
-test("retrieve: 关键字通过 term_expansion 召回英文 keyword", async () => {
+test("retrieve: phrase 短路仅关键词时不误报向量索引未就绪", async () => {
+  const engine = createKnowledgeEngine({
+    knowledgeTier: "balanced",
+    resolveRewrite: noRewrite,
+    capabilities: {
+      embedding: true,
+      vectorIndexReady: true,
+      reranker: false,
+      ftsTokenizer: "fts5-multilingual-v1",
+      memoryTier: "balanced",
+      externalConnectors: { web: true, github: true },
+    },
+    retriever: mockRetriever(() => ({
+      // 模拟 hybridSearch 在 fts5_phrase 命中后的短路返回
+      strategy: "keyword",
+      chunks: [
+        {
+          id: "phrase-hit",
+          documentId: "d1",
+          documentName: "proxy.md",
+          pageNumber: 1,
+          position: 0,
+          content: "nginx 反向代理配置",
+          score: 5,
+          source: "library",
+        },
+      ],
+    })),
+  });
+  const response = await engine.retrieve({
+    query: "反向代理",
+    scope: { mode: "sources", library: "all" },
+    knowledgeTier: "auto",
+  });
+  assert.equal(response.diagnostics.effectiveTier, "balanced");
+  assert.equal(response.diagnostics.fusion, "keyword_only");
+  assert.ok(response.diagnostics.strategy.includes("keyword"));
+  assert.equal(
+    response.diagnostics.degradedCapabilities.includes("VECTOR_INDEX_NOT_READY"),
+    false,
+  );
+  assert.deepEqual(response.diagnostics.degradedCapabilities, []);
+});
+
+test("retrieve: 术语 rewrite 经 term_expansion 召回英文 access token", async () => {
   const calls: string[] = [];
   const preferKeywordByQuery = new Map<string, boolean | undefined>();
   const engine = createKnowledgeEngine({
     knowledgeTier: "balanced",
+    resolveRewrite: async (query) =>
+      rewriteFromEntries(query, BUILTIN_TERMINOLOGY, "terminology"),
     capabilities: {
       embedding: true,
       reranker: false,
@@ -156,17 +215,17 @@ test("retrieve: 关键字通过 term_expansion 召回英文 keyword", async () =
       async retrieve(query, _scope, options) {
         calls.push(query);
         preferKeywordByQuery.set(query, options?.preferKeyword);
-        if (/keyword/i.test(query)) {
+        if (/access/i.test(query)) {
           return {
             strategy: "keyword",
             chunks: [
               {
-                id: "en-keyword",
+                id: "en-access",
                 documentId: "d-en",
-                documentName: "search.md",
+                documentName: "auth.md",
                 pageNumber: 1,
                 position: 0,
-                content: "Keyword search uses an inverted index.",
+                content: "Issue an access token for the API client.",
                 score: 3,
                 source: "library",
               },
@@ -179,25 +238,29 @@ test("retrieve: 关键字通过 term_expansion 召回英文 keyword", async () =
   });
 
   const response = await engine.retrieve({
-    query: "关键字",
+    query: "访问令牌",
     scope: { mode: "sources", library: "all" },
     knowledgeTier: "balanced",
   });
 
-  assert.ok(calls.some((query) => /keyword/i.test(query)));
-  assert.equal(preferKeywordByQuery.get("关键字"), false);
-  assert.equal(preferKeywordByQuery.get("keyword keywords"), true);
-  assert.equal(response.hits[0]?.id, "en-keyword");
-  assert.equal(response.hits[0]?.score, 3);
-  assert.deepEqual(response.diagnostics.strategy, ["keyword"]);
-  assert.equal(response.diagnostics.fusion, "keyword_only");
-  assert.ok(response.highlightTerms?.includes("keyword"));
+  assert.ok(calls.some((query) => /access/i.test(query)));
+  assert.equal(preferKeywordByQuery.get("访问令牌"), false);
+  assert.ok(
+    [...preferKeywordByQuery.entries()].some(
+      ([q, prefer]) => /access/i.test(q) && prefer === true,
+    ),
+  );
+  assert.equal(response.hits[0]?.id, "en-access");
+  assert.ok((response.hits[0]?.score ?? 0) > 0);
+  assert.ok(response.diagnostics.strategy.includes("keyword"));
+  assert.ok(response.highlightTerms?.some((t) => /access/i.test(t)));
 });
 
 test("retrieve: normalized 词项变体只走 FTS，不放大向量噪声", async () => {
   const modes = new Map<string, boolean | undefined>();
   const engine = createKnowledgeEngine({
     knowledgeTier: "quality",
+    resolveRewrite: noRewrite,
     capabilities: {
       embedding: true,
       reranker: true,
@@ -231,6 +294,12 @@ test("retrieve: term_expansion 将结构化词项原样传给 FTS", async () => 
   const languageByQuery = new Map<string, string | undefined>();
   const engine = createKnowledgeEngine({
     knowledgeTier: "balanced",
+    resolveRewrite: async () => ({
+      source: "terminology",
+      synonyms: ["atomistic", "atomic-scale"],
+      exclude: [],
+      matchedEntryIds: ["atomistic"],
+    }),
     capabilities: {
       embedding: true,
       reranker: false,
@@ -252,17 +321,17 @@ test("retrieve: term_expansion 将结构化词项原样传给 FTS", async () => 
     scope: { mode: "sources", library: "all" },
   });
 
-  assert.deepEqual(termsByQuery.get("atomistic atomic-scale"), [
-    "atomistic",
-    "atomic-scale",
-  ]);
-  assert.equal(languageByQuery.get("atomistic atomic-scale"), "en");
+  // 每个同义短语是独立 variant，terms 保持完整边界（不再拼成长串）
+  assert.deepEqual(termsByQuery.get("atomistic"), ["atomistic"]);
+  assert.deepEqual(termsByQuery.get("atomic-scale"), ["atomic-scale"]);
+  assert.equal(languageByQuery.get("atomistic"), "en");
 });
 
 test("retrieve: 原始短语意图原样传给 FTS", async () => {
   let receivedPhrase: string | undefined;
   const engine = createKnowledgeEngine({
     knowledgeTier: "balanced",
+    resolveRewrite: noRewrite,
     capabilities: {
       embedding: true,
       reranker: false,
@@ -271,8 +340,10 @@ test("retrieve: 原始短语意图原样传给 FTS", async () => {
       externalConnectors: { web: true, github: true },
     },
     retriever: {
-      async retrieve(_query, _scope, options) {
-        receivedPhrase = options?.keywordQuery?.phrase;
+      async retrieve(query, _scope, options) {
+        if (query === "Passive Mobs") {
+          receivedPhrase = options?.keywordQuery?.phrase;
+        }
         return { strategy: "keyword", chunks: [] };
       },
     },

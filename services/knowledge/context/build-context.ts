@@ -26,6 +26,7 @@ import {
   truncateChunkForBudget,
 } from "./token-pack";
 import { buildCitationExcerpt } from "./citation-excerpt";
+import { inferHeadingPathFromContent } from "../indexing/markdown-headings";
 
 const PROMPT_FRAME_OVERHEAD = `
 
@@ -36,11 +37,22 @@ const PROMPT_FRAME_OVERHEAD = `
 <<<LOCAL_KNOWLEDGE>>>
 <<<END_LOCAL_KNOWLEDGE>>>`;
 
-export function locatorFromHit(hit: RetrievalHit): CitationLocator {
-  if (hit.locatorHint) return hit.locatorHint;
+function isMarkdownDocumentName(name: string): boolean {
+  return /\.(md|markdown|txt|rst)$/i.test(name);
+}
 
+export function locatorFromHit(hit: RetrievalHit): CitationLocator {
   const name = hit.documentName.toLowerCase();
-  const isMarkdown = /\.(md|markdown|txt|rst)$/i.test(name);
+  const isMarkdown = isMarkdownDocumentName(name);
+
+  // 无 OCR 映射时 data-service 可能挂上泛化 page hint；Markdown 仍优先标题路径
+  if (
+    hit.locatorHint &&
+    !(isMarkdown && hit.locatorHint.kind === "page")
+  ) {
+    return hit.locatorHint;
+  }
+
   const isCode = /\.(ts|tsx|js|jsx|py|go|rs|java|c|cpp|h|cs|rb|php|swift|kt|scala)$/i.test(
     name,
   );
@@ -59,7 +71,7 @@ export function locatorFromHit(hit: RetrievalHit): CitationLocator {
   if (isMarkdown) {
     return {
       kind: "markdown",
-      headingPath: hit.headingPath,
+      headingPath: inferHeadingPathFromContent(hit.content, hit.headingPath),
       startLine: hit.startLine,
       endLine: hit.endLine,
     };

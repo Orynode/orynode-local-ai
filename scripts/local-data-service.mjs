@@ -23,6 +23,7 @@ import {
   upsertFtsChunks,
 } from "./data-service/fts-index.mjs";
 import { createJobRepository } from "./data-service/jobs.mjs";
+import { createTerminologyRepository } from "./data-service/terminology.mjs";
 import {
   CHUNK_STRATEGY_VERSION,
   createIndexBuildStore,
@@ -142,6 +143,7 @@ database.exec("PRAGMA busy_timeout = 5000");
 migrateDatabase(database);
 
 const jobRepository = createJobRepository(database);
+const terminologyRepository = createTerminologyRepository(database);
 const indexBuildStore = createIndexBuildStore(database);
 const vectorEntryStore = createVectorEntryStore(database);
 const resourceCoordinator = createResourceCoordinator();
@@ -1712,11 +1714,37 @@ function getLibraryVectorCoverage() {
 
 /**
  * 语义开启时为缺少向量的文档补建 embed_document Job（幂等）。
+ * 同时取消「文档已 indexed 但仍排队」的冗余补建任务。
  */
+function cancelRedundantLibraryEmbedJobs() {
+  let cancelled = 0;
+  const listed = jobRepository.list({
+    statuses: ["queued", "retry_wait"],
+    types: ["embed_document"],
+    limit: 200,
+    includeRecent: false,
+  });
+  for (const job of listed.jobs) {
+    const payload =
+      job.payload && typeof job.payload === "object" ? job.payload : {};
+    if (payload.force) continue;
+    if (payload.namespace === "conversation") continue;
+    const documentId =
+      typeof payload.documentId === "string" ? payload.documentId : "";
+    if (!documentId) continue;
+    const doc = getKnowledgeDocument.get(documentId);
+    if (doc?.status === "indexed" && jobRepository.cancel(job.id)) {
+      cancelled += 1;
+    }
+  }
+  return cancelled;
+}
+
 function reconcileLibraryVectorBackfill() {
   if (!semanticSearchEnabled()) {
-    return { enqueued: 0, pending: 0 };
+    return { enqueued: 0, pending: 0, cancelled: 0 };
   }
+  const cancelled = cancelRedundantLibraryEmbedJobs();
   const coverage = getLibraryVectorCoverage();
   let enqueued = 0;
   for (const row of listKnowledgeDocuments.all()) {
@@ -1738,12 +1766,25 @@ function reconcileLibraryVectorBackfill() {
           existing.status === "succeeded" &&
           doc.status !== "indexed"
         ) {
-          jobRepository.enqueue({
-            type: "embed_document",
-            idempotencyKey: `backfill:retry:library:${doc.id}:${Date.now()}`,
-            payload: { namespace: "library", documentId: doc.id },
-          });
-          enqueued += 1;
+          const retryKey = `backfill:library:${doc.id}:retry`;
+          const retryExisting = jobRepository.getByIdempotencyKey(retryKey);
+          if (retryExisting) {
+            if (
+              ["failed", "cancelled", "succeeded"].includes(
+                retryExisting.status,
+              )
+            ) {
+              jobRepository.requeueFromTerminal(retryExisting.id);
+              enqueued += 1;
+            }
+          } else {
+            jobRepository.enqueue({
+              type: "embed_document",
+              idempotencyKey: retryKey,
+              payload: { namespace: "library", documentId: doc.id },
+            });
+            enqueued += 1;
+          }
         }
         continue;
       }
@@ -1764,7 +1805,7 @@ function reconcileLibraryVectorBackfill() {
       // best-effort
     }
   }
-  return { enqueued, pending: coverage.pendingDocuments };
+  return { enqueued, pending: coverage.pendingDocuments, cancelled };
 }
 
 function normalizeAttachments(value) {
@@ -2434,6 +2475,12 @@ async function getEmbedStatus() {
  * @param {"query" | "passage"} [mode]
  */
 async function embedTexts(texts, mode = "passage") {
+  // Chat 生成占用时拒绝加载/运行 embedding，避免与 Gemma 争 8GB 余量
+  if (resourceCoordinator.snapshot().chatActive) {
+    const error = new Error("EMBED_DEFERRED_CHAT");
+    error.code = "EMBED_DEFERRED_CHAT";
+    throw error;
+  }
   const extractor = await resolveEmbedPipeline();
   const artifact = getActiveEmbeddingArtifact();
   const template =
@@ -2461,6 +2508,13 @@ async function setDocumentStatusForWorker(
     return setConversationFileIndexStatus(documentId, status, extra);
   }
   return setDocumentIndexStatus(documentId, status, extra);
+}
+
+function getDocumentStatusForWorker(namespace, documentId) {
+  if (namespace === "conversation") {
+    return getConversationFile.get(documentId)?.status ?? null;
+  }
+  return getKnowledgeDocument.get(documentId)?.status ?? null;
 }
 
 /**
@@ -2520,6 +2574,8 @@ async function writeVectorsForDocument({
       done: Math.min(offset + slice.length, rows.length),
       total: rows.length,
     });
+    // 让出事件循环，避免 ONNX 批处理饿死 /knowledge 列表等 HTTP
+    await new Promise((resolve) => setImmediate(resolve));
   }
 
   vectorEntryStore.replaceAll(indexBuildId, entries);
@@ -2569,6 +2625,7 @@ const indexWorker = startIndexWorker({
   embedTexts,
   writeVectors: writeVectorsForDocument,
   setDocumentStatus: setDocumentStatusForWorker,
+  getDocumentStatus: getDocumentStatusForWorker,
   runSyncSource: runSyncSourceJob,
   runProcessRevision: runProcessRevisionJob,
   runGarbageCollect: (payload) => {
@@ -2834,6 +2891,59 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/jobs") {
+      const statusParam = String(url.searchParams.get("status") || "").trim();
+      const typeParam = String(url.searchParams.get("type") || "").trim();
+      const includeRecent =
+        url.searchParams.get("includeRecent") === "1" ||
+        url.searchParams.get("includeRecent") === "true";
+      const limit = Number(url.searchParams.get("limit") || 50);
+      const offset = Number(url.searchParams.get("offset") || 0);
+      const statuses = statusParam
+        ? statusParam.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
+      const types = typeParam
+        ? typeParam.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
+      const listed = jobRepository.list({
+        statuses,
+        types,
+        limit,
+        offset,
+        includeRecent,
+      });
+      const jobs = listed.jobs.map((job) => {
+        const payload =
+          job.payload && typeof job.payload === "object" ? job.payload : {};
+        const documentId =
+          typeof payload.documentId === "string" ? payload.documentId : null;
+        const namespace =
+          payload.namespace === "conversation" ? "conversation" : "library";
+        let documentName = null;
+        if (documentId) {
+          if (namespace === "conversation") {
+            const file = getConversationFile.get(documentId);
+            documentName = file?.name ?? null;
+          } else {
+            const doc = getKnowledgeDocument.get(documentId);
+            documentName = doc?.name ?? null;
+          }
+        }
+        return {
+          ...job,
+          documentId,
+          namespace,
+          documentName,
+        };
+      });
+      json(response, 200, {
+        jobs,
+        summary: listed.summary,
+        total: listed.total,
+      });
+      return;
+    }
+
     if (request.method === "GET" && parts[0] === "jobs" && parts.length === 2) {
       const job = jobRepository.get(parts[1]);
       if (!job) {
@@ -2968,16 +3078,32 @@ const server = createServer(async (request, response) => {
         return;
       }
       const mode = body.mode === "query" ? "query" : "passage";
-      const vectors = await embedTexts(texts, mode);
-      json(response, 200, {
-        artifactId: activeEmbedArtifact.id,
-        model: activeEmbedArtifact.id,
-        modelRevision: EMBED_REVISION,
-        dimension: EMBED_DIM,
-        role: activeEmbedArtifact.role,
-        mode,
-        vectors,
-      });
+      try {
+        const vectors = await embedTexts(texts, mode);
+        json(response, 200, {
+          artifactId: activeEmbedArtifact.id,
+          model: activeEmbedArtifact.id,
+          modelRevision: EMBED_REVISION,
+          dimension: EMBED_DIM,
+          role: activeEmbedArtifact.role,
+          mode,
+          vectors,
+        });
+      } catch (error) {
+        if (
+          error &&
+          typeof error === "object" &&
+          (error.code === "EMBED_DEFERRED_CHAT" ||
+            error.message === "EMBED_DEFERRED_CHAT")
+        ) {
+          json(response, 503, {
+            error: "对话进行中，已推迟向量计算",
+            code: "EMBED_DEFERRED_CHAT",
+          });
+          return;
+        }
+        throw error;
+      }
       return;
     }
 
@@ -3144,6 +3270,39 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    // 可学习术语表：list / upsert / hit（匹配在 resolveQueryRewrite 侧完成）
+    if (request.method === "GET" && url.pathname === "/terminology/entries") {
+      json(response, 200, { entries: terminologyRepository.list() });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/terminology/entries") {
+      const body = await readJson(request);
+      const terms = Array.isArray(body.terms) ? body.terms : [];
+      if (terms.length === 0) {
+        json(response, 400, { error: "terms 不能为空" });
+        return;
+      }
+      const entry = terminologyRepository.upsertLearned({
+        id: typeof body.id === "string" ? body.id : undefined,
+        domain: typeof body.domain === "string" ? body.domain : undefined,
+        terms,
+        exclude: Array.isArray(body.exclude) ? body.exclude : [],
+        source: typeof body.source === "string" ? body.source : "learned",
+      });
+      json(response, 200, { entry });
+      return;
+    }
+    if (
+      request.method === "POST" &&
+      url.pathname === "/terminology/entries/hit"
+    ) {
+      const body = await readJson(request);
+      const id = typeof body.id === "string" ? body.id : "";
+      if (id) terminologyRepository.recordHit(id);
+      json(response, 200, { ok: true });
+      return;
+    }
+
     // FTS5 keyword search — returns top candidates only (Phase 1)
     if (request.method === "POST" && url.pathname === "/retrieval/keyword/search") {
       const body = await readJson(request);
@@ -3160,6 +3319,15 @@ const server = createServer(async (request, response) => {
         phrase: typeof body.phrase === "string" ? body.phrase : undefined,
         terms: Array.isArray(body.terms) ? body.terms : undefined,
         exactTerms: Array.isArray(body.exactTerms) ? body.exactTerms : undefined,
+        queryClass:
+          typeof body.queryClass === "string" ? body.queryClass : undefined,
+        lexicalLadder: Array.isArray(body.lexicalLadder)
+          ? body.lexicalLadder
+          : undefined,
+        languagePrimary:
+          typeof body.languagePrimary === "string"
+            ? body.languagePrimary
+            : undefined,
         preferLegacy: body.preferLegacy === true,
         library: body.library,
         conversationFiles: body.conversationFiles,

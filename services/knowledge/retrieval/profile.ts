@@ -181,10 +181,10 @@ export function resolveRetrievalProfile(
   };
 }
 
-/** 将内部 strategy 标签规范为对外 diagnostics 策略名 */
+/** 将内部 strategy 标签规范为对外 diagnostics 策略名（仅反映实际执行，不按 profile 预填） */
 export function normalizeDiagnosticStrategies(
   strategies: Iterable<string>,
-  profile: Pick<RetrievalProfile, "embedding" | "multiQuery" | "rerank">,
+  _profile?: Pick<RetrievalProfile, "embedding" | "multiQuery" | "rerank">,
 ): string[] {
   const out = new Set<string>();
   out.add("keyword");
@@ -194,17 +194,18 @@ export function normalizeDiagnosticStrategies(
       out.add("rrf");
     } else if (raw === "multi_query_rrf") {
       out.add("rrf");
-    } else if (raw === "lexical_rerank" || raw === "rerank") {
+    } else if (raw === "lexical_rerank") {
       out.add("lexical_rerank");
-    } else if (raw === "keyword" || raw === "fts5") {
+    } else if (
+      raw === "keyword" ||
+      raw === "fts5" ||
+      raw === "fts5_v2" ||
+      raw === "fts5_phrase" ||
+      raw === "fts5_all"
+    ) {
       out.add("keyword");
     }
+    // lexical_rerank_preserved：未改序，不宣称 lexical_rerank
   }
-  if (profile.embedding) {
-    out.add("vector");
-    out.add("rrf");
-  }
-  if (profile.multiQuery) out.add("rrf");
-  if (profile.rerank) out.add("lexical_rerank");
   return [...out];
 }

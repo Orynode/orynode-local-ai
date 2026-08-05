@@ -11,5 +11,7 @@
 | [多语言检索架构](MULTILINGUAL_RETRIEVAL_ARCHITECTURE_zh-CN.md) | 中英混合检索、FTS / 向量与 RRF | 实施方案；词法/planner 等已部分进代码，评测门禁仍在推进 |
 | [查询语义标准](KNOWLEDGE_QUERY_SEMANTICS_STANDARD_zh-CN.md) | 查询解析与召回语义规范 | 实施基线，约束协议错误行为 |
 | [检索档位 UX 调整计划](KNOWLEDGE_RETRIEVAL_TIER_UX_ADJUSTMENT_PLAN_zh-CN.md) | Lite / Balanced / Quality / Auto 体验 | 设置页档位与降级语义已对齐 |
+| [RAG 升级完整闭环方案](RAG_UPGRADE_CLOSED_LOOP_zh-CN.md) | **架构终审**：中英 × 完整 RAG × 8GB；正式档词法 Rerank，否决查询时 CE | §终审 = Conditional Pass；实现跟 R0–R2 |
+| [8GB 冒烟清单](RAG_8GB_SMOKE_CHECKLIST_zh-CN.md) | 真机勾选 + `npm run test:smoke-rag` 离线门禁 | RU-001 |
 
-阅读顺序建议：CHANGELOG 1.1.0 → 整改实施计划 §1 → 长期架构 →（按需）多语言 / 查询语义 / 档位 UX。
+阅读顺序建议：CHANGELOG 1.1.0 → 整改实施计划 §1 → 长期架构 →（按需）多语言 / 查询语义 / 档位 UX → RAG 升级闭环。

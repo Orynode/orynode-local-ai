@@ -79,6 +79,8 @@ export interface RetrievalDiagnostics {
   activeVectorBuild?: string;
   embeddingModel?: string;
   embeddingArtifactRole?: string;
+  /** none | terminology | llm — 本轮 Query Rewrite 来源（非降级） */
+  rewriteSource?: "none" | "terminology" | "llm";
 }
 
 export interface RetrievalRequest {

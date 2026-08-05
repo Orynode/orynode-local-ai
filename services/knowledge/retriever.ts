@@ -358,6 +358,7 @@ export class HybridRetriever implements Retriever {
 
     // 完整短语是最高等级的正文证据。已有 phrase 命中时不再混入向量近邻，
     // 否则会把一个精确结果扩散成固定数量的语义噪声。
+    // strategy 仍报 keyword（本轮未做向量融合）；索引就绪与否由 capabilities 判定，勿在 Engine 误标。
     if (fts.strategy === "fts5_phrase" && fts.chunks.length > 0) {
       return {
         chunks: fts.chunks.slice(0, topK).map((chunk) => ({

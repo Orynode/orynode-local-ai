@@ -201,3 +201,50 @@ test("jobs: garbage_collect 可入队", () => {
     database.close();
   });
 });
+
+test("jobs: list 返回 active 与最近完成，按 updated 排序", () => {
+  withTempDb((_dir, dbPath) => {
+    const database = new DatabaseSync(dbPath);
+    migrateDatabase(database);
+    const jobs = createJobRepository(database);
+
+    const a = jobs.enqueue({
+      type: "embed_document",
+      idempotencyKey: "embed:a",
+      payload: { namespace: "library", documentId: "doc-a" },
+    });
+    const b = jobs.enqueue({
+      type: "embed_document",
+      idempotencyKey: "embed:b",
+      payload: { namespace: "library", documentId: "doc-b" },
+    });
+    const claimed = jobs.claim("w", ["embed_document"], 5000);
+    assert.ok(claimed);
+    jobs.complete(claimed.id, "w", { phase: "embedding", done: 3, total: 3 });
+
+    const listed = jobs.list({ includeRecent: true, limit: 20 });
+    assert.ok(listed.summary.active >= 1);
+    assert.ok(listed.summary.queued + listed.summary.running >= 1);
+    assert.ok(listed.jobs.some((j) => j.id === a.id || j.id === b.id));
+    assert.ok(listed.jobs.some((j) => j.status === "succeeded"));
+    const ids = listed.jobs.map((j) => j.id);
+    assert.equal(new Set(ids).size, ids.length);
+    database.close();
+  });
+});
+
+test("jobs: cancel 可取消 queued", () => {
+  withTempDb((_dir, dbPath) => {
+    const database = new DatabaseSync(dbPath);
+    migrateDatabase(database);
+    const jobs = createJobRepository(database);
+    const job = jobs.enqueue({
+      type: "embed_document",
+      idempotencyKey: "embed:cancel",
+      payload: { namespace: "library", documentId: "doc-x" },
+    });
+    assert.equal(jobs.cancel(job.id), true);
+    assert.equal(jobs.get(job.id).status, "cancelled");
+    database.close();
+  });
+});

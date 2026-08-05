@@ -75,6 +75,8 @@ export class Fts5KeywordIndex implements KeywordIndex {
           query: keywordQuery.text,
           terms: keywordQuery.terms,
           phrase: keywordQuery.phrase,
+          queryClass: keywordQuery.queryClass,
+          lexicalLadder: keywordQuery.lexicalLadder,
           exactTerms: keywordQuery.exactTerms,
           languagePrimary: keywordQuery.languagePrimary,
           topK: options.topK,

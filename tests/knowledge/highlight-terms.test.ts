@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildHighlightTerms } from "../../services/knowledge/retrieval/highlight-terms";
 
-test("buildHighlightTerms: 中文查询展开英文高亮提示", () => {
+test("buildHighlightTerms: 注入 synonyms 后展开跨语言高亮", () => {
   const terms = buildHighlightTerms({
-    query: "钠离子电解质",
-    searchTerms: ["钠离子电解质", "钠离", "离子"],
+    query: "反向代理",
+    searchTerms: ["反向代理"],
+    synonyms: ["reverse proxy", "reverse-proxy"],
   });
-  assert.ok(terms.includes("钠离子电解质") || terms.includes("钠离子"));
-  assert.ok(terms.some((t) => t.toLowerCase() === "sodium" || t.includes("sodium")));
-  assert.ok(terms.some((t) => t.toLowerCase().includes("electrolyte")));
+  assert.ok(terms.includes("反向代理"));
+  assert.ok(terms.some((t) => /reverse/i.test(t)));
 });
 
 test("buildHighlightTerms: 简繁展开", () => {
@@ -18,8 +18,11 @@ test("buildHighlightTerms: 简繁展开", () => {
   assert.ok(terms.includes("數據庫"));
 });
 
-test("buildHighlightTerms: 与 QueryPlanner 共用关键字术语", () => {
-  const terms = buildHighlightTerms({ query: "关键字" });
-  assert.ok(terms.includes("keyword"));
-  assert.ok(terms.includes("keywords"));
+test("buildHighlightTerms: 无 synonyms 时不偷偷查术语表", () => {
+  const terms = buildHighlightTerms({ query: "访问令牌" });
+  assert.ok(terms.includes("访问令牌"));
+  assert.equal(
+    terms.some((t) => /access/i.test(t)),
+    false,
+  );
 });

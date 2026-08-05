@@ -68,12 +68,15 @@ export interface Message {
   /** 正文实际引用的 id（落库字段；由 useChat.finalizeAnswer 写入） */
   referencedCitationIds?: string[];
   retrievalTraceId?: string;
-  /** 检索诊断（可选，调试用；历史消息可能没有） */
+  /** 检索诊断（可选；历史消息可能没有） */
   retrievalDiagnostics?: {
     strategy: string[];
     candidateCount: number;
     elapsedMs: number;
     degradedCapabilities: string[];
+    degradedReasons?: string[];
+    requestedTier?: string;
+    effectiveTier?: string;
   };
 }
 

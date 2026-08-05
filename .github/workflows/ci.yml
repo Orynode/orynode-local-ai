@@ -19,6 +19,7 @@ jobs:
       - run: npx tsc --noEmit
       - run: npm run test:unit
       - run: npm run test:retrieval-eval
+      - run: npm run test:smoke-rag
       - run: npm run test:smoke-runtime
       - run: npm run build
       - run: node --test tests/rendered-html.test.mjs

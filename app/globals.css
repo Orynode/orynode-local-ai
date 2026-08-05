@@ -440,6 +440,8 @@ button {
 }
 
 .topbar {
+  position: relative;
+  z-index: 30;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -646,6 +648,184 @@ button {
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
+}
+
+.knowledge-jobs-topbar {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.knowledge-jobs-topbar-btn {
+  position: relative;
+}
+
+.knowledge-jobs-topbar-btn.active {
+  border-color: #b8c6bb;
+  background: #edf3ed;
+  color: var(--green);
+}
+
+.knowledge-jobs-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.knowledge-jobs-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: inline-flex;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding: 0 4px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--text);
+  color: var(--panel, #fcfbf7);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.knowledge-jobs-panel {
+  margin: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: 0 12px 32px rgb(36 74 54 / 18%);
+}
+
+.knowledge-jobs-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 1;
+  width: min(420px, calc(100vw - 48px));
+  max-height: min(70vh, 520px);
+  overflow: auto;
+  /* 不透明底，避免透出下方检索栏 */
+  background: #fcfbf7;
+}
+
+.knowledge-jobs-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.knowledge-jobs-panel-head strong {
+  font-size: 14px;
+}
+
+.knowledge-jobs-error,
+.knowledge-jobs-empty,
+.knowledge-jobs-idle,
+.knowledge-jobs-busy {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.knowledge-jobs-idle {
+  color: var(--text);
+}
+
+.knowledge-jobs-busy {
+  color: var(--text);
+}
+
+.knowledge-jobs-error {
+  color: #a33;
+}
+
+.knowledge-jobs-section {
+  margin-top: 4px;
+}
+
+.knowledge-jobs-section + .knowledge-jobs-section {
+  margin-top: 14px;
+}
+
+.knowledge-jobs-section-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.knowledge-jobs-section-recent .knowledge-jobs-item {
+  opacity: 0.88;
+}
+
+.knowledge-jobs-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.knowledge-jobs-item {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgb(36 74 54 / 10%);
+  background: var(--panel);
+}
+
+.knowledge-jobs-item.status-running {
+  border-color: rgb(36 74 54 / 28%);
+}
+
+.knowledge-jobs-item.status-failed {
+  border-color: rgb(160 50 40 / 35%);
+}
+
+.knowledge-jobs-item-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.knowledge-jobs-status {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.knowledge-jobs-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.knowledge-jobs-progress {
+  color: var(--muted);
+}
+
+.knowledge-jobs-item-error {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #a33;
+}
+
+.knowledge-jobs-item-time {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 .knowledge-scope-btn {
@@ -1580,6 +1760,13 @@ button {
 
 .message-diagnostics {
   margin-top: 8px;
+}
+
+.message-diagnostics-summary {
+  margin: 0 0 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
 }
 
 .message-diagnostics-toggle {

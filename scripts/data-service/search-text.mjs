@@ -225,9 +225,11 @@ export function escapeFtsToken(term) {
 
 /**
  * @param {string[]} terms
+ * @param {{ operator?: "AND" | "OR" }} [options]
  * @returns {string | null}
  */
-export function buildFtsMatchQuery(terms) {
+export function buildFtsMatchQuery(terms, options = {}) {
   if (!Array.isArray(terms) || terms.length === 0) return null;
-  return terms.map(escapeFtsToken).join(" OR ");
+  const operator = options.operator === "OR" ? "OR" : "AND";
+  return terms.map(escapeFtsToken).join(` ${operator} `);
 }

@@ -187,10 +187,10 @@ SHOULD terminology(access token)
 跨语言不是把两个语言的单词全部 OR 在一起。标准流程：
 
 1. 原始查询始终保留；
-2. 高置信术语表产生结构化 expansion，每个术语保持边界；
+2. 术语库 / 可学习 Rewrite 产生结构化 expansion，每个术语保持边界；
 3. expansion 只走词法召回，不再次向量化；
 4. 原始查询使用 multilingual-E5 `query:` 模板；文档使用 `passage:` 模板；
-5. 术语表未覆盖时依赖共享向量空间；不默认调用外部翻译；
+5. 术语库未覆盖时：本地 LLM 结构化改写并写入术语库后再检索；也可依赖共享向量空间；
 6. 翻译改写若未来启用，必须作为独立 variant，并记录来源和版本。
 
 示例：
@@ -302,7 +302,7 @@ type SearchResponse = {
 | `passive creatures` | phrase 无命中后可用 AND；两词必须都出现，否则进入高阈值 semantic |
 | `原子尺度` | 可召回 `atomistic` / `atomic-scale`，但不得拆成 `atomic OR scale` |
 | `原子刻度` | 没有可靠词法或向量证据时返回 0 条 |
-| `关键字` | 可通过术语表召回 `keyword/keywords`，扩展词保持完整边界 |
+| `访问令牌` | 术语库命中 → `access token` 等完整短语 expansion；未命中则 LLM 改写后入库 |
 | `Node.js 访问令牌` | `Node.js` 必须命中；中文/英文 access-token 作为补充证据 |
 
 ## 12. 当前实现差距
@@ -310,8 +310,9 @@ type SearchResponse = {
 已具备：
 
 - QueryPlanner、统一 Search/Retrieve Engine；
-- 结构化 terminology terms；
-- 英文短语 phrase → AND；
+- `resolveQueryRewrite`（术语库 → LLM 晋升）+ Planner 只消费注入 rewrite；
+- 词法阶梯 phrase → all → minimum_should_match（禁止无条件 OR）；
+- 结构化 terminology terms / term_expansion 完整边界；
 - displayName 与正文证据分离；
 - 空列表不参与多查询 RRF；
 - multilingual-E5 query/passage 模板；
@@ -320,13 +321,11 @@ type SearchResponse = {
 仍需整改：
 
 1. 将 QueryPlan 从若干可选字段提升为完整 AST，并共享 HTTP schema；
-2. 中文 bigram 从宽泛 OR 改为 phrase/coverage 语义；
-3. 普通长查询增加 minimum_should_match，不再默认 OR；
-4. RetrievalHit 增加逐条 evidence/provenance；
-5. diagnostics 分离 attempted 与 contributing；
-6. 向量阈值按模型、语言、查询类型重新校准；
-7. Search 从“最多取 64 条后客户端分页”演进为稳定 cursor；
-8. 增加短语精度和无答案误召回的 CI 门禁。
+2. RetrievalHit 增加逐条 evidence/provenance；
+3. diagnostics 分离 attempted 与 contributing；
+4. 向量阈值按模型、语言、查询类型重新校准；
+5. Search 从“最多取 64 条后客户端分页”演进为稳定 cursor；
+6. 增加短语精度和无答案误召回的 CI 门禁。
 
 ## 13. 参考资料
 

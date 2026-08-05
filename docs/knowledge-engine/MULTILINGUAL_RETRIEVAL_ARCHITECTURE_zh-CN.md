@@ -336,21 +336,22 @@ bm25(knowledge_chunks_fts_v2, 8.0, 3.0, 3.0, 2.0)
 - 单字符词仅在白名单或技术上下文中保留，例如 `C`、`R`；
 - 文件名、标题、heading、source path 应进入独立高权重字段或 exact term 路径。
 
-### 6.5 术语表
-
-新增本地、可版本化术语表：
+### 6.5 术语库（可学习）
 
 ```ts
 interface TerminologyEntry {
   id: string;
-  terms: string[];       // ["访问令牌", "access token", "API token"]
-  domains?: string[];    // 可选领域标签
-  enabled: boolean;
-  source: "builtin" | "user";
+  terms: string[];       // ["访问令牌", "access token"]
+  domain?: string;
+  exclude?: string[];
+  source: "builtin" | "learned" | "user";
 }
 ```
 
-内置表只放高置信通用术语；用户术语表优先级更高。术语扩展属于查询 variant，不修改用户原查询，也不修改文档原文。
+- 内置表只放极小冷启动种子；
+- 正式路径：`resolveQueryRewrite` → SQLite 术语库命中则跳过 LLM；未命中则本地 LLM 结构化改写并晋升入库；
+- QueryPlanner **只消费**注入的 `StructuredQueryRewrite`，不再内部查表；
+- 术语扩展属于查询 variant，不修改用户原查询，也不修改文档原文。
 
 ## 7. 多语言向量索引
 

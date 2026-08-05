@@ -15,6 +15,39 @@ test("parsePlainText: Markdown 标题切页", () => {
   assert.ok(doc.pageCount >= 2);
   assert.match(doc.pages[0]!.text, /标题一/);
   assert.match(doc.pages[1]!.text, /标题二/);
+  assert.deepEqual(doc.pages[0]!.headingPath, ["标题一"]);
+  assert.deepEqual(doc.pages[1]!.headingPath, ["标题一", "标题二"]);
+  assert.equal(doc.pages[0]!.startLine, 1);
+});
+
+test("chunker: Markdown 标题路径与换行保留", () => {
+  const chunker = createChunker({
+    maxChunkSize: 1800,
+    minChunkSize: 20,
+    overlapSize: 40,
+    separators: ["\n\n", "\n", "。", " "],
+  });
+  const pages = parsePlainText(
+    new TextEncoder().encode(
+      "# 安装\n简介段落。\n\n## macOS\nbrew 安装步骤。\n\n## Linux\napt 安装步骤。",
+    ).buffer,
+    "md",
+  ).pages;
+  const chunks = chunker.chunkDocument(pages);
+  assert.ok(chunks.length >= 2);
+  assert.ok(chunks.some((c) => c.headingPath?.includes("macOS")));
+  assert.ok(chunks.some((c) => c.headingPath?.includes("Linux")));
+  assert.ok(chunks.every((c) => c.content.includes("\n") || c.content.length < 40));
+});
+
+test("parsePlainText: 同级标题不错误嵌套", () => {
+  const doc = parsePlainText(
+    new TextEncoder().encode("## 甲\nA\n\n## 乙\nB").buffer,
+    "md",
+  );
+  assert.equal(doc.pageCount, 2);
+  assert.deepEqual(doc.pages[0]!.headingPath, ["甲"]);
+  assert.deepEqual(doc.pages[1]!.headingPath, ["乙"]);
 });
 
 test("parsePlainText: 空文档", () => {

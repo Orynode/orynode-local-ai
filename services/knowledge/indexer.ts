@@ -22,7 +22,14 @@ import {
 } from "../../config/defaults";
 import type { ConversationFile, KnowledgeDocument } from "../types";
 
-export type IndexStatus = "indexed" | "ready" | "error" | "skipped";
+export type IndexStatus =
+  | "indexed"
+  | "ready"
+  | "error"
+  | "skipped"
+  /** 已入队后台 embed Job，文档状态多为 embedding */
+  | "queued";
+
 
 function basePath(namespace: DocumentNamespace): string {
   return namespace === "conversation"
@@ -177,18 +184,18 @@ export async function reindexDocument(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        type: "embed_document",
-        idempotencyKey: `reindex:${namespace}:${documentId}:${Date.now()}`,
-        payload: { namespace, documentId },
-      }),
+          type: "embed_document",
+          idempotencyKey: `reindex:${namespace}:${documentId}:${Date.now()}`,
+          payload: { namespace, documentId, force: true },
+        }),
       signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
     });
     if (enqueue.ok) {
       const body = await enqueue.json();
       await setStatus(documentId, "embedding", {}, namespace);
       return {
-        status: "skipped",
-        reason: "已入队后台向量重建",
+        status: "queued",
+        reason: "已入队后台向量重建，可继续关键词检索",
         jobId: body.job?.id,
       };
     }
@@ -335,13 +342,14 @@ export async function enqueuePendingVectorBackfill(): Promise<VectorBackfillResu
           );
         }
       } else if (status === "failed" || status === "cancelled") {
-        // 终端失败：用带时间戳的 key 再入队一次
+        // 终端失败：稳定 retry key，可 requeue，禁止 Date.now() 刷队列
+        const retryKey = `backfill:library:${document.id}:retry`;
         const retry = await fetch(`${ORYNODE_DATA_URL}/jobs`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             type: "embed_document",
-            idempotencyKey: `backfill:library:${document.id}:${Date.now()}`,
+            idempotencyKey: retryKey,
             payload: { namespace: "library", documentId: document.id },
           }),
           signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
@@ -355,14 +363,14 @@ export async function enqueuePendingVectorBackfill(): Promise<VectorBackfillResu
           skipped += 1;
         }
       } else {
-        // succeeded 但文档仍非 indexed：强制再入队
+        // succeeded 但文档仍非 indexed：仅用稳定 retry key 再入一次
         if (document.status !== "indexed") {
           const retry = await fetch(`${ORYNODE_DATA_URL}/jobs`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
               type: "embed_document",
-              idempotencyKey: `backfill:retry:library:${document.id}:${Date.now()}`,
+              idempotencyKey: `backfill:library:${document.id}:retry`,
               payload: { namespace: "library", documentId: document.id },
             }),
             signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),

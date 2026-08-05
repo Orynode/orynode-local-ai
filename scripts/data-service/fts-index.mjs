@@ -7,13 +7,41 @@
 import {
   ANALYZER_VERSION,
   buildMultilingualFields,
+  hansHantVariants,
   KEYWORD_V2_BUILD_ID,
 } from "./multilingual-normalizer.mjs";
 import {
-  buildFtsMatchQuery,
+  buildLexicalLadder,
+  classifyQuery,
+  passesCoverage,
+} from "./lexical-coverage.mjs";
+import {
   buildSearchText,
+  escapeFtsToken,
   extractSearchTerms,
 } from "./search-text.mjs";
+
+/**
+ * 词项 MATCH：汉字简繁变体用 OR 并列，再按 AND/OR 连接词项。
+ * @param {string[]} terms
+ * @param {{ operator?: "AND" | "OR" }} [options]
+ */
+function buildFtsMatchQueryHansHant(terms, options = {}) {
+  if (!Array.isArray(terms) || terms.length === 0) return null;
+  const operator = options.operator === "OR" ? "OR" : "AND";
+  const clauses = [];
+  for (const term of terms) {
+    const variants = hansHantVariants(term);
+    if (variants.length === 0) continue;
+    if (variants.length === 1) {
+      clauses.push(escapeFtsToken(variants[0]));
+    } else {
+      clauses.push(`(${variants.map(escapeFtsToken).join(" OR ")})`);
+    }
+  }
+  if (clauses.length === 0) return null;
+  return clauses.join(` ${operator} `);
+}
 
 /**
  * @param {import("node:sqlite").DatabaseSync} database
@@ -139,10 +167,28 @@ export function upsertFtsChunks(database, namespace, documentId, chunks) {
 }
 
 /**
+ * AND 查询时去掉「整段汉字 + 其 bigram」中的整段：unicode61 不会把整段当成单 token，
+ * 保留 bigram 即可；否则 `"知识引擎" AND "知识" AND …` 会空命中。
+ * @param {string[]} terms
+ */
+function termsForAndMatch(terms) {
+  if (!Array.isArray(terms) || terms.length === 0) return terms;
+  const set = new Set(terms);
+  return terms.filter((term) => {
+    if (!/^[\p{Script=Han}]{3,}$/u.test(term)) return true;
+    for (let i = 0; i < term.length - 1; i += 1) {
+      if (!set.has(term.slice(i, i + 2))) return true;
+    }
+    return false;
+  });
+}
+
+/**
  * @param {string[]} terms
  * @param {Array<{ value: string }>} [exactTerms]
+ * @param {"AND" | "OR"} [operator]
  */
-function buildV2MatchQuery(terms, exactTerms = []) {
+function buildV2MatchQuery(terms, exactTerms = [], operator = "AND") {
   const parts = [];
   for (const exact of exactTerms) {
     const value = String(exact.value ?? "").trim();
@@ -150,10 +196,35 @@ function buildV2MatchQuery(terms, exactTerms = []) {
     const escaped = `"${value.replace(/"/g, '""')}"`;
     parts.push(`exact_text : ${escaped}`);
   }
-  const general = buildFtsMatchQuery(terms);
+  const lexicalTerms =
+    operator === "AND" ? termsForAndMatch(terms) : terms;
+  const general = buildFtsMatchQueryHansHant(lexicalTerms, { operator });
   if (general) parts.push(general);
   if (parts.length === 0) return null;
+  if (parts.length === 1) return parts[0];
+  if (operator === "AND" && parts.length > 1 && general) {
+    const exactOnly = parts.slice(0, -1);
+    if (exactOnly.length === 0) return general;
+    return `(${exactOnly.join(" OR ")}) OR (${general})`;
+  }
   return parts.join(" OR ");
+}
+
+/**
+ * 按查询语言收窄 FTS v2 列（降低跨语言噪声）
+ * @param {string | null} match
+ * @param {string | undefined} languagePrimary
+ */
+function wrapLanguageColumns(match, languagePrimary) {
+  if (!match) return null;
+  const lang = String(languagePrimary ?? "");
+  if (lang.startsWith("zh")) {
+    return `{zh_text mixed_text exact_text} : (${match})`;
+  }
+  if (lang === "en") {
+    return `{en_text mixed_text exact_text} : (${match})`;
+  }
+  return match;
 }
 
 /**
@@ -170,6 +241,9 @@ export function searchKeywordIndex(database, options) {
     terms: providedTerms,
     exactTerms = [],
     preferLegacy = false,
+    languagePrimary,
+    queryClass: providedClass,
+    lexicalLadder: providedLadder,
   } = options;
 
   if (!isFtsReady(database) && !isFtsV2Ready(database)) {
@@ -207,7 +281,7 @@ export function searchKeywordIndex(database, options) {
     }
   };
 
-  const finish = (strategy, matchedTerms) => {
+  const finish = (strategy, matchedTerms, degradedReasons) => {
     const chunks = [...byId.values()]
       .sort((a, b) => b.score - a.score)
       .slice(0, Math.max(1, Number(topK) || 8));
@@ -218,56 +292,281 @@ export function searchKeywordIndex(database, options) {
       terms: matchedTerms,
       analyzerVersion: useV2 ? ANALYZER_VERSION : "fts5-search-text",
       activeKeywordBuild: useV2 ? KEYWORD_V2_BUILD_ID : undefined,
+      degradedReasons:
+        degradedReasons && degradedReasons.length > 0
+          ? degradedReasons
+          : undefined,
     };
   };
 
+  const emptyFinish = (strategy) => ({
+    chunks: [],
+    strategy,
+    terms,
+    analyzerVersion: useV2 ? ANALYZER_VERSION : "fts5-search-text",
+    activeKeywordBuild: useV2 ? KEYWORD_V2_BUILD_ID : undefined,
+  });
+
+  const queryText = String(query ?? "");
+  const hasHan = /[\p{Script=Han}]/u.test(queryText);
+  const hasLatin = /[A-Za-z]/.test(queryText);
   const normalizedPhrase = String(phrase ?? "").replace(/\s+/g, " ").trim();
-  if (normalizedPhrase) {
-    const phraseMatch = `"${normalizedPhrase.replace(/"/g, '""')}"`;
-    searchScopes(useV2, phraseMatch);
-    if (byId.size > 0) return finish("fts5_phrase", [normalizedPhrase]);
+  const queryClass =
+    typeof providedClass === "string" && providedClass
+      ? providedClass
+      : classifyQuery({
+          query: queryText,
+          phrase: normalizedPhrase || undefined,
+          searchTerms: terms,
+          exactTermsCount: Array.isArray(exactTerms) ? exactTerms.length : 0,
+          hasLatin,
+          hasHan,
+        });
 
-    const allMatch = terms.map(escapeFtsToken).join(" AND ");
-    if (allMatch) searchScopes(useV2, allMatch);
-    return finish("fts5_all", terms);
+  const ladder =
+    Array.isArray(providedLadder) && providedLadder.length > 0
+      ? providedLadder
+      : buildLexicalLadder({
+          queryClass,
+          phrase: normalizedPhrase || undefined,
+          terms,
+        });
+
+  const runAndStep = (stepTerms) => {
+    byId.clear();
+    const andTerms = termsForAndMatch(stepTerms);
+    const andRaw = useV2
+      ? buildV2MatchQuery(stepTerms, exactTerms, "AND")
+      : buildFtsMatchQueryHansHant(andTerms, { operator: "AND" });
+    const andMatch = useV2
+      ? wrapLanguageColumns(andRaw, languagePrimary) ?? andRaw
+      : andRaw;
+    if (!andMatch) return false;
+    searchScopes(useV2, andMatch);
+    return byId.size > 0;
+  };
+
+  const requiresContiguousPhrase =
+    Boolean(normalizedPhrase) &&
+    (queryClass === "zh_compound" ||
+      queryClass === "short_entity" ||
+      queryClass === "quoted_phrase");
+
+  const admitContiguousPhrase = () => {
+    if (!requiresContiguousPhrase || !normalizedPhrase) return;
+    const needle = normalizedPhrase.toLocaleLowerCase();
+    for (const [id, chunk] of [...byId.entries()]) {
+      const hay = String(chunk.content ?? "").toLocaleLowerCase();
+      if (!hay.includes(needle)) byId.delete(id);
+    }
+  };
+
+  for (const step of ladder) {
+    const mode = step?.mode;
+    if (mode === "phrase") {
+      const p = String(step.phrase ?? normalizedPhrase)
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!p) continue;
+      byId.clear();
+      const phraseMatch = `"${p.replace(/"/g, '""')}"`;
+      const scopedPhrase = useV2
+        ? wrapLanguageColumns(phraseMatch, languagePrimary) ?? phraseMatch
+        : phraseMatch;
+      searchScopes(useV2, scopedPhrase);
+      admitContiguousPhrase();
+      if (byId.size > 0) return finish("fts5_phrase", [p]);
+      continue;
+    }
+
+    if (mode === "all") {
+      const stepTerms =
+        Array.isArray(step.terms) && step.terms.length > 0 ? step.terms : terms;
+      if (runAndStep(stepTerms)) {
+        // 短复合：bigram AND 仍要求正文连续出现完整短语（「反向」+「代理」≠「反向代理」）
+        admitContiguousPhrase();
+        if (byId.size > 0) {
+          // 连续短语准入与 FTS phrase 同级：禁止 hybrid 再混入向量近邻（如「钠离子电池」→「电池」）
+          return finish(
+            requiresContiguousPhrase
+              ? "fts5_phrase"
+              : useV2
+                ? "fts5_v2"
+                : "fts5",
+            stepTerms,
+          );
+        }
+      }
+      continue;
+    }
+
+    if (mode === "minimum_match") {
+      const stepTerms =
+        Array.isArray(step.terms) && step.terms.length > 0 ? step.terms : terms;
+      const minimum = Math.max(
+        2,
+        Math.min(
+          stepTerms.length,
+          Number(step.minimum) || minimumFallback(stepTerms),
+        ),
+      );
+      byId.clear();
+      const admitted = runMinimumMatch({
+        useV2,
+        languagePrimary,
+        terms: stepTerms,
+        exactTerms,
+        minimum,
+        searchScopes,
+        byId,
+        library,
+        conversationFiles,
+        candidateLimit,
+        database,
+      });
+      if (admitted) {
+        return finish(
+          useV2 ? "fts5_v2" : "fts5",
+          stepTerms,
+          ["FTS_MINIMUM_MATCH"],
+        );
+      }
+      continue;
+    }
+
+    if (mode === "explicit_or") {
+      const stepTerms =
+        Array.isArray(step.terms) && step.terms.length > 0 ? step.terms : terms;
+      byId.clear();
+      const orRaw = useV2
+        ? buildV2MatchQuery(stepTerms, exactTerms, "OR")
+        : buildFtsMatchQueryHansHant(stepTerms, { operator: "OR" });
+      const orMatch = useV2
+        ? wrapLanguageColumns(orRaw, languagePrimary) ?? orRaw
+        : orRaw;
+      if (orMatch) {
+        searchScopes(useV2, orMatch);
+        if (byId.size > 0) {
+          return finish(useV2 ? "fts5_v2" : "fts5", stepTerms);
+        }
+      }
+    }
   }
 
-  const match = useV2
-    ? buildV2MatchQuery(terms, exactTerms)
-    : buildFtsMatchQuery(terms);
+  // 阶梯全部未命中：宁可空结果，禁止无条件 OR
+  return emptyFinish(useV2 ? "fts5_v2" : "fts5");
+}
 
-  if (!match) {
-    return {
-      chunks: [],
-      strategy: useV2 ? "fts5_v2" : "fts5",
-      terms: [],
-      analyzerVersion: useV2 ? ANALYZER_VERSION : "fts5-search-text",
-    };
+/**
+ * @param {string[]} terms
+ */
+function minimumFallback(terms) {
+  const zh = terms.filter((t) => /^[\p{Script=Han}]{2}$/u.test(t));
+  if (zh.length >= 2 && zh.length === terms.length) {
+    if (zh.length <= 3) return zh.length;
+    if (zh.length <= 6) return Math.ceil(zh.length * 0.75);
+    return Math.ceil(zh.length * 0.6);
+  }
+  const n = terms.length;
+  if (n <= 2) return n;
+  if (n <= 4) return Math.ceil(n * 0.75);
+  if (n <= 8) return Math.ceil(n * 0.6);
+  return Math.max(1, Math.ceil(n * 0.5));
+}
+
+/**
+ * 生成长度为 k 的组合（上限防止爆炸）
+ * @param {string[]} items
+ * @param {number} k
+ * @param {number} [limit]
+ */
+function combinations(items, k, limit = 48) {
+  /** @type {string[][]} */
+  const out = [];
+  const n = items.length;
+  if (k <= 0 || k > n) return out;
+  const idx = Array.from({ length: k }, (_, i) => i);
+  for (;;) {
+    out.push(idx.map((i) => items[i]));
+    if (out.length >= limit) break;
+    let pivot = k - 1;
+    while (pivot >= 0 && idx[pivot] === n - k + pivot) pivot -= 1;
+    if (pivot < 0) break;
+    idx[pivot] += 1;
+    for (let j = pivot + 1; j < k; j += 1) idx[j] = idx[j - 1] + 1;
+  }
+  return out;
+}
+
+/**
+ * minimum_should_match：优先 OR-of-ANDs；组合过多则 OR 候选 + coverage 准入。
+ */
+function runMinimumMatch({
+  useV2,
+  languagePrimary,
+  terms,
+  exactTerms,
+  minimum,
+  searchScopes,
+  byId,
+  library,
+  conversationFiles,
+  candidateLimit,
+  database,
+}) {
+  const andTerms = termsForAndMatch(terms);
+  const workTerms = andTerms.length > 0 ? andTerms : terms;
+  if (workTerms.length === 0 || minimum > workTerms.length) return false;
+
+  const subsets = combinations(workTerms, minimum, 48);
+  const comboBudgetOk =
+    subsets.length > 0 &&
+    subsets.length < 48 &&
+    // 未触达硬顶，或词数不大
+    (workTerms.length <= 8 || subsets.length < 48);
+
+  if (comboBudgetOk && subsets.length > 0 && subsets.length < 48) {
+    const parts = [];
+    for (const subset of subsets) {
+      const clause = buildFtsMatchQueryHansHant(subset, { operator: "AND" });
+      if (clause) parts.push(`(${clause})`);
+    }
+    if (parts.length > 0) {
+      let match = parts.join(" OR ");
+      if (useV2) {
+        // exact 字段仍 OR 进召回，再靠正文 coverage 过滤
+        const exactParts = [];
+        for (const exact of exactTerms) {
+          const value = String(exact.value ?? "").trim();
+          if (!value) continue;
+          exactParts.push(`exact_text : "${value.replace(/"/g, '""')}"`);
+        }
+        if (exactParts.length > 0) {
+          match = `(${exactParts.join(" OR ")}) OR (${match})`;
+        }
+        match = wrapLanguageColumns(match, languagePrimary) ?? match;
+      }
+      searchScopes(useV2, match);
+      filterByCoverage(byId, workTerms, minimum);
+      return byId.size > 0;
+    }
   }
 
-  if (library) {
-    searchLibrary(database, {
-      useV2,
-      match,
-      library,
-      candidateLimit,
-      byId,
-    });
-  }
+  // 回退：宽召回 + 应用层覆盖率准入（仍禁止把未过 coverage 的结果返回）
+  const orRaw = useV2
+    ? buildV2MatchQuery(terms, exactTerms, "OR")
+    : buildFtsMatchQueryHansHant(workTerms, { operator: "OR" });
+  const orMatch = useV2
+    ? wrapLanguageColumns(orRaw, languagePrimary) ?? orRaw
+    : orRaw;
+  if (!orMatch) return false;
+  searchScopes(useV2, orMatch);
 
-  if (conversationFiles) {
-    searchConversation(database, {
-      useV2,
-      match,
-      conversationFiles,
-      candidateLimit,
-      byId,
-    });
-  }
-
-  // v2 无结果且未强制 legacy 时回落 v1
+  // v2 空时尝试 legacy AND/OR 候选池，仍做 coverage
   if (useV2 && byId.size === 0 && isFtsReady(database)) {
-    const legacyMatch = buildFtsMatchQuery(terms);
+    const legacyMatch = buildFtsMatchQueryHansHant(workTerms, {
+      operator: "OR",
+    });
     if (legacyMatch) {
       if (library) {
         searchLibrary(database, {
@@ -287,33 +586,25 @@ export function searchKeywordIndex(database, options) {
           byId,
         });
       }
-      const chunks = [...byId.values()]
-        .sort((a, b) => b.score - a.score)
-        .slice(0, Math.max(1, Number(topK) || 8));
-      attachBlockLocators(database, chunks);
-      return {
-        chunks,
-        strategy: "fts5",
-        terms,
-        analyzerVersion: "fts5-search-text",
-        degradedReasons: ["LEGACY_INDEX_ACTIVE"],
-      };
     }
   }
 
-  const chunks = [...byId.values()]
-    .sort((a, b) => b.score - a.score)
-    .slice(0, Math.max(1, Number(topK) || 8));
+  filterByCoverage(byId, workTerms, minimum);
+  return byId.size > 0;
+}
 
-  attachBlockLocators(database, chunks);
-
-  return {
-    chunks,
-    strategy: useV2 ? "fts5_v2" : "fts5",
-    terms,
-    analyzerVersion: useV2 ? ANALYZER_VERSION : "fts5-search-text",
-    activeKeywordBuild: useV2 ? KEYWORD_V2_BUILD_ID : undefined,
-  };
+/**
+ * @param {Map<string, any>} byId
+ * @param {string[]} terms
+ * @param {number} minimum
+ */
+function filterByCoverage(byId, terms, minimum) {
+  for (const [id, chunk] of [...byId.entries()]) {
+    const content = String(chunk.content ?? "");
+    if (!passesCoverage(content, terms, minimum)) {
+      byId.delete(id);
+    }
+  }
 }
 
 function searchLibrary(database, { useV2, match, library, candidateLimit, byId }) {
@@ -494,7 +785,7 @@ function attachBlockLocators(database, chunks) {
       continue;
     }
     if (!Array.isArray(rows) || rows.length === 0) {
-      chunk.locatorHint = { kind: "page", page };
+      // 无 OCR block 时不伪造 page locator，留给 Context Builder 按文件类型推断（如 Markdown 标题路径）
       continue;
     }
     if (rows.some((row) => row.bboxDegraded)) {

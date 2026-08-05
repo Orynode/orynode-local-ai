@@ -215,7 +215,8 @@ export const PREVIEW_PDF_BUFFER_MAX_BYTES = 16 * 1024 * 1024;
 
 export const HTTP_TIMEOUT = {
   status: 1200,
-  knowledge: 5000,
+  /** 列表/状态：向量重建时 data-service 可能短暂忙，不宜过短 */
+  knowledge: 15_000,
   /** 原件预览 / 大文件字节拉取 */
   knowledgeFile: 2 * 60 * 1000,
   knowledgeImport: 2 * 60 * 1000,
@@ -225,3 +226,11 @@ export const HTTP_TIMEOUT = {
   settings: 3000,
   conversation: 3000,
 };
+
+/**
+ * 查询改写：未命中术语库时用本地 LLM，成功后写入 SQLite，下次跳过。
+ * ORYNODE_QUERY_REWRITE_LLM=0 关闭。
+ */
+export const QUERY_REWRITE_LLM_ENABLED =
+  process.env.ORYNODE_QUERY_REWRITE_LLM !== "0" &&
+  process.env.ORYNODE_QUERY_REWRITE_LLM !== "false";

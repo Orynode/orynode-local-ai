@@ -566,13 +566,16 @@ ORYNODE_SEMANTIC_SEARCH=1                        # 可选语义向量；包已�
 
 ## 低配 Mac 的内存策略
 
-项目为 8GB MacBook Air 设计，有三层内存控制策略：
+项目为 **8GB 统一内存 MacBook Air** 设计，有三层内存控制策略：
 
 | 策略 | 说明 |
 |------|------|
-| **零额外开销（默认）** | 无 Embedder，仅 keyword |
-| **按需加载** | 开启语义后才加载 ONNX；失败回退 keyword |
+| **零额外开销（默认）** | 无 Embedder，仅 FTS5 关键词；`knowledgeTier=auto` 常落在 lite |
+| **按需加载** | `ORYNODE_SEMANTIC_SEARCH=1` 后才加载 e5-small ONNX；失败 / Chat 占用回退 keyword |
+| **不加查询时 CE** | **正式档不接** Cross-Encoder / `bge-reranker`；Quality = 多查询 + **词法**重排。完整 CE Hybrid 见知识引擎文档附录「≥16GB 实验档」，**不是** 8GB 产品承诺 |
 | **不加 sqlite-vec 默认** | 避免原生扩展成为开源安装负担；个人/中小规模 `blob_scan` 足够，**大量数据瓶颈时再评估** |
+
+对话与向量争用：Chat active 时 data-service **推迟 embed**（`EMBED_DEFERRED_CHAT`）。真机冒烟清单见 [`docs/knowledge-engine/RAG_8GB_SMOKE_CHECKLIST_zh-CN.md`](knowledge-engine/RAG_8GB_SMOKE_CHECKLIST_zh-CN.md)。
 
 ---
 

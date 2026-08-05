@@ -318,6 +318,11 @@ export function useConversationFiles() {
               ? body.reason
               : "重建会话附件索引未完成",
           );
+        } else {
+          setError("");
+          if (body.status === "queued" && typeof body.reason === "string") {
+            setNotice(body.reason);
+          }
         }
         await refresh(conversationId);
         startStatusPolling(conversationId);

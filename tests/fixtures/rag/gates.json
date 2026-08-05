@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "description": "ML-P0/P2 门禁：keyword 为主。semanticStrategy 为 hybrid_rrf_lexical_stub（实验/延期：不下载真实 embedding；真实模型写入与召回评测另开里程碑）",
+  "description": "ML-P0/P2 + RU-016 门禁：keyword_multilingual_fields 为主；semanticStrategy=hybrid_rrf_lexical_stub（词袋 stub，不下载真实 embedding）；lexical_rerank 由单测覆盖",
   "primaryStrategy": "keyword_multilingual_fields",
   "thresholds": {
     "recallAt5Min": 0.75,

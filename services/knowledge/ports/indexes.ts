@@ -35,6 +35,14 @@ export interface IndexCandidate {
   processingBuildId?: string;
 }
 
+/** 词法阶梯一步（与 QueryPlanner lexicalLadder 对齐） */
+export type KeywordLexicalStep = {
+  mode: "phrase" | "all" | "minimum_match" | "explicit_or";
+  phrase?: string;
+  terms: string[];
+  minimum?: number;
+};
+
 export interface KeywordQuery {
   /** 原始或规划后的查询文本（legacy 兼容） */
   text: string;
@@ -42,6 +50,10 @@ export interface KeywordQuery {
   terms?: string[];
   /** 完整短语意图；FTS 必须先 phrase，未命中再 AND，不得直接 OR。 */
   phrase?: string;
+  /** 查询类别（短实体 / 中文短复合 / 一般…） */
+  queryClass?: string;
+  /** 有序词法阶梯；缺省由服务端按 QS 规则推导 */
+  lexicalLadder?: KeywordLexicalStep[];
   exactTerms?: Array<{ value: string; kind?: string; weight?: number }>;
   languagePrimary?: string;
 }
