@@ -54,7 +54,7 @@ test("精确查询不扩展：评测门禁", async () => {
   assert.equal(buildMultiQueries("如何安装本地服务").length >= 1, true);
 });
 
-test("资源压力时 Quality 降为 Balanced", async () => {
+test("资源压力时 Quality 降为 Lite（8GB 余量保护）", async () => {
   const { resolveKnowledgeTier } = await import(
     "../../services/knowledge/retrieval/profile"
   );
@@ -68,6 +68,6 @@ test("资源压力时 Quality 降为 Balanced", async () => {
     externalConnectors: { web: true, github: true },
     resourcePressure: "high",
   });
-  assert.equal(resolved.effectiveTier, "balanced");
+  assert.equal(resolved.effectiveTier, "lite");
   assert.ok(resolved.degradedReasons.includes("RESOURCE_PRESSURE"));
 });
