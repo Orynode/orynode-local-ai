@@ -91,9 +91,14 @@ export type {
 export {
   buildLexicalLadder,
   classifyQuery,
+  containsLatinStopword,
+  isLatinStopword,
   minimumShouldMatchForTermCount,
   minimumShouldMatchForZhBigrams,
 } from "./query/lexical-coverage";
+export {
+  contentTermsForLexicalMatch,
+} from "./query/latin-stopwords";
 
 export { analyzeLanguage } from "./query/language-analyzer";
 export { extractExactTerms } from "./query/exact-terms";

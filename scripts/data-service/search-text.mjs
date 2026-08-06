@@ -1,5 +1,7 @@
 /**
  * FTS5 用 search_text / MATCH 查询构造（与 services/knowledge/retrieval 算法对齐）
+ *
+ * 词抽取保持诚实：拉丁功能词不在本层硬删（形态信号与 general 阶梯清洗在 lexical-coverage）。
  */
 
 const MAX_SEARCH_TERMS = 40;
@@ -125,6 +127,7 @@ export function extractSearchTerms(query, maxTerms = MAX_SEARCH_TERMS) {
     push(tech, 100 + Math.min(tech.length, 20), "tech");
   }
 
+  // 非汉字字母数字词——诚实抽取，不做功能词硬删
   for (const match of normalized.matchAll(/[\p{L}\p{N}_]+/gu)) {
     const token = match[0];
     if (/[\p{Script=Han}]/u.test(token)) continue;

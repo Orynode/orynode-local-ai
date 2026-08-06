@@ -89,6 +89,13 @@ export const SEARCH_CONFIG = {
    */
   maxVectorScanChunks: 4_000,
   /**
+   * 向量扫描收窄的最小关键词命中文档数（强度门槛）。
+   * 弱命中（不足此数）保持原 scope 扫描，避免词法零重叠但语义相关的
+   * 文档被排除；minimum_match 宽松步骤的命中要求两倍于此数。
+   * 不收窄时成本仍由 maxVectorScanChunks 兜底。
+   */
+  vectorScanNarrowMinDocs: 3,
+  /**
    * 主机是否启用向量模型加载（data-service）。
    * 与 knowledgeTier 配合：档位请求语义 + 本开关为真 → 才走 hybrid。
    */

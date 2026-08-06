@@ -115,9 +115,10 @@ Configuration Layer
 
 **Key design principles**:
 
-1. **Data service stays thin**: `scripts/local-data-service.mjs` provides SQLite CRUD + file storage only, with no business logic
-2. **Service layer is pure TypeScript**: All smart logic (parsing, chunking, embedding, retrieval) lives in `services/`, reusable by both API routes and scripts
-3. **Interfaces first**: `Embedder`, `VectorStore`, `ModelRuntime` are all interfaces, making implementations swappable
+1. **Data service stays thin**: `scripts/local-data-service.mjs` owns SQLite CRUD, file storage, and **executing** FTS steps from a Planner-supplied `lexicalLadder`. It does **not** parse PDFs, chunk text, or invent retrieval policy (classification / ladder construction live only in `services/knowledge/query`)
+2. **Service layer is the only smart layer**: Parsing, chunking, Embedder, Retriever, and QueryPlanner live in `services/knowledge`
+3. **Interfaces first**: `Embedder`, `VectorStore`, `ModelRuntime` are interfaces so adapters stay swappable
+4. **Single retrieval entry**: `KnowledgeEngine.retrieve|search` (`resolveQueryRewrite` → `planQuery` → `HybridRetriever`); chat must not bypass the engine
 
 ---
 
@@ -132,7 +133,7 @@ Composer draftAttachments (next turn only; cleared after send)
       → scopeFromAttachments → RetrievalScope (library + conversationFiles)
       → POST /api/chat
           → normalizeRetrievalScope (compat: knowledgeScope)
-          → HybridRetriever.retrieve (sole retrieval entry)
+          → KnowledgeEngine.retrieve (rewrite → plan → HybridRetriever)
           → buildSystemPrompt + TurboFieldfare SSE
   → page.tsx renders Markdown incrementally
 ```
@@ -220,16 +221,17 @@ orynode-local-ai/
 │   ├── chat/prompt.ts                #   System prompt only
 │   ├── inference/                    #   Shared by chat + status
 │   ├── knowledge/                    #   Only smart layer
-│   │   ├── parser / chunker / embedder / indexer / status
-│   │   ├── vector-store.ts           #   insert + search (delete via CASCADE)
-│   │   ├── retriever.ts              #   Single retrieve(query, scope)
+│   │   ├── application/engine.ts     #   KnowledgeEngine entry
+│   │   ├── query/                    #   planner / rewrite / lexical-coverage / latin-stopwords
+│   │   ├── retrieval/                #   profile / highlight / honest term extraction
+│   │   ├── retriever.ts              #   HybridRetriever (executes; does not invent ladder)
 │   │   └── index.ts                  #   Wired exports only
 │   └── settings/
 │
 ├── config/defaults.ts
 ├── scripts/
 │   ├── start-local.mjs
-│   ├── local-data-service.mjs        # Thin storage :4318 (no retrieval)
+│   ├── local-data-service.mjs        # Thin storage :4318; FTS interprets lexicalLadder only
 │   └── ...
 ├── worker/                           # vinext local runtime (not cloud business)
 ├── db/README.md                      # Note: real DB is .orynode/data/orynode.db
@@ -367,13 +369,30 @@ Current implementation: **SQLite BLOB + JavaScript cosine (`blob_scan`)**. Produ
 
 ### 5. Retriever
 
-**File**: `services/knowledge/retriever.ts`
+**Files**: `services/knowledge/application/engine.ts`, `query/*`, `retriever.ts`
 
-- Unique entry: `retrieve(query, scope)`
-- Scope: `RetrievalScope` (`none` | `sources` with library + conversationFiles); compat maps old `knowledgeScope` / `knowledgeDocumentId`
-- UI derives `retrievalScope` at send time from the turn’s draft attachments via `scopeFromAttachments` (then persists a display snapshot on `message.attachments`); no auto-scope from older messages in the thread
-- Keyword always; hybrid when Embedder + vectors exist
-- RRF uses rank + chunk id
+- Production entry: `KnowledgeEngine.retrieve` (`resolveQueryRewrite` then `planQuery`)
+- `HybridRetriever` runs FTS / hybrid; **lexical ladder is supplied via `keywordQuery.lexicalLadder`** — the index must not invent policy
+- `keywordQuery.terms` (`plan.searchTerms`) is the **honest** term list (highlight / diagnostics); **MATCH uses each ladder step’s `terms`**
+- Scope: `RetrievalScope`; UI derives it from the turn’s draft attachments — no auto-scope from older messages
+- Keyword always; hybrid when Embedder + vectors exist and the tier allows; **phrase hits may short-circuit vectors**
+- Degraded reasons come only from capabilities/profile; phrase short-circuit must not falsely mark `VECTOR_INDEX_NOT_READY`
+
+**Lexical recall contract** (`services/knowledge/query` is the only policy source):
+
+| Artifact | Owner | Meaning |
+|----------|--------|---------|
+| `searchTerms` | `extractSearchTerms` (+ exact merge) | Honest term list; Latin function words kept |
+| `phrase` / `queryClass` | `inferPhraseIntent` + `classifyQuery` | Morphological class (short entity / technical / NL) |
+| `lexicalLadder` | `buildLexicalLadder` | Executable steps: `phrase` → `all` → `minimum_should_match` (no default full-OR) |
+
+Contributor constraints:
+
+- Latin function words (`query/latin-stopwords.ts`) are only (1) an NL morphology signal and (2) MATCH-term cleaning for **`general`** ladder steps.
+- Do **not** hard-delete function words inside `extractSearchTerms` / `scripts/data-service/search-text.mjs` (mirrors Chinese low-info bigrams: demote, don’t delete at extract).
+- `scripts/data-service/lexical-coverage.mjs` is a **parity mirror**, not a second source of truth.
+- Filename detection must look like a path/basename (no whitespace, or contains `/` `\`); do not treat trailing `.js` in an English question as a filename.
+- Content words that collide with the function list (e.g. industrial `can bus`) may drop from `general` MATCH; use quoted phrases to force retention.
 
 ## Extension Interfaces
 
@@ -498,7 +517,7 @@ ORYNODE_DATA_URL=http://127.0.0.1:4318
 | Zero overhead default | FTS only; no embedder |
 | Lazy load | `ORYNODE_SEMANTIC_SEARCH=1`; status does **not** warm-load |
 | Defer embed | `EMBED_DEFERRED_CHAT` / `EMBED_DEFERRED_HEAVY` |
-| blob_scan | Narrow to FTS-hit docs; `maxVectorScanChunks` soft cap |
+| blob_scan | Narrow to FTS-hit docs only when hits are strong (≥ `vectorScanNarrowMinDocs` docs; doubled for minimum_match weak hits); weak hits keep the original scope, cost bounded by `maxVectorScanChunks` soft cap |
 | OCR over limit | Truncate searchable pages (`OCR_PAGE_TRUNCATED`), do not fail whole doc |
 | No query-time CE | Official quality = multi-query + lexical rerank |
 

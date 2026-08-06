@@ -21,6 +21,21 @@ test("extractSearchTerms: 忽略过短 token", () => {
   assert.deepEqual(terms, []);
 });
 
+test("extractSearchTerms: 诚实抽取，拉丁功能词仍保留在词表（策略在 query 层）", () => {
+  const terms = extractSearchTerms("how does the reverse proxy work");
+  for (const stop of ["how", "does", "the"]) {
+    assert.ok(terms.includes(stop), `function word ${stop} should remain in extract`);
+  }
+  for (const content of ["reverse", "proxy", "work"]) {
+    assert.ok(terms.includes(content), `content term ${content} missing`);
+  }
+  const tech = extractSearchTerms("how to configure access-token in node.js");
+  assert.ok(tech.includes("node.js"), `terms=${tech.join(",")}`);
+  assert.ok(tech.includes("access-token"), `terms=${tech.join(",")}`);
+  assert.ok(tech.includes("configure"), `terms=${tech.join(",")}`);
+  assert.ok(tech.includes("how"), `terms=${tech.join(",")}`);
+});
+
 test("extractTechnicalTerms: 保留 C++ / C# / Node.js", () => {
   const terms = extractTechnicalTerms("用 C++ 和 C# 配置 Node.js access-token");
   assert.ok(terms.includes("c++"));

@@ -34,7 +34,10 @@ export function detectQueryKind(query: string): QueryKind {
   }
 
   const bare = trimmed.replace(/^["'`「]|["'`」]$/g, "");
-  if (FILE_EXT.test(bare) || /[/\\]/.test(bare) && FILE_EXT.test(bare)) {
+  // 扩展名判定必须像「文件名/路径」，禁止「how to install node.js」因句尾 .js 误判
+  const looksLikeFilename =
+    FILE_EXT.test(bare) && (!/\s/.test(bare) || /[/\\]/.test(bare));
+  if (looksLikeFilename) {
     return "filename";
   }
 

@@ -10,6 +10,7 @@ import { extractSearchTerms } from "../retrieval/keyword";
 import { buildMultiQueries } from "../retrieval/multi-query";
 import { shouldExpandQuery } from "../retrieval/query-type";
 import { extractExactTerms, type ExactTerm } from "./exact-terms";
+import { isLatinStopword } from "./latin-stopwords";
 import {
   analyzeLanguage,
   type LanguageProfile,
@@ -207,8 +208,10 @@ export function planQuery(
 
 /**
  * 引号短语始终保留。
- * 未加引号：2–6 拉丁词 → 短实体 phrase；单一汉字串 2–6 → 中文短复合 phrase。
+ * 未加引号：2–6 拉丁词且不含停用词 → 短实体 phrase；单一汉字串 2–6 → 中文短复合 phrase。
+ * 含功能词的拉丁查询是自然语言问句，不进 short_entity，留给 general 阶梯（all → minimum_match）。
  * 长自然语言 / 多段汉字不进 short phrase。
+ * 契约见 docs/ARCHITECTURE_zh-CN.md「词法召回契约」。
  */
 export function inferPhraseIntent(
   query: string,
@@ -231,6 +234,8 @@ export function inferPhraseIntent(
   }
   const words = trimmed.match(/[\p{L}\p{N}][\p{L}\p{N}._+-]*/gu) ?? [];
   if (words.length < 2 || words.length > 6) return undefined;
+  // 任一功能词（what/how/is/the…）即为自然语言，非实体短语
+  if (words.some((word) => isLatinStopword(word))) return undefined;
   return words.join(" ");
 }
 

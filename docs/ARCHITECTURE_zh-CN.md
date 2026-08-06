@@ -113,8 +113,8 @@ API 网关层 (Gateway)
 
 **关键设计原则**：
 
-1. **数据服务保持薄**：`scripts/local-data-service.mjs` 只负责 SQLite CRUD 和文件存储，**不解析 PDF、不切块、不检索**
-2. **服务层是唯一智能**：解析 / 分块 / Embedder / Retriever 只存在于 `services/knowledge`
+1. **数据服务保持薄**：`scripts/local-data-service.mjs` 负责 SQLite CRUD、文件存储，以及 **解释** Planner 下发的 FTS 阶梯（MATCH 执行）。**不解析 PDF、不切块、不发明检索策略**（词类判定 / 阶梯构造只在 `services/knowledge/query`）
+2. **服务层是唯一智能**：解析 / 分块 / Embedder / Retriever / QueryPlanner 只存在于 `services/knowledge`
 3. **Embedder 可缺省**：默认无向量模型；Keyword 是 Retriever 策略，不是假 Embedder
 4. **检索唯一入口**：`KnowledgeEngine.retrieve|search`（内部 `resolveQueryRewrite` → `planQuery` → `HybridRetriever`）；chat 不得旁路查库
 5. **不做 sqlite-vec 硬依赖 / 默认路径**：向量以 BLOB 存 SQLite，JS 余弦扫描即可；**仅当资料量很大、评测证明扫描成为瓶颈时**再考虑 ANN（如 sqlite-vec adapter），不作开箱默认
@@ -237,16 +237,16 @@ orynode-local-ai/
 │   ├── agent/                        #   受控知识工具与 Agent space
 │   ├── knowledge/                    #   知识库（唯一智能层）
 │   │   ├── application/engine.ts     #     KnowledgeEngine 入口
-│   │   ├── query/                    #     planner / resolve-rewrite / lexical-coverage
-│   │   ├── retrieval/                #     profile / highlight / degraded-labels
-│   │   ├── retriever.ts              #     HybridRetriever
+│   │   ├── query/                    #     planner / rewrite / lexical-coverage / latin-stopwords
+│   │   ├── retrieval/                #     profile / highlight / keyword 抽取（诚实词表）
+│   │   ├── retriever.ts              #     HybridRetriever（执行，不发明阶梯）
 │   │   └── index.ts                  #     对外导出（仅接线符号）
 │   └── settings/                     #   运行时设置
 │
 ├── config/defaults.ts                # 集中配置
 ├── scripts/
 │   ├── start-local.mjs
-│   ├── local-data-service.mjs        # 薄存储 :4318（无检索逻辑）
+│   ├── local-data-service.mjs        # 薄存储 :4318；FTS 只解释下发的 lexicalLadder
 │   └── ...
 ├── worker/                           # vinext 本地运行时入口（非云业务）
 ├── db/README.md                      # 说明：业务库在 .orynode/data/orynode.db
@@ -307,10 +307,10 @@ orynode-local-ai/
 |------|------|
 | `application/engine` | KnowledgeEngine：search / retrieve / buildContext |
 | `query/resolve-rewrite` | 术语库 → LLM 晋升；唯一开放世界同义入口 |
-| `query/planner` + `lexical-coverage` | 只消费注入 rewrite；phrase→all→minimum_should_match |
+| `query/planner` + `lexical-coverage` + `latin-stopwords` | 只消费注入 rewrite；形态分类 + 阶梯；功能词不作抽取硬删 |
 | `ingest` / `processing/*` | 摄取；PDF OCR 路由；ProcessingBuild |
 | `formats` / `parser` / `chunker` | 种类识别、解析、标题感知分块 |
-| `retrieval/*` + `retriever` | FTS / hybrid / tier / highlight / diagnostics |
+| `retrieval/*` + `retriever` | 诚实词抽取 / FTS·hybrid 执行 / tier / highlight / diagnostics |
 | `embedder` + `vector-store` | 可选语义；BLOB / vector_entries |
 | `connectors/*` | Web / GitHub + SSRF |
 | `context/*` | token packing、citation 定位 |
@@ -423,7 +423,8 @@ const chunks = chunker.chunkDocument(doc.pages);
 **文件**: `services/knowledge/application/engine.ts`、`query/*`、`retriever.ts`
 
 - 生产编排入口：`KnowledgeEngine.retrieve`（先 `resolveQueryRewrite` 再 `planQuery`）
-- `HybridRetriever.retrieve(query, scope, options)` 执行 FTS / hybrid；词法阶梯由 `keywordQuery.lexicalLadder` 下发
+- `HybridRetriever.retrieve(query, scope, options)` 执行 FTS / hybrid；**词法阶梯由 `keywordQuery.lexicalLadder` 下发**，Index 不得自行改写策略
+- `keywordQuery.terms`（`plan.searchTerms`）是诚实抽取结果，供诊断 / 高亮；**MATCH 以 ladder 各步的 `terms` 为准**
 - scope：`RetrievalScope`；前端由本轮附件推导，**不会**从历史消息自动拼 scope
 - keyword 始终可用；向量索引就绪且档位允许时走 hybrid + RRF；**phrase 已命中可短路向量**
 - 降级原因只来自 capabilities/profile；phrase 短路不得误标 `VECTOR_INDEX_NOT_READY`
@@ -454,10 +455,23 @@ const response = await engine.retrieve({
 
 开启 `ORYNODE_SEMANTIC_SEARCH` 后，对旧文档执行 `POST /api/knowledge/reindex` 批量补齐。
 
-**词法召回策略**（QS / 闭环）：
+**词法召回契约**（`services/knowledge/query` 为唯一策略源）：
 
-- 阶梯：`phrase` → `all` → `minimum_should_match`（禁止默认全词 OR）
-- 同义：完整短语 variant；高亮与 exclude 共用 `hansHantVariants` / `containsTerm`
+| 产物 | 所有者 | 含义 |
+|------|--------|------|
+| `searchTerms` | `extractSearchTerms`（retrieval）+ exact 合并 | **诚实词表**：保留拉丁功能词；供高亮 / 诊断 / 多消费者 |
+| `phrase` / `queryClass` | `inferPhraseIntent` + `classifyQuery` | **形态分类**：短实体 / 技术式 / 自然语言问句 |
+| `lexicalLadder` | `buildLexicalLadder` | **可执行阶梯**：`phrase` → `all` → `minimum_should_match`（禁止默认全词 OR） |
+
+分层约束（贡献者勿再偏移）：
+
+- **拉丁功能词**（`query/latin-stopwords.ts`）只做两件事：① 形态信号（自然语言不进 `short_entity` / strict `technical`）；② `general` 阶梯的 MATCH 词清洗。  
+- **禁止**在 `extractSearchTerms` / `scripts/data-service/search-text.mjs` 硬删功能词（与中文「低信息 bigram 只降权不硬删」对称）。  
+- data-service 的 `lexical-coverage.mjs` 是 **parity 镜像**，不是第二套 SoT；改策略先改 TS，再对齐 JS。  
+- 文件名判定（`detectQueryKind`）须像路径/单名（无空白或含 `/` `\\`）；**禁止**因句尾 `.js` 把 `how to install node.js` 整句当成 filename。  
+- 功能词作内容词时（如工业术语 `can bus`）可能被 general 阶梯丢掉；需要整词保留时用引号短语。
+
+同义与高亮：完整短语 variant；高亮与 exclude 共用 `hansHantVariants` / `containsTerm`。
 
 ---
 
@@ -620,7 +634,7 @@ Host classifyHostMemory
 | **按需加载** | `ORYNODE_SEMANTIC_SEARCH=1` 后才加载 e5；status **不**预热加载 |
 | **Chat / 重活 defer embed** | `chatActive` → `EMBED_DEFERRED_CHAT`；`heavyKind=ocr|embedding` → `EMBED_DEFERRED_HEAVY` |
 | **e5 生命周期** | 空闲卸载（默认 90s，`ORYNODE_EMBED_IDLE_UNLOAD_MS`）；low 主机对话开始卸载 |
-| **blob_scan 收窄** | hybrid 有 FTS 命中时只扫命中文档；`maxVectorScanChunks` 软顶 |
+| **blob_scan 收窄** | hybrid 的 FTS 命中足够强（≥ `vectorScanNarrowMinDocs` 文档；minimum_match 弱命中翻倍）才只扫命中文档；弱命中保持原 scope，成本由 `maxVectorScanChunks` 软顶兜底 |
 | **OCR 超页截断** | 前 `maxOcrPagesPerDocument` 页入检索（`OCR_PAGE_TRUNCATED`），不再整本失败 |
 | **不加查询时 CE** | Quality = 多查询 + **词法**重排 |
 | **不加 sqlite-vec 默认** | 大量数据且评测证明瓶颈后再评估 |

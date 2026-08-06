@@ -156,6 +156,9 @@ test("resolveRetrievalProfile: 主机 memoryTier 封顶", () => {
 test("detectQueryKind: 精确类查询", () => {
   assert.equal(detectQueryKind('"安装步骤"'), "exact_phrase");
   assert.equal(detectQueryKind("手册.pdf"), "filename");
+  assert.equal(detectQueryKind("src/app.js"), "filename");
+  assert.equal(detectQueryKind("node.js"), "filename");
+  assert.equal(detectQueryKind("how to install node.js"), "general");
   assert.equal(detectQueryKind("ERR_CONNECTION_REFUSED"), "error_code");
   assert.equal(detectQueryKind("KnowledgeEngine.retrieve()"), "symbol");
   assert.equal(detectQueryKind("如何安装本地知识引擎"), "general");

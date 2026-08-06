@@ -89,6 +89,65 @@ test("planQuery: 短英文术语保留 phrase 意图", () => {
   );
 });
 
+test("planQuery: 含停用词的英文问句不进 short_entity；searchTerms 诚实，ladder 去功能词", () => {
+  const plan = planQuery("how does reverse proxy work");
+  assert.notEqual(plan.queryClass, "short_entity");
+  assert.equal(plan.phrase, undefined);
+  // 抽取层诚实保留功能词
+  assert.ok(plan.searchTerms.includes("how"));
+  assert.ok(plan.searchTerms.includes("reverse"));
+  assert.ok(plan.searchTerms.includes("proxy"));
+  // general 阶梯匹配词清洗功能词
+  for (const step of plan.lexicalLadder) {
+    if (step.mode === "phrase") continue;
+    for (const stop of ["how", "does"]) {
+      assert.equal(
+        step.terms.includes(stop),
+        false,
+        `stopword ${stop} leaked into ladder mode=${step.mode}`,
+      );
+    }
+  }
+});
+
+test("planQuery: 较长英文自然语言问句获得 minimum_match 回退", () => {
+  const plan = planQuery("why is the vector index not rebuilt automatically");
+  assert.equal(plan.queryClass, "general");
+  assert.equal(plan.phrase, undefined);
+  assert.ok(
+    plan.lexicalLadder.some((s) => s.mode === "minimum_match"),
+    `ladder=${JSON.stringify(plan.lexicalLadder)}`,
+  );
+  const minimum = plan.lexicalLadder.find((s) => s.mode === "minimum_match");
+  assert.ok(minimum && (minimum.minimum ?? 0) >= 2);
+  // 停用词不得进入阶梯匹配词表（searchTerms 可保留）
+  for (const step of plan.lexicalLadder) {
+    if (step.mode === "phrase") continue;
+    for (const stop of ["why", "is", "the", "not"]) {
+      assert.equal(step.terms.includes(stop), false);
+    }
+  }
+});
+
+test("planQuery: 含停用词的问句带技术词时不进 strict technical", () => {
+  const plan = planQuery("how to install node.js");
+  assert.equal(plan.queryClass, "general");
+  // 句尾 .js 不得把整句误判为 filename exact
+  assert.equal(
+    plan.exactTerms.some((t) => t.value === "how to install node.js"),
+    false,
+  );
+  assert.ok(plan.searchTerms.includes("node.js"));
+  // 抽取诚实：功能词可在 searchTerms；ladder 清洗
+  assert.ok(plan.searchTerms.includes("how"));
+  for (const step of plan.lexicalLadder) {
+    if (step.mode === "phrase") continue;
+    assert.equal(step.terms.includes("how"), false);
+    assert.equal(step.terms.includes("to"), false);
+    assert.equal(step.terms.includes("how to install node.js"), false);
+  }
+});
+
 test("planQuery: 中文短复合进入 phrase，且阶梯不含任意词放宽", () => {
   const plan = planQuery("反向代理");
   assert.equal(plan.phrase, "反向代理");

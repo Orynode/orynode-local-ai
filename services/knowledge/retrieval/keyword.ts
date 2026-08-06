@@ -12,7 +12,7 @@ const SINGLE_CHAR_ALLOW = new Set(["c", "r"]);
 
 /**
  * 低信息中文 bigram：只降权，不从精确短语中删除。
- * 停用词不得在 exact phrase 路径直接剔除。
+ * 拉丁功能词不在本层硬删——形态信号与 general 阶梯清洗属 query 层（latin-stopwords）。
  */
 const ZH_LOW_INFO_BIGRAMS = new Set([
   "什么",
@@ -134,7 +134,7 @@ export function extractSearchTerms(
     push(tech, 100 + Math.min(tech.length, 20), "tech");
   }
 
-  // 2) 非汉字字母数字词（Unicode Letter，排除 Han）
+  // 2) 非汉字字母数字词（Unicode Letter，排除 Han）——诚实抽取，不做功能词硬删
   for (const match of normalized.matchAll(/[\p{L}\p{N}_]+/gu)) {
     const token = match[0];
     if (/[\p{Script=Han}]/u.test(token)) continue;

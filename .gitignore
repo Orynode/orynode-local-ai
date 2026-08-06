@@ -48,7 +48,9 @@ tsconfig.tsbuildinfo
 
 # Knowledge Engine 过程文档（设计/整改/核对），不纳入对外仓库
 /docs/knowledge-engine/
+docs/deck/
 
 # native helpers (track Sources + Package.swift; ignore SPM build output)
 native/**/.build/
 native/**/.swiftpm/
+.cursor/settings.json

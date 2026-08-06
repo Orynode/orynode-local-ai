@@ -256,7 +256,12 @@ export class HybridRetriever implements Retriever {
     query: string | KeywordQuery,
     scope: Exclude<RetrievalScope, { mode: "none" }>,
     topK: number,
-  ): Promise<{ available: boolean; chunks: ChunkRow[]; strategy?: string }> {
+  ): Promise<{
+    available: boolean;
+    chunks: ChunkRow[];
+    strategy?: string;
+    degradedReasons?: string[];
+  }> {
     // 无 library 仅有会话附件时，不要传 library:all
     const opts = scopeToKeywordOptions(scope, topK);
     if (!scope.library && scope.conversationFiles) {
@@ -268,6 +273,7 @@ export class HybridRetriever implements Retriever {
       available: detailed.available,
       chunks: detailed.candidates.map(candidateToChunk),
       strategy: detailed.strategy,
+      degradedReasons: detailed.degradedReasons,
     };
   }
 
@@ -349,7 +355,12 @@ export class HybridRetriever implements Retriever {
   private async hybridSearch(
     query: string,
     scope: Exclude<RetrievalScope, { mode: "none" }>,
-    fts: { available: boolean; chunks: ChunkRow[]; strategy?: string },
+    fts: {
+      available: boolean;
+      chunks: ChunkRow[];
+      strategy?: string;
+      degradedReasons?: string[];
+    },
     embedder: Embedder,
     topK: number,
   ): Promise<RetrievalResult> {
@@ -393,8 +404,15 @@ export class HybridRetriever implements Retriever {
             .map((id) => byId.get(id)?.documentId)
             .filter((id): id is string => Boolean(id))
         : [];
-    const scanPlan = planVectorScanScope(scope, keywordDocIds);
-    // 有关键词命中时只扫命中文档的向量；无命中则保持原 scope 做纯向量兜底
+    // 命中强度：仅来自 minimum_match 宽松步骤的命中视为弱证据，收窄门槛翻倍；
+    // 弱命中不收窄，语义相关但词法零重叠的文档仍可被向量扫描召回
+    const minimumMatchOnly = (fts.degradedReasons ?? []).includes(
+      "FTS_MINIMUM_MATCH",
+    );
+    const scanPlan = planVectorScanScope(scope, keywordDocIds, {
+      minimumMatchOnly,
+    });
+    // 命中足够强时只扫命中文档的向量；弱命中/无命中保持原 scope
     const semanticResults = await this.vectorIndex.search(queryVector, {
       topK: topK * 2,
       scope: scanPlan.scope,
