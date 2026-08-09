@@ -633,6 +633,9 @@ function searchLibrary(database, { useV2, match, library, candidateLimit, byId }
       chunks.page_number AS pageNumber,
       chunks.position AS position,
       chunks.content AS content,
+      chunks.start_line AS startLine,
+      chunks.end_line AS endLine,
+      chunks.heading_path AS headingPath,
       ${rankExpr} AS rank
     FROM ${fts}
     INNER JOIN knowledge_chunks AS chunks
@@ -661,6 +664,9 @@ function searchLibrary(database, { useV2, match, library, candidateLimit, byId }
       pageNumber: row.pageNumber,
       position: row.position,
       content: row.content,
+      startLine: row.startLine ?? undefined,
+      endLine: row.endLine ?? undefined,
+      headingPath: safeParseStringArray(row.headingPath),
       source: "library",
       score: typeof row.rank === "number" ? -row.rank : 0,
     });
@@ -695,6 +701,9 @@ function searchConversation(
       chunks.page_number AS pageNumber,
       chunks.position AS position,
       chunks.content AS content,
+      chunks.start_line AS startLine,
+      chunks.end_line AS endLine,
+      chunks.heading_path AS headingPath,
       ${rankExpr} AS rank
     FROM ${fts}
     INNER JOIN conversation_file_chunks AS chunks
@@ -718,6 +727,9 @@ function searchConversation(
       pageNumber: row.pageNumber,
       position: row.position,
       content: row.content,
+      startLine: row.startLine ?? undefined,
+      endLine: row.endLine ?? undefined,
+      headingPath: safeParseStringArray(row.headingPath),
       source: "conversation_file",
       score: typeof row.rank === "number" ? -row.rank : 0,
     });
@@ -738,7 +750,16 @@ function attachBlockLocators(database, chunks) {
       SELECT
         b.page_number AS pageNumber,
         b.bbox_json AS bboxJson,
-        r.bbox_degraded AS bboxDegraded
+        b.text AS blockText,
+        r.start_offset AS startOffset,
+        r.end_offset AS endOffset,
+        r.bbox_degraded AS bboxDegraded,
+        (
+          SELECT COUNT(*)
+          FROM document_blocks page_blocks
+          WHERE page_blocks.processing_build_id = b.processing_build_id
+            AND page_blocks.page_number = b.page_number
+        ) AS pageBlockCount
       FROM chunk_block_refs r
       JOIN document_blocks b ON b.id = r.block_id
       WHERE r.namespace = ? AND r.chunk_id = ?
@@ -799,7 +820,23 @@ function attachBlockLocators(database, chunks) {
     const refs = rows.map((row) => ({
       pageNumber: row.pageNumber,
       bbox: row.bboxJson ? safeParseBbox(row.bboxJson) : null,
+      blockText: row.blockText,
+      startOffset: row.startOffset,
+      endOffset: row.endOffset,
+      pageBlockCount: row.pageBlockCount,
     }));
+    // ref offset 是 chunk 内偏移，不可直接冒充 PDF 页内偏移。仅当该页只有一个
+    // block，且 chunk 正文能在完整 block 文本中精确定位时，才生成页内 offset。
+    const solePageBlock = refs.find(
+      (r) => r.pageNumber === page && Number(r.pageBlockCount) === 1,
+    );
+    if (solePageBlock && typeof solePageBlock.blockText === "string") {
+      const pageStart = solePageBlock.blockText.indexOf(String(chunk.content ?? ""));
+      if (pageStart >= 0) {
+        chunk.startOffset = pageStart;
+        chunk.endOffset = pageStart + String(chunk.content ?? "").length;
+      }
+    }
     const withBbox = refs.filter(
       (r) =>
         r.pageNumber === page &&
@@ -808,7 +845,16 @@ function attachBlockLocators(database, chunks) {
         Number.isFinite(r.bbox.y),
     );
     if (withBbox.length === 0) {
-      chunk.locatorHint = { kind: "page", page };
+      chunk.locatorHint = {
+        kind: "page",
+        page,
+        ...(chunk.startOffset != null
+          ? {
+              startOffset: chunk.startOffset,
+              endOffset: chunk.endOffset,
+            }
+          : {}),
+      };
       continue;
     }
 
@@ -819,6 +865,12 @@ function attachBlockLocators(database, chunks) {
         kind: "page",
         page,
         bbox: chunk.bbox,
+        ...(chunk.startOffset != null
+          ? {
+              startOffset: chunk.startOffset,
+              endOffset: chunk.endOffset,
+            }
+          : {}),
       };
       continue;
     }
@@ -849,6 +901,12 @@ function attachBlockLocators(database, chunks) {
         kind: "page",
         page,
         bbox: chunk.bbox,
+        ...(chunk.startOffset != null
+          ? {
+              startOffset: chunk.startOffset,
+              endOffset: chunk.endOffset,
+            }
+          : {}),
       };
     }
   }
@@ -869,4 +927,16 @@ function safeParseBbox(json) {
     // ignore
   }
   return null;
+}
+
+function safeParseStringArray(json) {
+  if (typeof json !== "string" || !json) return undefined;
+  try {
+    const value = JSON.parse(json);
+    return Array.isArray(value) && value.every((item) => typeof item === "string")
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }

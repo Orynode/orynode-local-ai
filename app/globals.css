@@ -3180,6 +3180,36 @@ button {
   word-break: break-word;
 }
 
+.doc-preview-text-highlight {
+  background: rgba(250, 204, 21, 0.3);
+  color: inherit;
+  border-radius: 2px;
+  box-shadow: inset 3px 0 0 rgba(202, 138, 4, 0.75);
+}
+
+.doc-preview-text-line {
+  display: grid;
+  grid-template-columns: 4.5em minmax(0, 1fr);
+  min-height: 1.55em;
+}
+
+.doc-preview-line-number {
+  position: sticky;
+  left: -16px;
+  padding-right: 12px;
+  color: var(--muted);
+  background: #f8fafc;
+  border-right: 1px solid var(--line);
+  text-align: right;
+  user-select: none;
+}
+
+.doc-preview-line-content {
+  min-width: 0;
+  padding-left: 12px;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 720px) {
   .doc-preview-panel {
     width: 100%;

@@ -81,6 +81,25 @@ export interface RetrievalDiagnostics {
   embeddingArtifactRole?: string;
   /** none | terminology | llm — 本轮 Query Rewrite 来源（非降级） */
   rewriteSource?: "none" | "terminology" | "llm";
+  /** 本轮知识访问的业务语义，而不是底层索引实现。 */
+  accessMode?:
+    | "library_search"
+    | "document_qa"
+    | "document_read"
+    | "multi_document";
+  fallbackUsed?: "scoped_read" | null;
+  contextProvided?: boolean;
+  outcome?:
+    | "search_only"
+    | "no_scope"
+    | "context_packed"
+    | "empty_hits"
+    | "retrieval_failed";
+  scopeSummary?: {
+    libraryMode: "none" | "all" | "documents";
+    documentCount: number;
+    conversationFileCount: number;
+  };
 }
 
 export interface RetrievalRequest {

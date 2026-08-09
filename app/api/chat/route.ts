@@ -26,7 +26,9 @@ import {
 import {
   markChatResourceActive,
   markChatResourceIdle,
+  releaseEmbeddingBeforeGeneration,
 } from "../../../services/knowledge/resource";
+import { resolveQueryRewrite } from "../../../services/knowledge/query/resolve-rewrite";
 import {
   createRuntimeServices,
   requireLanAccess,
@@ -79,7 +81,6 @@ export async function POST(request: Request) {
         ? body.conversationId.trim()
         : null;
 
-    const engine = createKnowledgeEngine();
     let knowledgeTier =
       body.knowledgeTier === "auto" ||
       body.knowledgeTier === "balanced" ||
@@ -93,6 +94,11 @@ export async function POST(request: Request) {
       );
       knowledgeTier = await readKnowledgeTierSetting();
     }
+    // Chat 检索阶段禁止额外调用生成模型做 query rewrite，确保 embedding
+    // 与 Gemma 不会因改写任务同时驻留。
+    const engine = createKnowledgeEngine({
+      resolveRewrite: (query) => resolveQueryRewrite(query, { skipLlm: true }),
+    });
 
     const history = (body.messages as ChatMessage[]).map((message) => ({
       role: message.role,
@@ -113,35 +119,22 @@ export async function POST(request: Request) {
       budget.historyBudgetTokens,
     );
 
-    // 必须先于 RAG：抬升 resourcePressure → 检索强制 lite，并（低配）卸载 e5，
-    // 避免对话路径上 hybrid 与 Gemma 争统一内存。
-    const chatResourceToken = await markChatResourceActive(HTTP_TIMEOUT.chat);
+    const built = await buildChatKnowledgeContext(engine, {
+      messages: body.messages,
+      retrievalScope: body.retrievalScope,
+      knowledgeScope: body.knowledgeScope,
+      knowledgeDocumentId: body.knowledgeDocumentId,
+      conversationId,
+      topK: SEARCH_CONFIG.topK,
+      knowledgeTier,
+      knowledgeBudgetTokens: budget.knowledgeBudgetTokens,
+    });
+    const { knowledgePrompt, retrieval, context } = built;
 
-    let knowledgePrompt: string;
-    let retrieval: Awaited<
-      ReturnType<typeof buildChatKnowledgeContext>
-    >["retrieval"];
-    let context: Awaited<
-      ReturnType<typeof buildChatKnowledgeContext>
-    >["context"];
-    try {
-      const built = await buildChatKnowledgeContext(engine, {
-        messages: body.messages,
-        retrievalScope: body.retrievalScope,
-        knowledgeScope: body.knowledgeScope,
-        knowledgeDocumentId: body.knowledgeDocumentId,
-        conversationId,
-        topK: SEARCH_CONFIG.topK,
-        knowledgeTier,
-        knowledgeBudgetTokens: budget.knowledgeBudgetTokens,
-      });
-      knowledgePrompt = built.knowledgePrompt;
-      retrieval = built.retrieval;
-      context = built.context;
-    } catch (error) {
-      await markChatResourceIdle(chatResourceToken);
-      throw error;
-    }
+    // 阶段化调度：先在空闲资源态完成混合检索，再释放 embedding，
+    // 最后标记生成阶段，让 Gemma 与后台重任务互斥。
+    await releaseEmbeddingBeforeGeneration();
+    const chatResourceToken = await markChatResourceActive(HTTP_TIMEOUT.chat);
 
     const systemContent = buildSystemPrompt(knowledgePrompt);
 

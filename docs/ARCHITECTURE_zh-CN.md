@@ -282,7 +282,7 @@ orynode-local-ai/
 | OCR（预留） | PP-OCR mobile + ONNX artifact 元数据 | Windows stub，`OCR_UNAVAILABLE` |
 | PDF 文本 | pdfjs-dist | 原生文本页 |
 | 融合策略 | RRF、lexical rerank（Quality 档） | Lite / Balanced / Quality / Auto |
-| Query Rewrite | 术语库 + 可选本地 LLM 晋升 | `resolveQueryRewrite`；`ORYNODE_QUERY_REWRITE_LLM` |
+| Query Rewrite | 术语库 + 可选本地 LLM 晋升 | 工作台 Search 可走 LLM 晋升；**Chat 固定 `skipLlm`**，仅术语库；`ORYNODE_QUERY_REWRITE_LLM` |
 | 存储 / 任务 | SQLite + Job Worker + terminology_entries | Data Service `:4318` |
 | 前端 | Next.js + React + vinext | `/api` 网关 |
 
@@ -291,6 +291,8 @@ orynode-local-ai/
 ## 知识库 / RAG 系统
 
 > **1.2.0**：在 1.1.0 Knowledge Engine 上闭合检索升级——可学习 Rewrite、词法阶梯、处理队列与诚实 diagnostics。工作台走 **Search**；Chat 走 **Retrieve + buildContext**；共用 `HybridRetriever`。细节见下文与 [CHANGELOG 1.2.0](../CHANGELOG.md#120--2026-08-05)。
+>
+> **1.2.1**：在 1.2.0 上修 Chat 引用可用性（单文件确定性读取、阶段化资源调度、TXT 行号预览、PDF 目录降权等）。见 [CHANGELOG 1.2.1](../CHANGELOG.md#121--2026-08-09)。
 
 ```
 上传 PDF / TXT / MD（或 Web/GitHub Connector）
@@ -618,13 +620,16 @@ Host classifyHostMemory
   → Retriever（lite 不跑 query embed）
 
 /api/chat：
-  1. markChatResourceActive   ← 先抬压（并在 low 主机卸载 e5）
-  2. buildChatKnowledgeContext / retrieve  ← 此时必见 resourcePressure=high
-  3. ModelRuntime.chat（Gemma）
-  4. markChatResourceIdle（流结束 / 失败）
+  1. buildChatKnowledgeContext / retrieve  ← 空闲态按设备能力执行检索
+  2. releaseEmbeddingBeforeGeneration      ← 显式释放 e5
+  3. markChatResourceActive                ← 进入生成阶段并阻止后台重任务
+  4. ModelRuntime.chat（Gemma）
+  5. markChatResourceIdle（流结束 / 失败）
 ```
 
-对话路径若先 RAG 再 markChat，则 `RESOURCE_PRESSURE` 对 Chat 内检索不生效——**已定为缺陷并修复**。
+检索与生成采用串行资源阶段：检索档位由真实设备能力和检索前压力决定，
+生成阶段再抬升资源压力，避免把“开始聊天”本身误判为检索必须降级。
+Chat 检索始终 `skipLlm`：对话路径不触发可学习 Rewrite；术语晋升只发生在非 Chat 检索面。
 
 ### 控制层
 

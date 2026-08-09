@@ -1,6 +1,6 @@
 {
   "name": "orynode-local-ai",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "description": "Orynode Local AI — open-source, local-first AI assistant for Apple Silicon Macs",
   "author": "Orynode",

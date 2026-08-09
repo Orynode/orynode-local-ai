@@ -680,8 +680,9 @@ const updateKnowledgeDocumentHashMeta = database.prepare(`
 `);
 const insertKnowledgeChunk = database.prepare(`
   INSERT INTO knowledge_chunks (
-    id, document_id, page_number, position, content, embedding
-  ) VALUES (?, ?, ?, ?, ?, ?)
+    id, document_id, page_number, position, content, embedding,
+    start_line, end_line, heading_path
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const getKnowledgeChunks = database.prepare(`
   SELECT
@@ -689,7 +690,10 @@ const getKnowledgeChunks = database.prepare(`
     document_id AS documentId,
     page_number AS pageNumber,
     position,
-    content
+    content,
+    start_line AS startLine,
+    end_line AS endLine,
+    heading_path AS headingPath
   FROM knowledge_chunks
   WHERE document_id = ?
   ORDER BY page_number, position
@@ -701,7 +705,10 @@ const getLibraryChunkById = database.prepare(`
     knowledge_documents.name AS documentName,
     knowledge_chunks.page_number AS pageNumber,
     knowledge_chunks.position,
-    knowledge_chunks.content
+    knowledge_chunks.content,
+    knowledge_chunks.start_line AS startLine,
+    knowledge_chunks.end_line AS endLine,
+    knowledge_chunks.heading_path AS headingPath
   FROM knowledge_chunks
   INNER JOIN knowledge_documents
     ON knowledge_documents.id = knowledge_chunks.document_id
@@ -715,7 +722,10 @@ const getConversationChunkById = database.prepare(`
     conversation_files.conversation_id AS conversationId,
     conversation_file_chunks.page_number AS pageNumber,
     conversation_file_chunks.position,
-    conversation_file_chunks.content
+    conversation_file_chunks.content,
+    conversation_file_chunks.start_line AS startLine,
+    conversation_file_chunks.end_line AS endLine,
+    conversation_file_chunks.heading_path AS headingPath
   FROM conversation_file_chunks
   INNER JOIN conversation_files
     ON conversation_files.id = conversation_file_chunks.file_id
@@ -728,7 +738,10 @@ const listKnowledgeChunksByDocuments = database.prepare(`
     knowledge_documents.name AS documentName,
     knowledge_chunks.page_number AS pageNumber,
     knowledge_chunks.position,
-    knowledge_chunks.content
+    knowledge_chunks.content,
+    knowledge_chunks.start_line AS startLine,
+    knowledge_chunks.end_line AS endLine,
+    knowledge_chunks.heading_path AS headingPath
   FROM knowledge_chunks
   INNER JOIN knowledge_documents
     ON knowledge_documents.id = knowledge_chunks.document_id
@@ -746,7 +759,10 @@ const listAllKnowledgeChunks = database.prepare(`
     knowledge_documents.name AS documentName,
     knowledge_chunks.page_number AS pageNumber,
     knowledge_chunks.position,
-    knowledge_chunks.content
+    knowledge_chunks.content,
+    knowledge_chunks.start_line AS startLine,
+    knowledge_chunks.end_line AS endLine,
+    knowledge_chunks.heading_path AS headingPath
   FROM knowledge_chunks
   INNER JOIN knowledge_documents
     ON knowledge_documents.id = knowledge_chunks.document_id
@@ -764,6 +780,9 @@ const listChunksWithVectorsByDocuments = database.prepare(`
     knowledge_chunks.page_number AS pageNumber,
     knowledge_chunks.position,
     knowledge_chunks.content,
+    knowledge_chunks.start_line AS startLine,
+    knowledge_chunks.end_line AS endLine,
+    knowledge_chunks.heading_path AS headingPath,
     COALESCE(vector_entries.embedding, knowledge_chunks.embedding) AS embedding
   FROM knowledge_chunks
   INNER JOIN knowledge_documents
@@ -793,6 +812,9 @@ const listAllChunksWithVectors = database.prepare(`
     knowledge_chunks.page_number AS pageNumber,
     knowledge_chunks.position,
     knowledge_chunks.content,
+    knowledge_chunks.start_line AS startLine,
+    knowledge_chunks.end_line AS endLine,
+    knowledge_chunks.heading_path AS headingPath,
     COALESCE(vector_entries.embedding, knowledge_chunks.embedding) AS embedding
   FROM knowledge_chunks
   INNER JOIN knowledge_documents
@@ -892,8 +914,9 @@ const insertConversationFile = database.prepare(`
 `);
 const insertConversationFileChunk = database.prepare(`
   INSERT INTO conversation_file_chunks (
-    id, file_id, page_number, position, content, embedding
-  ) VALUES (?, ?, ?, ?, ?, ?)
+    id, file_id, page_number, position, content, embedding,
+    start_line, end_line, heading_path
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const getConversationFileChunks = database.prepare(`
   SELECT
@@ -901,7 +924,10 @@ const getConversationFileChunks = database.prepare(`
     file_id AS documentId,
     page_number AS pageNumber,
     position,
-    content
+    content,
+    start_line AS startLine,
+    end_line AS endLine,
+    heading_path AS headingPath
   FROM conversation_file_chunks
   WHERE file_id = ?
   ORDER BY page_number, position
@@ -913,7 +939,10 @@ const listConversationChunksByFiles = database.prepare(`
     conversation_files.name AS documentName,
     conversation_file_chunks.page_number AS pageNumber,
     conversation_file_chunks.position,
-    conversation_file_chunks.content
+    conversation_file_chunks.content,
+    conversation_file_chunks.start_line AS startLine,
+    conversation_file_chunks.end_line AS endLine,
+    conversation_file_chunks.heading_path AS headingPath
   FROM conversation_file_chunks
   INNER JOIN conversation_files
     ON conversation_files.id = conversation_file_chunks.file_id
@@ -931,6 +960,9 @@ const listConversationChunksWithVectorsByFiles = database.prepare(`
     conversation_file_chunks.page_number AS pageNumber,
     conversation_file_chunks.position,
     conversation_file_chunks.content,
+    conversation_file_chunks.start_line AS startLine,
+    conversation_file_chunks.end_line AS endLine,
+    conversation_file_chunks.heading_path AS headingPath,
     COALESCE(vector_entries.embedding, conversation_file_chunks.embedding) AS embedding
   FROM conversation_file_chunks
   INNER JOIN conversation_files
@@ -1528,11 +1560,19 @@ function commitKnowledgeChunks(
         chunk.position,
         chunk.content,
         null,
+        Number.isInteger(chunk.startLine) ? chunk.startLine : null,
+        Number.isInteger(chunk.endLine) ? chunk.endLine : null,
+        Array.isArray(chunk.headingPath)
+          ? JSON.stringify(chunk.headingPath)
+          : null,
       );
       storedChunks.push({
         id: chunkId,
         content: chunk.content,
         pageNumber: chunk.pageNumber,
+        startLine: chunk.startLine,
+        endLine: chunk.endLine,
+        headingPath: chunk.headingPath,
       });
     }
     upsertFtsChunks(database, "library", documentId, storedChunks);
@@ -1962,11 +2002,19 @@ function commitConversationFileChunks(
         chunk.position,
         chunk.content,
         null,
+        Number.isInteger(chunk.startLine) ? chunk.startLine : null,
+        Number.isInteger(chunk.endLine) ? chunk.endLine : null,
+        Array.isArray(chunk.headingPath)
+          ? JSON.stringify(chunk.headingPath)
+          : null,
       );
       storedChunks.push({
         id: chunkId,
         content: chunk.content,
         pageNumber: chunk.pageNumber,
+        startLine: chunk.startLine,
+        endLine: chunk.endLine,
+        headingPath: chunk.headingPath,
       });
     }
     upsertFtsChunks(database, "conversation", fileId, storedChunks);
@@ -2111,6 +2159,9 @@ function queryRetrievalChunks({ library, conversationFiles, withVectors }) {
         pageNumber: row.pageNumber,
         position: row.position,
         content: row.content,
+        startLine: row.startLine ?? undefined,
+        endLine: row.endLine ?? undefined,
+        headingPath: parseJsonField(row.headingPath),
         source: "library",
         ...(version
           ? {
@@ -2160,6 +2211,9 @@ function queryRetrievalChunks({ library, conversationFiles, withVectors }) {
           pageNumber: row.pageNumber,
           position: row.position,
           content: row.content,
+          startLine: row.startLine ?? undefined,
+          endLine: row.endLine ?? undefined,
+          headingPath: parseJsonField(row.headingPath),
           source: "conversation_file",
           ...(version
             ? {
@@ -2599,8 +2653,9 @@ async function getEmbedStatus() {
 /**
  * @param {string[]} texts
  * @param {"query" | "passage"} [mode]
+ * @param {{ allowEmbeddingLease?: boolean }} [options]
  */
-async function embedTexts(texts, mode = "passage") {
+async function embedTexts(texts, mode = "passage", options = {}) {
   // Chat / 重活占用时拒绝加载/运行 embedding，避免与 Gemma / OCR 争 8GB 余量
   const resources = resourceCoordinator.snapshot();
   if (resources.chatActive) {
@@ -2608,7 +2663,10 @@ async function embedTexts(texts, mode = "passage") {
     error.code = "EMBED_DEFERRED_CHAT";
     throw error;
   }
-  if (resources.heavyKind === "ocr" || resources.heavyKind === "embedding") {
+  if (
+    resources.heavyKind === "ocr" ||
+    (resources.heavyKind === "embedding" && !options.allowEmbeddingLease)
+  ) {
     const error = new Error("EMBED_DEFERRED_HEAVY");
     error.code = "EMBED_DEFERRED_HEAVY";
     throw error;
@@ -2755,7 +2813,10 @@ const indexWorker = startIndexWorker({
   vectorEntries: vectorEntryStore,
   resources: resourceCoordinator,
   embedEnabled: semanticSearchEnabled,
-  embedTexts,
+  // Worker 已持有 embedding lease；允许租约持有路径执行实际向量化。
+  // 其它 HTTP/query 调用仍会被上面的 heavy guard 拒绝。
+  embedTexts: (texts, mode) =>
+    embedTexts(texts, mode, { allowEmbeddingLease: true }),
   writeVectors: writeVectorsForDocument,
   setDocumentStatus: setDocumentStatusForWorker,
   getDocumentStatus: getDocumentStatusForWorker,

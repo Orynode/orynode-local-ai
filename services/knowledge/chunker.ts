@@ -51,15 +51,27 @@ class TextChunker {
       const sections = this.splitIntoHeadingSections(page);
       for (const section of sections) {
         const pieces = this.chunkText(section.text);
+        let searchOffset = 0;
         for (const content of pieces) {
+          const pieceOffset = section.text.indexOf(content, searchOffset);
+          const resolvedOffset = pieceOffset >= 0 ? pieceOffset : searchOffset;
+          const linesBefore =
+            section.text.slice(0, resolvedOffset).match(/\n/g)?.length ?? 0;
+          const pieceLineCount = content.match(/\n/g)?.length ?? 0;
+          const startLine =
+            section.startLine != null
+              ? section.startLine + linesBefore
+              : undefined;
           results.push({
             pageNumber: page.pageNumber,
             position: position++,
             content,
             headingPath: section.headingPath,
-            startLine: section.startLine,
-            endLine: section.endLine,
+            startLine,
+            endLine:
+              startLine != null ? startLine + pieceLineCount : undefined,
           });
+          searchOffset = resolvedOffset + content.length;
         }
       }
     }
@@ -177,7 +189,38 @@ class TextChunker {
     if (!normalized) return [];
     if (normalized.length <= this.config.maxChunkSize) return [normalized];
 
+    if (normalized.includes("\n")) {
+      return this.splitByLinesPreserving(normalized);
+    }
     return this.splitBySeparators(normalized);
+  }
+
+  /** 文本/Markdown 按原始行切分，不 trim、不折叠空行，保证引用行号可逆。 */
+  private splitByLinesPreserving(text: string): string[] {
+    const { maxChunkSize } = this.config;
+    const chunks: string[] = [];
+    const lines = text.match(/[^\n]*(?:\n|$)/g)?.filter(Boolean) ?? [text];
+    let current = "";
+
+    const flush = () => {
+      if (!current) return;
+      chunks.push(current.endsWith("\n") ? current.slice(0, -1) : current);
+      current = "";
+    };
+
+    for (const line of lines) {
+      if (line.length > maxChunkSize) {
+        flush();
+        chunks.push(...this.splitByFixedSize(line));
+        continue;
+      }
+      if (current && current.length + line.length > maxChunkSize) {
+        flush();
+      }
+      current += line;
+    }
+    flush();
+    return chunks.filter(Boolean);
   }
 
   /**

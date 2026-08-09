@@ -41,9 +41,16 @@ function isMarkdownDocumentName(name: string): boolean {
   return /\.(md|markdown|txt|rst)$/i.test(name);
 }
 
-export function locatorFromHit(hit: RetrievalHit): CitationLocator {
+export function locatorFromHit(
+  hit: RetrievalHit,
+  terms: readonly string[] = [],
+): CitationLocator {
   const name = hit.documentName.toLowerCase();
-  const isMarkdown = isMarkdownDocumentName(name);
+  const isMarkdown =
+    isMarkdownDocumentName(name) ||
+    hit.startLine != null ||
+    hit.endLine != null ||
+    Boolean(hit.headingPath?.length);
 
   // 无 OCR 映射时 data-service 可能挂上泛化 page hint；Markdown 仍优先标题路径
   if (
@@ -69,11 +76,12 @@ export function locatorFromHit(hit: RetrievalHit): CitationLocator {
   }
 
   if (isMarkdown) {
+    const narrowed = narrowMarkdownLineRange(hit, terms);
     return {
       kind: "markdown",
       headingPath: inferHeadingPathFromContent(hit.content, hit.headingPath),
-      startLine: hit.startLine,
-      endLine: hit.endLine,
+      startLine: narrowed.startLine,
+      endLine: narrowed.endLine,
     };
   }
 
@@ -85,6 +93,61 @@ export function locatorFromHit(hit: RetrievalHit): CitationLocator {
     ...(hit.bbox && hit.bbox.length === 4 ? { bbox: hit.bbox } : {}),
   };
   return page;
+}
+
+function narrowMarkdownLineRange(
+  hit: RetrievalHit,
+  terms: readonly string[],
+): { startLine?: number; endLine?: number } {
+  if (hit.startLine == null || terms.length === 0) {
+    return { startLine: hit.startLine, endLine: hit.endLine };
+  }
+  const locatorStopTerms = new Set([
+    "分析",
+    "这个",
+    "文件",
+    "确认",
+    "可以",
+    "用吗",
+    "什么",
+    "怎么",
+    "为什么",
+    "是否",
+    "有没有",
+    "口播",
+  ]);
+  const usefulTerms = [
+    ...new Set(
+      terms
+        .map((term) => term.trim().toLocaleLowerCase())
+        .filter(
+          (term) => term.length >= 2 && !locatorStopTerms.has(term),
+        ),
+    ),
+  ].sort((a, b) => b.length - a.length);
+  if (usefulTerms.length === 0) {
+    return { startLine: hit.startLine, endLine: hit.endLine };
+  }
+
+  let bestIndex = -1;
+  let bestScore = 0;
+  const lines = hit.content.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = (lines[index] ?? "").toLocaleLowerCase();
+    let score = 0;
+    for (const term of usefulTerms) {
+      if (line.includes(term)) score += term.length;
+    }
+    if (score > bestScore) {
+      bestIndex = index;
+      bestScore = score;
+    }
+  }
+  if (bestIndex < 0) {
+    return { startLine: hit.startLine, endLine: hit.endLine };
+  }
+  const line = hit.startLine + bestIndex;
+  return { startLine: line, endLine: line };
 }
 
 export function citationFromHit(
@@ -101,7 +164,7 @@ export function citationFromHit(
     processingBuildId: hit.processingBuildId ?? LEGACY_PROCESSING_BUILD_ID,
     title: hit.documentName,
     sourceType: hit.source,
-    locator: locatorFromHit(hit),
+    locator: locatorFromHit(hit, terms),
     excerpt: buildCitationExcerpt(content, terms),
   };
 }

@@ -22,6 +22,7 @@ export type DocumentPreviewIntent = {
   page?: number;
   /** Markdown / 代码行号（1-based） */
   startLine?: number;
+  endLine?: number;
   /** 纯文本或 PDF 页内字符偏移（与 chunk 抽取对齐） */
   startOffset?: number;
   endOffset?: number;
@@ -98,6 +99,7 @@ export function previewIntentFromCitation(
   const locator = citation.locator;
   let page: number | undefined;
   let startLine: number | undefined;
+  let endLine: number | undefined;
   let startOffset: number | undefined;
   let endOffset: number | undefined;
   let bbox: [number, number, number, number] | undefined;
@@ -133,6 +135,9 @@ export function previewIntentFromCitation(
       typeof (locator as { startLine?: unknown }).startLine === "number"
     ) {
       startLine = (locator as { startLine: number }).startLine;
+      if (typeof (locator as { endLine?: unknown }).endLine === "number") {
+        endLine = (locator as { endLine: number }).endLine;
+      }
     }
     if (locator.kind === "text") {
       const textLoc = locator as {
@@ -156,6 +161,7 @@ export function previewIntentFromCitation(
     title: citation.title,
     page,
     startLine,
+    endLine,
     startOffset,
     endOffset,
     bbox,

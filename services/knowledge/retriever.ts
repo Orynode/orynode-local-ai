@@ -24,6 +24,8 @@ import { Fts5KeywordIndex } from "./adapters/keyword-fts5";
 import { BlobScanVectorIndex } from "./adapters/vector-blob-scan";
 import type { IndexCandidate, KeywordQuery } from "./ports/indexes";
 import { planVectorScanScope } from "./retrieval/vector-scan-scope";
+import { isDocumentReadIntent } from "./application/access-mode";
+import { rankTocAfterBody } from "./retrieval/toc-chunk";
 
 type ChunkRow = {
   id: string;
@@ -36,6 +38,14 @@ type ChunkRow = {
   score?: number;
   revisionId?: string;
   processingBuildId?: string;
+  locatorHint?: import("./core/types").CitationLocator;
+  bbox?: [number, number, number, number];
+  bboxDegraded?: boolean;
+  headingPath?: string[];
+  startLine?: number;
+  endLine?: number;
+  startOffset?: number;
+  endOffset?: number;
 };
 
 function candidateToChunk(c: IndexCandidate): ChunkRow {
@@ -50,6 +60,14 @@ function candidateToChunk(c: IndexCandidate): ChunkRow {
     score: c.score,
     revisionId: c.revisionId,
     processingBuildId: c.processingBuildId,
+    locatorHint: c.locatorHint,
+    bbox: c.bbox,
+    bboxDegraded: c.bboxDegraded,
+    headingPath: c.headingPath,
+    startLine: c.startLine,
+    endLine: c.endLine,
+    startOffset: c.startOffset,
+    endOffset: c.endOffset,
   };
 }
 
@@ -159,6 +177,20 @@ function scopeHasSources(
   );
 }
 
+function isExplicitSingleSourceScope(
+  scope: Exclude<RetrievalScope, { mode: "none" }>,
+): boolean {
+  const libraryCount =
+    scope.library && typeof scope.library === "object"
+      ? scope.library.documentIds.length
+      : 0;
+  const conversationFileCount = scope.conversationFiles?.fileIds.length ?? 0;
+  return (
+    scope.library !== "all" &&
+    libraryCount + conversationFileCount === 1
+  );
+}
+
 function scopeToKeywordOptions(
   scope: Exclude<RetrievalScope, { mode: "none" }>,
   topK: number,
@@ -214,13 +246,23 @@ export class HybridRetriever implements Retriever {
 
     const topK = options.topK ?? SEARCH_CONFIG.topK;
     const ftsQuery = options.keywordQuery ?? { text: query };
-    const fts = await this.searchFts(ftsQuery, scope, Math.max(topK * 3, 24));
+    const fts = await this.searchFts(ftsQuery, scope, Math.max(topK * 8, 64));
 
     if (!options.preferKeyword) {
       const embedder = await this.getEmbedder();
       if (embedder) {
         try {
-          return await this.hybridSearch(query, scope, fts, embedder, topK);
+          const hybrid = await this.hybridSearch(
+            query,
+            scope,
+            fts,
+            embedder,
+            topK,
+          );
+          if (hybrid.chunks.length > 0) return hybrid;
+          const fallback = await this.scopedReadFallback(query, scope, topK);
+          if (fallback) return fallback;
+          return hybrid;
         } catch (error) {
           console.warn("语义检索失败，降级到关键词匹配", error);
         }
@@ -228,11 +270,19 @@ export class HybridRetriever implements Retriever {
     }
 
     if (fts.available) {
+      if (fts.chunks.length === 0) {
+        const fallback = await this.scopedReadFallback(query, scope, topK);
+        if (fallback) return fallback;
+      }
       return {
-        chunks: fts.chunks.slice(0, topK).map((chunk) => ({
-          ...chunk,
-          score: chunk.score ?? 0,
-        })),
+        chunks: rankTocAfterBody(
+          fts.chunks.map((chunk) => ({
+            ...chunk,
+            score: chunk.score ?? 0,
+          })),
+          query,
+          topK,
+        ),
         strategy: "keyword",
       };
     }
@@ -242,6 +292,45 @@ export class HybridRetriever implements Retriever {
       return { chunks: [], strategy: "keyword" };
     }
     return this.keywordSearch(query, chunks, topK);
+  }
+
+  private async scopedReadFallback(
+    query: string,
+    scope: Exclude<RetrievalScope, { mode: "none" }>,
+    topK: number,
+  ): Promise<RetrievalResult | null> {
+    if (scope.library === "all") return null;
+    const libraryCount =
+      scope.library && typeof scope.library === "object"
+        ? scope.library.documentIds.length
+        : 0;
+    const conversationCount = scope.conversationFiles?.fileIds.length ?? 0;
+    const sourceCount = libraryCount + conversationCount;
+    if (sourceCount === 0) return null;
+
+    const readIntent = isDocumentReadIntent(query);
+    // 普通问答仅允许用户明确选择的单文件回退；文档级任务允许有限多选。
+    if ((!readIntent && !isExplicitSingleSourceScope(scope)) || sourceCount > 8) {
+      return null;
+    }
+
+    const scopedChunks = await this.fetchChunks(scope);
+    scopedChunks.sort(
+      (a, b) =>
+        a.documentId.localeCompare(b.documentId) ||
+        a.pageNumber - b.pageNumber ||
+        a.position - b.position ||
+        a.id.localeCompare(b.id),
+    );
+    const limit = readIntent ? Math.max(topK, sourceCount > 1 ? 32 : 24) : topK;
+    return {
+      chunks: scopedChunks.slice(0, limit).map((chunk) => ({
+        ...chunk,
+        score: 0,
+      })),
+      strategy: "keyword",
+      recallMeta: { fallbackUsed: "scoped_read" },
+    };
   }
 
   private async getEmbedder(): Promise<Embedder | null> {
@@ -315,6 +404,14 @@ export class HybridRetriever implements Retriever {
         source?: "library" | "conversation_file";
         revisionId?: string;
         processingBuildId?: string;
+        locatorHint?: import("./core/types").CitationLocator;
+        bbox?: [number, number, number, number];
+        bboxDegraded?: boolean;
+        headingPath?: string[];
+        startLine?: number;
+        endLine?: number;
+        startOffset?: number;
+        endOffset?: number;
       }) => ({
         id: chunk.id,
         documentId: chunk.documentId,
@@ -325,6 +422,14 @@ export class HybridRetriever implements Retriever {
         source: chunk.source ?? "library",
         revisionId: chunk.revisionId,
         processingBuildId: chunk.processingBuildId,
+        locatorHint: chunk.locatorHint,
+        bbox: chunk.bbox,
+        bboxDegraded: chunk.bboxDegraded,
+        headingPath: chunk.headingPath,
+        startLine: chunk.startLine,
+        endLine: chunk.endLine,
+        startOffset: chunk.startOffset,
+        endOffset: chunk.endOffset,
       }),
     );
   }
@@ -347,7 +452,7 @@ export class HybridRetriever implements Retriever {
     );
     const matched = scored.filter((chunk) => chunk.score > 0);
     return {
-      chunks: matched.slice(0, topK),
+      chunks: rankTocAfterBody(matched, query, topK),
       strategy: "keyword",
     };
   }
@@ -373,10 +478,14 @@ export class HybridRetriever implements Retriever {
     // strategy 仍报 keyword（本轮未做向量融合）；索引就绪与否由 capabilities 判定，勿在 Engine 误标。
     if (fts.strategy === "fts5_phrase" && fts.chunks.length > 0) {
       return {
-        chunks: fts.chunks.slice(0, topK).map((chunk) => ({
-          ...chunk,
-          score: chunk.score ?? 0,
-        })),
+        chunks: rankTocAfterBody(
+          fts.chunks.map((chunk) => ({
+            ...chunk,
+            score: chunk.score ?? 0,
+          })),
+          query,
+          topK,
+        ),
         strategy: "keyword",
       };
     }
@@ -443,10 +552,12 @@ export class HybridRetriever implements Retriever {
           return { ...chunk, score: candidate.score };
         })
         .filter((item): item is RetrievalHit => item !== null)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, topK);
+        .sort((a, b) => b.score - a.score);
 
-      return { chunks: merged, strategy: "hybrid" };
+      return {
+        chunks: rankTocAfterBody(merged, query, topK),
+        strategy: "hybrid",
+      };
     }
 
     const semanticRanked = semanticResults.map((item) => item.chunkId);
@@ -454,10 +565,14 @@ export class HybridRetriever implements Retriever {
     if (semanticRanked.length === 0) {
       if (fts.available) {
         return {
-          chunks: fts.chunks.slice(0, topK).map((chunk) => ({
-            ...chunk,
-            score: chunk.score ?? 0,
-          })),
+          chunks: rankTocAfterBody(
+            fts.chunks.map((chunk) => ({
+              ...chunk,
+              score: chunk.score ?? 0,
+            })),
+            query,
+            topK,
+          ),
           strategy: "keyword",
         };
       }
@@ -474,9 +589,11 @@ export class HybridRetriever implements Retriever {
         return { ...chunk, score };
       })
       .filter((item): item is RetrievalHit => item !== null)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, topK);
+      .sort((a, b) => b.score - a.score);
 
-    return { chunks: merged, strategy: "hybrid" };
+    return {
+      chunks: rankTocAfterBody(merged, query, topK),
+      strategy: "hybrid",
+    };
   }
 }

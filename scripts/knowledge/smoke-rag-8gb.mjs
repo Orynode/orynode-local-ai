@@ -167,19 +167,25 @@ async function assertEmbedUnloadOnChat() {
   ok("EmbedLifecycle：8GB Chat 优先卸载 e5");
 }
 
-function assertChatMarksBeforeRagDoc() {
-  // 契约：/api/chat 执行路径须先 markChat 再 RAG（避免 import 行干扰，用 await 调用序）
+function assertPhasedChatScheduling() {
+  // 契约：先检索，再释放 e5，最后进入生成资源保护阶段。
   const routePath = join(root, "app/api/chat/route.ts");
   const text = readFileSync(routePath, "utf8");
   const markCall = text.indexOf("await markChatResourceActive");
   const ragCall = text.indexOf("await buildChatKnowledgeContext");
-  if (markCall < 0 || ragCall < 0 || markCall > ragCall) {
+  const unloadCall = text.indexOf("await releaseEmbeddingBeforeGeneration");
+  if (
+    markCall < 0 ||
+    ragCall < 0 ||
+    unloadCall < 0 ||
+    !(ragCall < unloadCall && unloadCall < markCall)
+  ) {
     fail(
-      "/api/chat 必须在 buildChatKnowledgeContext 之前 await markChatResourceActive",
+      "/api/chat 必须按 RAG → unload embedding → markChat 顺序执行",
     );
     return;
   }
-  ok("/api/chat：markChatResourceActive 位于 RAG 之前（源码顺序）");
+  ok("/api/chat：RAG → unload embedding → 生成阶段保护（源码顺序）");
 }
 
 console.log("=== RAG 8GB offline smoke (RU-001) ===\n");
@@ -187,7 +193,7 @@ runEval();
 assertNoCeWiring();
 assertChatPriority();
 await assertEmbedUnloadOnChat();
-assertChatMarksBeforeRagDoc();
+assertPhasedChatScheduling();
 
 console.log("\n真机验收：在 8GB Mac 上手动跑通 上传→检索→对话→引用预览（见架构文档 · 低配 Mac 内存策略）");
 

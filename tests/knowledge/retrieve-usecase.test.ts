@@ -505,3 +505,128 @@ test("keyword retriever 路径：FTS5 候选召回不再拉全量", async () => 
     globalThis.fetch = originalFetch;
   }
 });
+
+test("keyword retriever 路径：明确引用单文档并分析时 0 命中回退顺序读取", async () => {
+  const { HybridRetriever } = await import(
+    "../../services/knowledge/retriever"
+  );
+
+  const originalFetch = globalThis.fetch;
+  let chunksQueryBody: Record<string, unknown> | undefined;
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes("/retrieval/keyword/search")) {
+      return new Response(
+        JSON.stringify({ strategy: "fts5", chunks: [] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (url.includes("/retrieval/chunks/query")) {
+      chunksQueryBody = JSON.parse(String(init?.body));
+      return new Response(
+        JSON.stringify({
+          chunks: [
+            {
+              id: "later",
+              documentId: "speech",
+              documentName: "2026-08-06口播.txt",
+              pageNumber: 2,
+              position: 0,
+              content: "第二部分",
+              source: "library",
+            },
+            {
+              id: "first",
+              documentId: "speech",
+              documentName: "2026-08-06口播.txt",
+              pageNumber: 1,
+              position: 0,
+              content: "第一部分",
+              source: "library",
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return new Response(JSON.stringify({ chunks: [] }), { status: 200 });
+  };
+
+  try {
+    const retriever = new HybridRetriever(null);
+    const result = await retriever.retrieve(
+      "分析这个口播，如果我是intel的mac可以用吗",
+      {
+        mode: "sources",
+        library: { documentIds: ["speech"] },
+      },
+      { topK: 8, preferKeyword: true },
+    );
+    assert.deepEqual(
+      result.chunks.map((chunk) => chunk.id),
+      ["first", "later"],
+    );
+    assert.deepEqual(chunksQueryBody?.library, {
+      mode: "documents",
+      documentIds: ["speech"],
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("keyword retriever 路径：整库不读取全量，单文件问答有范围内回退", async () => {
+  const { HybridRetriever } = await import(
+    "../../services/knowledge/retriever"
+  );
+
+  const originalFetch = globalThis.fetch;
+  let chunksQueryCount = 0;
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/retrieval/chunks/query")) chunksQueryCount += 1;
+    return new Response(
+      JSON.stringify(
+        url.includes("/retrieval/keyword/search")
+          ? { strategy: "fts5", chunks: [] }
+          : {
+              chunks: [
+                {
+                  id: "scoped",
+                  documentId: "speech",
+                  documentName: "口播.txt",
+                  pageNumber: 1,
+                  position: 0,
+                  content: "最低要求是 Apple 芯片 Mac。",
+                  source: "library",
+                },
+              ],
+            },
+      ),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+
+  try {
+    const retriever = new HybridRetriever(null);
+    const allResult = await retriever.retrieve(
+      "总结资料库",
+      { mode: "sources", library: "all" },
+      { preferKeyword: true },
+    );
+    const qaResult = await retriever.retrieve(
+      "这个项目的发布日期是什么",
+      {
+        mode: "sources",
+        library: { documentIds: ["speech"] },
+      },
+      { preferKeyword: true },
+    );
+    assert.equal(allResult.chunks.length, 0);
+    assert.equal(qaResult.chunks[0]?.id, "scoped");
+    assert.equal(qaResult.recallMeta?.fallbackUsed, "scoped_read");
+    assert.equal(chunksQueryCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

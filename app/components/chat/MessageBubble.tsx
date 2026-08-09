@@ -82,7 +82,7 @@ function locatorLabel(citation: MessageCitation): string {
     };
     const heading = md.headingPath?.length
       ? md.headingPath.join(" / ")
-      : "Markdown";
+      : "文本";
     const lines =
       md.startLine != null && md.endLine != null
         ? ` L${md.startLine}-${md.endLine}`
@@ -450,6 +450,17 @@ export function MessageBubble({
     [citationById, activeChipId, conversationId],
   );
 
+  const retrievalDiagnostics = message.retrievalDiagnostics;
+  const hasRetrievalProblem =
+    retrievalDiagnostics?.outcome === "empty_hits" ||
+    retrievalDiagnostics?.outcome === "retrieval_failed";
+  const hasExplicitTierDegradation =
+    Boolean(retrievalDiagnostics?.requestedTier) &&
+    retrievalDiagnostics?.requestedTier !== "auto" &&
+    retrievalDiagnostics?.requestedTier !== retrievalDiagnostics?.effectiveTier;
+  const showRetrievalDiagnostics =
+    hasRetrievalProblem || hasExplicitTierDegradation;
+
   return (
     <article
       className={`message ${message.role}${thinking ? " thinking" : ""}`}
@@ -481,21 +492,30 @@ export function MessageBubble({
                 </CitationUiContext.Provider>
               </div>
 
-              {message.retrievalDiagnostics ? (
+              {retrievalDiagnostics && showRetrievalDiagnostics ? (
                 <div className="message-sources" aria-label="检索诊断">
                   <div className="message-diagnostics">
                     {(() => {
-                      const degradedSummary = summarizeDegradedReasons(
-                        message.retrievalDiagnostics.degradedReasons ??
-                          message.retrievalDiagnostics.degradedCapabilities,
-                      );
+                      const degradedReasons =
+                        retrievalDiagnostics.degradedReasons ??
+                        retrievalDiagnostics.degradedCapabilities;
+                      const degradedSummary =
+                        summarizeDegradedReasons(degradedReasons);
                       const tierHint =
-                        message.retrievalDiagnostics.requestedTier &&
-                        message.retrievalDiagnostics.effectiveTier &&
-                        message.retrievalDiagnostics.requestedTier !==
-                          message.retrievalDiagnostics.effectiveTier
-                          ? `请求 ${message.retrievalDiagnostics.requestedTier} → 实际 ${message.retrievalDiagnostics.effectiveTier}`
+                        retrievalDiagnostics.requestedTier !== "auto" &&
+                        retrievalDiagnostics.requestedTier &&
+                        retrievalDiagnostics.effectiveTier &&
+                        retrievalDiagnostics.requestedTier !==
+                          retrievalDiagnostics.effectiveTier
+                          ? `请求 ${retrievalDiagnostics.requestedTier} → 实际 ${retrievalDiagnostics.effectiveTier}`
                           : null;
+                      if (hasRetrievalProblem) {
+                        return (
+                          <p className="message-diagnostics-summary">
+                            未从所选资料中取得可用内容
+                          </p>
+                        );
+                      }
                       if (!degradedSummary && !tierHint) return null;
                       return (
                         <p className="message-diagnostics-summary">
@@ -516,7 +536,7 @@ export function MessageBubble({
                     </button>
                     {showDiagnostics ? (
                       <pre className="message-diagnostics-body">
-                        {JSON.stringify(message.retrievalDiagnostics, null, 2)}
+                        {JSON.stringify(retrievalDiagnostics, null, 2)}
                       </pre>
                     ) : null}
                   </div>

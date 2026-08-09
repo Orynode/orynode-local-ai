@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   canonicalizeAssistantCitations,
   extractReferencedCitationIds,
+  groundUncitedAssistantAnswer,
   toCitationMarkdownLinks,
 } from "../../services/chat/citation-protocol";
 import { buildCitedKnowledgePrompt } from "../../services/chat/prompt";
@@ -91,6 +92,28 @@ test("toCitationMarkdownLinks: 连续单标合并为一个 citation 组链接", 
     toCitationMarkdownLinks("仍是 [S5, S7]", ALLOWED),
     "仍是 [S5, S7]",
   );
+});
+
+test("groundUncitedAssistantAnswer: 仅在来源与回答可靠重叠时补引用", () => {
+  const grounded = groundUncitedAssistantAnswer(
+    "当前版本要求 Apple Silicon arm64 Mac，Intel Mac 不支持。",
+    [
+      {
+        id: "S1",
+        excerpt: "最低要求：Apple 芯片 Mac；当前完整环境为 arm64。",
+      },
+      { id: "S2", excerpt: "资料库支持 PDF 和 Markdown。" },
+    ],
+  );
+  assert.deepEqual(grounded.referencedIds, ["S1"]);
+  assert.match(grounded.content, /\[S1\]$/);
+
+  const unrelated = groundUncitedAssistantAnswer(
+    "天气晴朗。",
+    [{ id: "S1", excerpt: "Apple 芯片 Mac。" }],
+  );
+  assert.deepEqual(unrelated.referencedIds, []);
+  assert.equal(unrelated.content, "天气晴朗。");
 });
 
 test("buildCitedKnowledgePrompt: 含协议规则（行末 / 禁止逗号合并）", () => {

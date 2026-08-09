@@ -100,6 +100,9 @@ export interface RetrievalHit {
 export interface RetrievalResult {
   chunks: RetrievalHit[];
   strategy: "keyword" | "hybrid";
+  recallMeta?: {
+    fallbackUsed?: "scoped_read" | null;
+  };
 }
 
 export interface Retriever {

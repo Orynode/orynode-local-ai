@@ -50,6 +50,10 @@ import {
 import { weightedRrfFusion } from "../retrieval/keyword";
 import { buildHighlightTerms } from "../retrieval/highlight-terms";
 import type { RetrievalHit, Retriever } from "../types";
+import {
+  resolveKnowledgeAccessMode,
+  scopeSummary,
+} from "./access-mode";
 
 const retrievalRequestSchema = z.object({
   query: z.string(),
@@ -161,7 +165,13 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
     return {
       query: retrieved.query,
       hits: retrieved.hits,
-      diagnostics: retrieved.diagnostics,
+      diagnostics: {
+        ...retrieved.diagnostics,
+        // Search 产品面只召回、不装箱；勿沿用 Chat 的 accessMode / packing 语义
+        accessMode: "library_search",
+        contextProvided: false,
+        outcome: retrieved.hits.length > 0 ? "search_only" : "empty_hits",
+      },
       highlightTerms: retrieved.highlightTerms,
     };
   }
@@ -206,6 +216,7 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
     let hits: RetrievalHit[] = [];
     const strategies = new Set<string>();
     const contributingRecallStrategies = new Set<string>();
+    let fallbackUsed: "scoped_read" | null = null;
     let multiQueryFusionApplied = false;
     const pipeline: string[] = ["normalize", "scope_resolve", "query_plan"];
     if (rewrite.source === "llm") {
@@ -237,6 +248,7 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
           },
         });
         hits = result.chunks;
+        fallbackUsed = result.recallMeta?.fallbackUsed ?? null;
         strategies.add(result.strategy);
         if (result.chunks.length > 0) {
           contributingRecallStrategies.add(result.strategy);
@@ -276,6 +288,8 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
             },
           });
           strategies.add(result.strategy);
+          fallbackUsed =
+            result.recallMeta?.fallbackUsed ?? fallbackUsed;
           if (result.chunks.length > 0) {
             contributingRecallStrategies.add(result.strategy);
             rankedLists.push(result.chunks.map((c) => c.id));
@@ -422,6 +436,12 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
         embeddingModel: EMBEDDING_CONFIG.artifactId,
         embeddingArtifactRole: EMBEDDING_CONFIG.role,
         rewriteSource: rewrite.source,
+        accessMode: resolveKnowledgeAccessMode(scope, request.query),
+        fallbackUsed,
+        // retrieve 只负责召回；Chat 装箱成功后由 buildChatKnowledgeContext 改写为 context_packed
+        contextProvided: false,
+        outcome: hits.length > 0 ? "search_only" : "empty_hits",
+        scopeSummary: scopeSummary(scope),
       },
     };
   }
@@ -504,6 +524,8 @@ export async function buildChatKnowledgeContext(
       knowledgeTier: input.knowledgeTier,
     } as RetrievalRequest & { knowledgeTier?: KnowledgeTier });
     if (retrieval.hits.length === 0) {
+      retrieval.diagnostics.contextProvided = true;
+      retrieval.diagnostics.outcome = "empty_hits";
       return {
         knowledgePrompt: RETRIEVAL_EMPTY_CONTEXT,
         retrieval,
@@ -517,6 +539,8 @@ export async function buildChatKnowledgeContext(
       expandNeighbors: true,
       excerptTerms: retrieval.highlightTerms,
     });
+    retrieval.diagnostics.contextProvided = context.text.length > 0;
+    retrieval.diagnostics.outcome = "context_packed";
     return {
       knowledgePrompt: context.text,
       retrieval,

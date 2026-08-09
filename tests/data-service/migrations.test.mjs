@@ -39,6 +39,7 @@ test("migrateDatabase: 全新库应用 001_baseline", () => {
       "012_chunk_locators",
       "013_fts_v2_multilingual",
       "014_terminology_entries",
+      "015_chunk_text_locators",
     ]);
     assert.equal(tableExists(database, "schema_migrations"), true);
     assert.equal(tableExists(database, "knowledge_documents"), true);
@@ -56,6 +57,14 @@ test("migrateDatabase: 全新库应用 001_baseline", () => {
     assert.equal(tableExists(database, "knowledge_spaces"), true);
     assert.equal(tableExists(database, "storage_staging"), true);
     assert.equal(tableExists(database, "terminology_entries"), true);
+    for (const table of ["knowledge_chunks", "conversation_file_chunks"]) {
+      const columns = new Set(
+        database.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name),
+      );
+      assert.ok(columns.has("start_line"));
+      assert.ok(columns.has("end_line"));
+      assert.ok(columns.has("heading_path"));
+    }
     assert.ok(getAppliedMigrations(database).has("001_baseline"));
     assert.ok(getAppliedMigrations(database).has("002_fts5_keyword_index"));
     assert.ok(getAppliedMigrations(database).has("004_jobs_and_versioned_index"));

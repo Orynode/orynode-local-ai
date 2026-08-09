@@ -33,6 +33,14 @@ export interface IndexCandidate {
   source?: "library" | "conversation_file";
   revisionId?: string;
   processingBuildId?: string;
+  locatorHint?: import("../core/types").CitationLocator;
+  bbox?: [number, number, number, number];
+  bboxDegraded?: boolean;
+  headingPath?: string[];
+  startLine?: number;
+  endLine?: number;
+  startOffset?: number;
+  endOffset?: number;
 }
 
 /** 词法阶梯一步（与 QueryPlanner lexicalLadder 对齐） */

@@ -60,6 +60,10 @@ test("search 与 retrieve 同源：相同 query/scope 命中 id 一致", async (
   assert.equal(calls, 2);
   assert.ok((searched.highlightTerms?.length ?? 0) > 0);
   assert.ok((retrieved.highlightTerms?.length ?? 0) > 0);
+  assert.equal(searched.diagnostics.accessMode, "library_search");
+  assert.equal(searched.diagnostics.outcome, "search_only");
+  assert.equal(retrieved.diagnostics.outcome, "search_only");
+  assert.notEqual(retrieved.diagnostics.accessMode, "library_search");
 });
 
 test("无答案门禁一致：召回为空时 search 与 retrieve 皆空", async () => {

@@ -1,6 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   PREVIEW_PDF_BUFFER_MAX_BYTES,
   PREVIEW_SIZE_WARN_BYTES,
@@ -58,6 +64,75 @@ function scrollPreToCharOffset(pre: HTMLPreElement, offset: number) {
   const rect = range.getBoundingClientRect();
   const preRect = pre.getBoundingClientRect();
   pre.scrollTop += rect.top - preRect.top - 48;
+}
+
+function renderHighlightedText(text: string, intent: DocumentPreviewIntent) {
+  const offsetStart =
+    typeof intent.startOffset === "number" && intent.startOffset >= 0
+      ? Math.min(intent.startOffset, text.length)
+      : null;
+  const offsetEnd =
+    offsetStart != null &&
+    typeof intent.endOffset === "number" &&
+    intent.endOffset > offsetStart
+      ? Math.min(intent.endOffset, text.length)
+      : null;
+  const lineStart =
+    typeof intent.startLine === "number" && intent.startLine >= 1
+      ? Math.floor(intent.startLine)
+      : null;
+  const lineEnd =
+    lineStart != null &&
+    typeof intent.endLine === "number" &&
+    intent.endLine >= lineStart
+      ? Math.floor(intent.endLine)
+      : lineStart;
+
+  let cursor = 0;
+  return text.split("\n").map((line, index) => {
+    const lineNumber = index + 1;
+    const contentStart = cursor;
+    const contentEnd = cursor + line.length;
+    cursor = contentEnd + 1;
+
+    let rendered: ReactNode = line || " ";
+    if (
+      offsetStart != null &&
+      offsetEnd != null &&
+      offsetStart < contentEnd &&
+      offsetEnd > contentStart
+    ) {
+      const localStart = Math.max(0, offsetStart - contentStart);
+      const localEnd = Math.min(line.length, offsetEnd - contentStart);
+      rendered = (
+        <>
+          {line.slice(0, localStart)}
+          <mark className="doc-preview-text-highlight">
+            {line.slice(localStart, localEnd) || " "}
+          </mark>
+          {line.slice(localEnd)}
+        </>
+      );
+    } else if (
+      lineStart != null &&
+      lineEnd != null &&
+      lineNumber >= lineStart &&
+      lineNumber <= lineEnd
+    ) {
+      rendered = (
+        <mark className="doc-preview-text-highlight">{line || " "}</mark>
+      );
+    }
+
+    return (
+      <span key={lineNumber} className="doc-preview-text-line">
+        <span className="doc-preview-line-number" aria-hidden="true">
+          {lineNumber}
+        </span>
+        <span className="doc-preview-line-content">{rendered}</span>
+      </span>
+    );
+  });
 }
 
 const FOCUSABLE_SELECTOR =
@@ -334,6 +409,21 @@ function DocumentPreviewPanel({
     const raf = requestAnimationFrame(() => {
       const el = textRef.current;
       if (!el) return;
+      const highlight = el.querySelector<HTMLElement>(
+        ".doc-preview-text-highlight",
+      );
+      if (highlight) {
+        const highlightRect = highlight.getBoundingClientRect();
+        const containerRect = el.getBoundingClientRect();
+        el.scrollTop = Math.max(
+          0,
+          el.scrollTop +
+            highlightRect.top -
+            containerRect.top -
+            Math.min(64, el.clientHeight * 0.15),
+        );
+        return;
+      }
       if (
         typeof intent.startOffset === "number" &&
         Number.isFinite(intent.startOffset)
@@ -508,7 +598,7 @@ function DocumentPreviewPanel({
             />
           ) : kind === "text" ? (
             <pre ref={textRef} className="doc-preview-text">
-              {textContent}
+              {renderHighlightedText(textContent, intent)}
             </pre>
           ) : fileUrl ? (
             <div className="doc-preview-status">

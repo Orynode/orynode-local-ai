@@ -48,6 +48,10 @@ import {
   id as terminologyId,
   up as terminologyUp,
 } from "./014_terminology_entries.mjs";
+import {
+  id as chunkTextLocatorsId,
+  up as chunkTextLocatorsUp,
+} from "./015_chunk_text_locators.mjs";
 import { runMigrations } from "./runner.mjs";
 
 /** @type {import("./runner.mjs").Migration[]} */
@@ -66,6 +70,7 @@ export const MIGRATIONS = [
   { id: chunkLocatorsId, up: chunkLocatorsUp },
   { id: ftsV2Id, up: ftsV2Up },
   { id: terminologyId, up: terminologyUp },
+  { id: chunkTextLocatorsId, up: chunkTextLocatorsUp },
 ];
 
 /**

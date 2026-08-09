@@ -117,6 +117,14 @@ export class SQLiteVectorStore implements VectorStore {
       source?: "library" | "conversation_file";
       revisionId?: string;
       processingBuildId?: string;
+      locatorHint?: import("./core/types").CitationLocator;
+      bbox?: [number, number, number, number];
+      bboxDegraded?: boolean;
+      headingPath?: string[];
+      startLine?: number;
+      endLine?: number;
+      startOffset?: number;
+      endOffset?: number;
     }> = result.chunks ?? [];
 
     const withVectors = chunks.filter(
@@ -139,6 +147,14 @@ export class SQLiteVectorStore implements VectorStore {
         source: chunk.source ?? "library",
         revisionId: chunk.revisionId,
         processingBuildId: chunk.processingBuildId,
+        locatorHint: chunk.locatorHint,
+        bbox: chunk.bbox,
+        bboxDegraded: chunk.bboxDegraded,
+        headingPath: chunk.headingPath,
+        startLine: chunk.startLine,
+        endLine: chunk.endLine,
+        startOffset: chunk.startOffset,
+        endOffset: chunk.endOffset,
       },
       score: cosineSimilarity(
         queryVector,

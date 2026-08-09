@@ -394,6 +394,119 @@ test("FTS v2: languagePrimary=en 偏向英文列", () => {
   });
 });
 
+test("FTS: TXT 行号与 Markdown 标题路径随命中返回", () => {
+  withTempDb((dbPath) => {
+    const database = new DatabaseSync(dbPath);
+    migrateDatabase(database);
+    const now = new Date().toISOString();
+    database.prepare(
+      `INSERT INTO knowledge_documents
+        (id, name, stored_path, size, page_count, chunk_count, created_at, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run("d-loc", "指南.md", "/tmp/guide.md", 10, 1, 1, now, "ready");
+    database.prepare(
+      `INSERT INTO knowledge_chunks
+        (id, document_id, page_number, position, content, start_line, end_line, heading_path)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run("c-loc", "d-loc", 1, 0, "安装步骤使用本地模型。", 12, 18, JSON.stringify(["部署", "安装"]));
+    upsertFtsChunks(database, "library", "d-loc", [
+      { id: "c-loc", content: "安装步骤使用本地模型。" },
+    ]);
+
+    const hit = searchKeywordIndex(database, {
+      query: "安装步骤",
+      library: { mode: "all" },
+      topK: 3,
+    }).chunks[0];
+    assert.equal(hit.startLine, 12);
+    assert.equal(hit.endLine, 18);
+    assert.deepEqual(hit.headingPath, ["部署", "安装"]);
+
+    database.prepare(
+      `INSERT INTO knowledge_documents
+        (id, name, stored_path, size, page_count, chunk_count, created_at, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run("d-txt", "说明.txt", "/tmp/readme.txt", 10, 1, 1, now, "ready");
+    database.prepare(
+      `INSERT INTO knowledge_chunks
+        (id, document_id, page_number, position, content, start_line, end_line)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run("c-txt", "d-txt", 1, 0, "纯文本定位校验。", 4, 4);
+    upsertFtsChunks(database, "library", "d-txt", [
+      { id: "c-txt", content: "纯文本定位校验。" },
+    ]);
+    const txtHit = searchKeywordIndex(database, {
+      query: "纯文本定位",
+      library: { mode: "all" },
+      topK: 3,
+    }).chunks.find((chunk) => chunk.id === "c-txt");
+    assert.equal(txtHit?.startLine, 4);
+    assert.equal(txtHit?.endLine, 4);
+    database.close();
+  });
+});
+
+test("FTS: PDF bbox 与可证明的页内 offset 完整返回", () => {
+  withTempDb((dbPath) => {
+    const database = new DatabaseSync(dbPath);
+    migrateDatabase(database);
+    const now = new Date().toISOString();
+    database.prepare(
+      `INSERT INTO knowledge_documents
+        (id, name, stored_path, size, page_count, chunk_count, created_at, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run("d-pdf", "手册.pdf", "/tmp/manual.pdf", 10, 1, 1, now, "ready");
+    database.prepare(
+      `INSERT INTO knowledge_chunks (id, document_id, page_number, position, content)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run("c-pdf", "d-pdf", 1, 0, "定位文本");
+    database.prepare(
+      `INSERT INTO document_revisions
+        (id, namespace, document_id, content_hash, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).run("rev-pdf", "library", "d-pdf", "pdf-hash", now);
+    database.prepare(
+      `INSERT INTO processing_builds
+        (id, revision_id, parser_name, parser_version, normalizer_version,
+         config_hash, status, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run("pb-pdf", "rev-pdf", "test", "1", "test", "hash", "ready", now);
+    database.prepare(
+      `INSERT INTO document_blocks
+        (id, processing_build_id, page_number, block_type, reading_order, text,
+         origin, bbox_json, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run("b-pdf", "pb-pdf", 1, "text", 0, "前缀定位文本后缀", "ocr",
+      JSON.stringify({ x: 0.1, y: 0.2, width: 0.3, height: 0.04 }), now);
+    database.prepare(
+      `INSERT INTO chunk_block_refs
+        (namespace, chunk_id, block_id, start_offset, end_offset, bbox_degraded)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run("library", "c-pdf", "b-pdf", 0, 4, 0);
+    upsertFtsChunks(database, "library", "d-pdf", [
+      { id: "c-pdf", content: "定位文本" },
+    ]);
+
+    const hit = searchKeywordIndex(database, {
+      query: "定位文本",
+      library: { mode: "all" },
+      topK: 3,
+    }).chunks[0];
+    assert.deepEqual(hit.bbox, [0.1, 0.2, 0.3, 0.04]);
+    assert.equal(hit.bboxDegraded, undefined);
+    assert.equal(hit.startOffset, 2);
+    assert.equal(hit.endOffset, 6);
+    assert.deepEqual(hit.locatorHint, {
+      kind: "page",
+      page: 1,
+      bbox: [0.1, 0.2, 0.3, 0.04],
+      startOffset: 2,
+      endOffset: 6,
+    });
+    database.close();
+  });
+});
+
 test("migrateDatabase: 应用 FTS 与 citation 迁移", () => {
   withTempDb((dbPath) => {
     const database = new DatabaseSync(dbPath);

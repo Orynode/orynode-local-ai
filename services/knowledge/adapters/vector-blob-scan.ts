@@ -67,6 +67,14 @@ export class BlobScanVectorIndex implements VectorIndex {
       revisionId: (hit.chunk as { revisionId?: string }).revisionId,
       processingBuildId: (hit.chunk as { processingBuildId?: string })
         .processingBuildId,
+      locatorHint: hit.chunk.locatorHint,
+      bbox: hit.chunk.bbox,
+      bboxDegraded: hit.chunk.bboxDegraded,
+      headingPath: hit.chunk.headingPath,
+      startLine: hit.chunk.startLine,
+      endLine: hit.chunk.endLine,
+      startOffset: hit.chunk.startOffset,
+      endOffset: hit.chunk.endOffset,
     }));
   }
 }

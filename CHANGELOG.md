@@ -4,6 +4,52 @@
 `0.x` 期间破坏性或用户可见行为变化可递增次版本（`0.Y.0`）。  
 产品线「V1 源码安装版 / V2 签名安装包」见 README，与 npm `version` 不是同一套编号。
 
+## 1.2.1 — 2026-08-09
+
+1.2.0 后的修订：修 Chat 引用资料「读不到 / 不引用 / 定位错」与 8GB 资源调度闭环，并压低 PDF 目录页误召回。
+
+### Fixed / 修复
+
+#### 明确引用资料仍不可用
+
+- 单文件已挂对话但仍关键词 0 命中时：总结 / 分析 / 翻译等文档级意图改为 **scope 内顺序读取**，不再注入「未提供文本」空上下文
+- 单文件普通问答 0 命中时：同样允许授权范围内回退读取（整库 / 多文档仍禁止全量 dump）
+- 系统事实边界：完整运行环境要求 **Apple Silicon（arm64）**，不把 Intel Mac 说成当前可用
+
+#### 引用标记与原文预览
+
+- 小模型漏写 `[S#]` 时：仅在回答与来源摘录有可靠词项重叠时补引用，避免伪造依据
+- TXT / Markdown / RST：`start_line` / `end_line` / `heading_path` 入库并贯通 FTS → RetrievalHit → Citation（迁移 `015_chunk_text_locators`）
+- 文本分块不再 `trim` / 折叠连续空行，索引行号与原文件对齐；预览左侧行号 + 引用行高亮，滚动按实际坐标定位
+- 无扩展名 TXT 按文本 locator 展示「文本 Ln」，不再误标「Markdown / 第 1 页」
+- 大 chunk 按查询实体词收窄高亮行；过滤「分析 / 这个 / 文件」等问句噪声词
+
+#### PDF 目录误召回
+
+- 检索候选池加大后，识别「标题…页码」类目录 chunk；同文档有正文时把目录稳定排到队尾
+- 用户明确问「目录 / 章节 / 索引」时不降权；仅命中目录时仍保留结果
+
+#### 资源调度与向量任务
+
+- Chat 时序改为：`retrieve` → `unload embedding` → `markChatResourceActive` → Gemma；检索阶段可走 balanced，不再因「开始对话」必然 `auto → lite`
+- Chat 检索期固定 `skipLlm`：对话路径 **永不**触发本地 LLM Query Rewrite（术语晋升只发生在工作台 Search 等非 Chat 路径），避免 e5 与 Gemma 同驻
+- 向量 Worker 持有 embedding lease 时不再自锁 `EMBED_DEFERRED_HEAVY`（「等待重试」空转）
+
+#### 对话诊断 UX
+
+- 正常成功且仅为自动档调度时：隐藏「请求 auto → 实际 balanced / lite」与「检索诊断」入口
+- 仅未命中 / 检索失败 / 用户显式档位降级时展示简短提示
+
+### Changed / 变更
+
+- 架构文档与 `smoke-rag-8gb`：闭环契约改为 RAG → unload → 生成阶段保护
+- diagnostics：`retrieve` / Search 命中时为 `search_only`；Chat 装箱成功后才写 `context_packed`；Search 产品面固定 `accessMode: library_search`
+
+### Docs / 工程
+
+- 单测：access-mode、scoped document read、toc-chunk、chunk 行号保真、citation grounding、document-preview 行范围等
+- 旧 TXT/MD 需 **重新处理正文**（非仅向量重建）后，行号与空行对齐才会生效
+
 ## 1.2.0 — 2026-08-05
 
 **本版核心：RAG 检索闭环收紧**（相对 `1.1.1`）。闭合可学习 Query Rewrite、词法阶梯准入、处理队列 UX，并修正诊断误报；实现说明见 [架构文档 · 知识库/RAG](docs/ARCHITECTURE_zh-CN.md#知识库--rag-系统)。

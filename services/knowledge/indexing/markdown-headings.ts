@@ -53,7 +53,6 @@ export function softNormalizeMarkdown(text: string): string {
     .replace(/\r\n/g, "\n")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 

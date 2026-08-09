@@ -2,9 +2,9 @@
 
 [简体中文](ARCHITECTURE_zh-CN.md) | [English](ARCHITECTURE.md)
 
-This document describes the **service architecture, data flow, module layering, extension interfaces**, and **knowledge base / RAG system** design of Orynode Local AI (current implementation as of **1.2.0**).
+This document describes the **service architecture, data flow, module layering, extension interfaces**, and **knowledge base / RAG system** design of Orynode Local AI (current implementation as of **1.2.1**).
 
-The Chinese architecture doc is the source of truth for implementation detail: [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md). Release notes: [CHANGELOG 1.2.0](../CHANGELOG.md#120--2026-08-05).
+The Chinese architecture doc is the source of truth for implementation detail: [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md). Release notes: [CHANGELOG 1.2.1](../CHANGELOG.md#121--2026-08-09).
 
 Target audience: developers who want to understand the internals, reuse modules, or extend functionality.
 
@@ -260,6 +260,7 @@ orynode-local-ai/
 | Optional vector backend | **blob_scan** (production) | sqlite-vec reserved for **large** corpora when scan is a proven bottleneck |
 | Optional embedding | multilingual-e5-small (384-d, recommended) | Semantic recall via ONNX / Xenova |
 | Compat embedding | bge-small-zh-v1.5 (512-d) | Legacy / Chinese baseline |
+| Query Rewrite | Terminology + optional local LLM promotion | Workspace Search may use LLM rewrite; **Chat always `skipLlm`** (terminology only) |
 | OCR (shipping) | Apple Vision (`orynode-ocr`) | Scanned PDF → DocumentBlock |
 | OCR (reserved) | PP-OCR mobile + ONNX metadata | Windows stub / `OCR_UNAVAILABLE` |
 | App stack | Next.js · React · vinext · TypeScript · SQLite | Web + Data Service |
@@ -269,6 +270,8 @@ See `config/embedding-artifacts.ts` and [CHANGELOG 1.2.0](../CHANGELOG.md#120--2
 ## Knowledge Base / RAG System
 
 > **1.2.0:** RAG retrieval closed loop on top of the 1.1.0 Knowledge Engine (learnable rewrite, lexical ladder, jobs UI). Workspace uses **Search**; Chat uses **Retrieve + buildContext**; both share `HybridRetriever`. See [CHANGELOG](../CHANGELOG.md) and [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md).
+>
+> **1.2.1:** Citation availability fixes on top of 1.2.0 (scoped document read, phased memory scheduling, text line locators, TOC demotion). See [CHANGELOG 1.2.1](../CHANGELOG.md#121--2026-08-09).
 
 
 The full RAG pipeline is implemented across five modules in `services/knowledge/`:
@@ -510,7 +513,7 @@ ORYNODE_DATA_URL=http://127.0.0.1:4318
 | `memoryPressure` → `resourcePressure` | Transient (chat / OCR / embed lease) |
 | `memoryTier` | Retrieval ceiling (lite / balanced / quality) |
 
-**Closed loop (required):** `/api/chat` calls `markChatResourceActive` **before** RAG so `resourcePressure=high` forces keyword-only retrieve; low hosts also unload e5. Idle unload + `ORYNODE_EMBED_IDLE_UNLOAD_MS`. First-run settings init from memory preset; existing files are never overwritten.
+**Closed loop (required):** `/api/chat` phases are `buildChatKnowledgeContext` / retrieve → `releaseEmbeddingBeforeGeneration` → `markChatResourceActive` → Gemma → idle. Retrieval uses real device capacity **before** chat pressure rises; Chat retrieval always `skipLlm` (no learnable rewrite on the chat path). Idle unload + `ORYNODE_EMBED_IDLE_UNLOAD_MS`. First-run settings init from memory preset; existing files are never overwritten.
 
 | Layer | Behavior |
 |-------|----------|

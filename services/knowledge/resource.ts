@@ -56,3 +56,19 @@ export async function isChatResourceActive(): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * 检索与生成的阶段边界：尽力释放查询 embedding，避免低内存设备上
+ * e5 与生成模型同时驻留。失败时仍由 markChatResourceActive 的服务端
+ * 保护逻辑兜底，不阻断对话。
+ */
+export async function releaseEmbeddingBeforeGeneration(): Promise<void> {
+  try {
+    await fetch(`${ORYNODE_DATA_URL}/knowledge/embed/unload`, {
+      method: "POST",
+      signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
+    });
+  } catch {
+    // 尽力释放；失败不阻断后续生成阶段
+  }
+}

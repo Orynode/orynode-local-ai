@@ -6,7 +6,7 @@ import type {
   MessageAttachment,
   MessageCitation,
 } from "../../services/types";
-import { canonicalizeAssistantCitations } from "../../services/chat/prompt";
+import { groundUncitedAssistantAnswer } from "../../services/chat/prompt";
 import { scopeFromAttachments } from "../lib/attachments";
 
 export type { Message };
@@ -111,10 +111,7 @@ export function useChat() {
         if (!text || providedCitations.length === 0) {
           return { content: text, referencedIds: referencedCitationIds };
         }
-        return canonicalizeAssistantCitations(
-          text,
-          providedCitations.map((item) => item.id),
-        );
+        return groundUncitedAssistantAnswer(text, providedCitations);
       };
 
       const buildAssistant = (text: string): Message => ({

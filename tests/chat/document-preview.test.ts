@@ -64,15 +64,16 @@ describe("document-preview helpers", () => {
     );
   });
 
-  it("maps code locator startLine into preview intent", () => {
+  it("maps code locator line range into preview intent", () => {
     const intent = previewIntentFromCitation(
       citation({
         id: "S1b",
         documentId: "d2",
-        locator: { kind: "code", path: "a.ts", startLine: 42 },
+        locator: { kind: "code", path: "a.ts", startLine: 42, endLine: 48 },
       }),
     );
     assert.equal(intent?.startLine, 42);
+    assert.equal(intent?.endLine, 48);
   });
 
   it("maps page offsets and text locator into preview intent", () => {

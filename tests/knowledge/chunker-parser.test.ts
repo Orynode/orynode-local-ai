@@ -80,9 +80,36 @@ test("chunker: 长文按分隔符切开", () => {
   const text = Array.from({ length: 8 }, (_, i) => `段落${i}：${"内容".repeat(8)}。`).join(
     "\n\n",
   );
-  const chunks = chunker.chunkDocument([{ pageNumber: 1, text }]);
+  const chunks = chunker.chunkDocument([
+    { pageNumber: 1, text, startLine: 1, endLine: 15 },
+  ]);
   assert.ok(chunks.length > 1);
   assert.ok(chunks.every((chunk) => chunk.content.length > 0));
+  assert.equal(chunks.map((chunk) => chunk.content).join("\n"), text);
+  assert.ok(chunks.every((chunk) => chunk.startLine != null));
+  assert.ok(chunks.every((chunk) => chunk.endLine != null));
+  assert.ok(
+    chunks.some(
+      (chunk, index) =>
+        index > 0 && chunk.startLine !== chunks[index - 1]?.startLine,
+    ),
+  );
+});
+
+test("chunker: 保留连续空行，引用行号与原文一致", () => {
+  const chunker = createChunker({
+    maxChunkSize: 1800,
+    minChunkSize: 20,
+    overlapSize: 40,
+    separators: ["\n\n", "\n", "。", " "],
+  });
+  const text = "第一行\n\n\n目标内容\n\n结束";
+  const chunks = chunker.chunkDocument([
+    { pageNumber: 1, text, startLine: 1, endLine: 6 },
+  ]);
+  assert.equal(chunks[0]?.content.split("\n")[3], "目标内容");
+  assert.equal(chunks[0]?.startLine, 1);
+  assert.equal(chunks[0]?.endLine, 6);
 });
 
 test("hashContent: 稳定 SHA-256", () => {

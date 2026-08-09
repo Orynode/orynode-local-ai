@@ -106,16 +106,48 @@ export type ProcessRevisionJobContext = {
   createChunker: () => {
     chunkDocument: (
       pages: Array<{ pageNumber: number; text: string }>,
-    ) => Array<{ id?: string; content: string; pageNumber: number }>;
+    ) => Array<{
+      id?: string;
+      content: string;
+      pageNumber: number;
+      position?: number;
+      headingPath?: string[];
+      startLine?: number;
+      endLine?: number;
+    }>;
   };
   assignChunkIds: (
-    chunks: Array<{ id?: string; content: string; pageNumber: number }>,
-  ) => Array<{ id: string; content: string; pageNumber: number }>;
+    chunks: Array<{
+      id?: string;
+      content: string;
+      pageNumber: number;
+      position?: number;
+      headingPath?: string[];
+      startLine?: number;
+      endLine?: number;
+    }>,
+  ) => Array<{
+    id: string;
+    content: string;
+    pageNumber: number;
+    position?: number;
+    headingPath?: string[];
+    startLine?: number;
+    endLine?: number;
+  }>;
   commitChunks: (
     namespace: string,
     documentId: string,
     pageCount: number,
-    chunks: Array<{ id: string; content: string; pageNumber: number }>,
+    chunks: Array<{
+      id: string;
+      content: string;
+      pageNumber: number;
+      position?: number;
+      headingPath?: string[];
+      startLine?: number;
+      endLine?: number;
+    }>,
     options: Record<string, unknown>,
   ) => Promise<unknown>;
   setDocumentStatus: (

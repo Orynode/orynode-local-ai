@@ -107,6 +107,60 @@ test("locatorFromHit: PDF 用 page，Markdown 用 markdown", () => {
     startLine: 12,
     endLine: 20,
   });
+
+  const extensionlessText = locatorFromHit(
+    hit({
+      id: "t1",
+      documentId: "txt1",
+      documentName: "2026-08-06口播",
+      content: "最低要求是 Apple 芯片 Mac",
+      startLine: 60,
+      endLine: 66,
+    }),
+  );
+  assert.deepEqual(extensionlessText, {
+    kind: "markdown",
+    headingPath: undefined,
+    startLine: 60,
+    endLine: 66,
+  });
+
+  const narrowedText = locatorFromHit(
+    hit({
+      id: "t2",
+      documentId: "txt2",
+      documentName: "口播",
+      content: "项目介绍\n普通内容\n最低要求是 Apple 芯片 Mac\n结束",
+      startLine: 20,
+      endLine: 23,
+    }),
+    ["Apple", "芯片", "Mac"],
+  );
+  assert.deepEqual(narrowedText, {
+    kind: "markdown",
+    headingPath: undefined,
+    startLine: 22,
+    endLine: 22,
+  });
+
+  const ignoresGenericQuestionTerms = locatorFromHit(
+    hit({
+      id: "t3",
+      documentId: "txt3",
+      documentName: "口播",
+      content:
+        "简介\n最低要求：Apple 芯片 Mac\n其他内容\n如果可以，从这个版本开始",
+      startLine: 1,
+      endLine: 4,
+    }),
+    ["分析", "这个", "文件", "确认", "芯片", "mac", "可以", "用吗"],
+  );
+  assert.equal(
+    ignoresGenericQuestionTerms.kind === "markdown"
+      ? ignoresGenericQuestionTerms.startLine
+      : undefined,
+    2,
+  );
 });
 
 test("buildContextPackage: text 与 tokenEstimate", () => {

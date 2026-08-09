@@ -69,15 +69,7 @@ export interface Message {
   referencedCitationIds?: string[];
   retrievalTraceId?: string;
   /** 检索诊断（可选；历史消息可能没有） */
-  retrievalDiagnostics?: {
-    strategy: string[];
-    candidateCount: number;
-    elapsedMs: number;
-    degradedCapabilities: string[];
-    degradedReasons?: string[];
-    requestedTier?: string;
-    effectiveTier?: string;
-  };
+  retrievalDiagnostics?: import("./knowledge/core/types").RetrievalDiagnostics;
 }
 
 export interface ConversationSummary {
@@ -138,6 +130,14 @@ export interface KnowledgeChunk {
   position: number;
   content: string;
   embedding?: Float32Array | number[];
+  locatorHint?: import("./knowledge/core/types").CitationLocator;
+  bbox?: [number, number, number, number];
+  bboxDegraded?: boolean;
+  headingPath?: string[];
+  startLine?: number;
+  endLine?: number;
+  startOffset?: number;
+  endOffset?: number;
 }
 
 export interface RuntimeSettings {
