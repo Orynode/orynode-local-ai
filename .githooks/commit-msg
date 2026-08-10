@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Strip Cursor agent Co-authored-by trailers (repo policy: no cursoragent attribution).
+set -euo pipefail
+tmp="$(mktemp)"
+sed -E '/^Co-authored-by:[[:space:]]*Cursor[[:space:]]*<cursoragent@cursor\.com>[[:space:]]*$/Id' "$1" > "$tmp"
+mv "$tmp" "$1"

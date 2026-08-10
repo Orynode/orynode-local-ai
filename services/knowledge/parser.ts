@@ -54,7 +54,7 @@ export function parseOfficeMarkdown(
     const pages: ParsedPage[] = parts.map((part, index) => {
       const firstLine = part.split("\n")[0] ?? "";
       const heading = parseMarkdownHeadingLine(firstLine);
-      const headingPath = heading ? [heading.text] : undefined;
+      const headingPath = heading ? [heading.title] : undefined;
       const startLine = findSectionStartLine(fullLines, part, searchFrom);
       const lineCount = part.split("\n").length;
       const endLine = startLine + lineCount - 1;

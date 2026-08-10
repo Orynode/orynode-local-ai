@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Block commits that would fail CI lint / typecheck.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+if [[ "${SKIP_GIT_HOOKS:-}" == "1" ]]; then
+  echo "pre-commit: skipped (SKIP_GIT_HOOKS=1)"
+  exit 0
+fi
+
+echo "pre-commit: npm run lint"
+npm run lint
+
+echo "pre-commit: npm run typecheck"
+npm run typecheck

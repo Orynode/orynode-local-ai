@@ -37,7 +37,10 @@
     "knowledge:export": "node --disable-warning=ExperimentalWarning scripts/data-service/export-knowledge.mjs",
     "knowledge:import": "node --disable-warning=ExperimentalWarning scripts/data-service/import-knowledge.mjs",
     "knowledge:benchmark-vector": "node scripts/data-service/benchmark-vector-index.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .orynode"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern .orynode",
+    "typecheck": "tsc --noEmit",
+    "hooks:install": "bash scripts/install-git-hooks.sh",
+    "prepare": "bash scripts/install-git-hooks.sh"
   },
   "dependencies": {
     "@firecrawl/anydoc": "^0.1.7",

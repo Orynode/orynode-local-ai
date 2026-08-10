@@ -104,13 +104,7 @@ function mapAnydocError(error: unknown): OfficeConvertError {
   return new OfficeConvertError("Malformed", message || "Office 转换失败");
 }
 
-async function loadAnydoc(): Promise<{
-  toMarkdownBytes: (
-    bytes: Uint8Array,
-    format?: string,
-  ) => Promise<string>;
-  formatFromBytes?: (bytes: Uint8Array) => unknown;
-}> {
+async function loadAnydoc(): Promise<typeof import("@firecrawl/anydoc")> {
   try {
     return await import("@firecrawl/anydoc");
   } catch (error) {
@@ -148,7 +142,9 @@ export function createAnydocOfficeConverter(): OfficeConverter {
       }
 
       const anydoc = await loadAnydoc();
-      const formatArg = EXT_BY_OFFICE_FORMAT[format] ?? format;
+      const formatArg =
+        anydoc.formatFromExtension(EXT_BY_OFFICE_FORMAT[format] ?? format) ??
+        undefined;
       const work = (async (): Promise<OfficeConvertResult> => {
         try {
           // 刻意不用 toDocument：会物化 Document.assets（嵌入图字节）。
