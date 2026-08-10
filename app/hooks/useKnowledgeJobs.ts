@@ -190,7 +190,9 @@ export function useKnowledgeJobs(options?: {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const hadActiveRef = useRef(false);
   const onQueueSettledRef = useRef(options?.onQueueSettled);
-  onQueueSettledRef.current = options?.onQueueSettled;
+  useEffect(() => {
+    onQueueSettledRef.current = options?.onQueueSettled;
+  });
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {

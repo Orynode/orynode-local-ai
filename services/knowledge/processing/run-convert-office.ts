@@ -92,6 +92,7 @@ export async function runConvertOfficeJob(
   const owner = context.workerOwner || "convert-office";
   const attemptId = `${context.jobId || documentId}:convert`;
 
+  let leaseId: string | null = null;
   if (typeof context.tryAcquireOffice === "function") {
     const acquire = context.tryAcquireOffice({ owner, attemptId });
     if (!acquire.ok) {
@@ -100,9 +101,7 @@ export async function runConvertOfficeJob(
       }
       throw new Error(`OFFICE_LEASE_BUSY:${acquire.reason}`);
     }
-    var leaseId: string | null = acquire.leaseId;
-  } else {
-    var leaseId: string | null = null;
+    leaseId = acquire.leaseId;
   }
 
   try {

@@ -149,9 +149,11 @@ export default function Home() {
   const knowledge = useKnowledge({
     onJobsChanged: () => knowledgeJobs.notifyJobsChanged(),
   });
-  knowledgeRefreshRef.current = () => {
-    void knowledge.refresh();
-  };
+  useEffect(() => {
+    knowledgeRefreshRef.current = () => {
+      void knowledge.refresh();
+    };
+  });
   const conversationFiles = useConversationFiles({
     officeConverter: knowledge.meta?.officeConverter,
     semanticSearchEnabled: knowledge.meta?.semanticSearchEnabled,
