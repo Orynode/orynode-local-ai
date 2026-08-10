@@ -129,7 +129,7 @@ export function resolveMemoryPressure(input: {
   void input.hostClass;
   void input.embedResident;
   if (input.chatActive) return "critical";
-  if (input.heavyKind === "ocr" || input.heavyKind === "embedding") {
+  if (input.heavyKind === "ocr" || input.heavyKind === "embedding" || input.heavyKind === "office_convert") {
     return "critical";
   }
   return "normal";

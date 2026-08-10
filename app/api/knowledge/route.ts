@@ -1,5 +1,5 @@
 /**
- * /api/knowledge — 持久资料库唯一入库管线（PDF / TXT / Markdown）
+ * /api/knowledge — 持久资料库唯一入库管线（PDF / TXT / Markdown / Office）
  *
  * 身份 = content hash；显示名可选，不参与去重。
  */
@@ -13,6 +13,7 @@ import {
   EMBEDDING_CONFIG,
 } from "../../../config/defaults";
 import { ingestDocument } from "../../../services/knowledge";
+import { probeOfficeConverterAvailability } from "../../../services/knowledge/adapters/office-probe";
 import { lanDeniedResponse } from "../../../services/platform";
 
 const dataUrl = ORYNODE_DATA_URL;
@@ -21,10 +22,13 @@ export async function GET(request: Request) {
   const denied = lanDeniedResponse(request);
   if (denied) return denied;
   try {
-    const response = await fetch(`${dataUrl}/knowledge`, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
-    });
+    const [response, officeConverter] = await Promise.all([
+      fetch(`${dataUrl}/knowledge`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
+      }),
+      probeOfficeConverterAvailability(),
+    ]);
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
       return Response.json(body, { status: response.status });
@@ -35,6 +39,7 @@ export async function GET(request: Request) {
         semanticSearchEnabled: SEARCH_CONFIG.semanticSearchEnabled,
         embeddingModel: EMBEDDING_CONFIG.modelName,
         embeddingDim: EMBEDDING_CONFIG.dimension,
+        officeConverter,
       },
     });
   } catch (error) {

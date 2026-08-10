@@ -5,11 +5,15 @@ import type { ConversationFile } from "../../services/types";
 import {
   detectBrowserFileKind,
   mimeForKind,
+  officeFormatFromFileName,
+  KNOWLEDGE_FILE_KIND_LABEL,
+  KNOWLEDGE_FILE_KIND_LABEL_NO_OFFICE,
 } from "../../services/knowledge/formats";
 import {
   MAX_KNOWLEDGE_FILE_SIZE,
   MAX_KNOWLEDGE_FILE_SIZE_LABEL,
 } from "../../config/defaults";
+import { isKnowledgeIndexPending } from "../../services/knowledge/status";
 import type { KnowledgeUploadState } from "./useKnowledge";
 
 export type ConversationFileUploadResult = {
@@ -21,7 +25,12 @@ export type ConversationFileUploadResult = {
  * 会话附件：绑 conversationId，不进资料库。
  * 需要持久保存时，请到资料库页面导入。
  */
-export function useConversationFiles() {
+export function useConversationFiles(options?: {
+  officeConverter?: "anydoc" | "none" | null;
+  semanticSearchEnabled?: boolean;
+}) {
+  const officeConverter = options?.officeConverter ?? null;
+  const semanticSearchEnabled = Boolean(options?.semanticSearchEnabled);
   const [files, setFiles] = useState<ConversationFile[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadState, setUploadState] = useState<KnowledgeUploadState | null>(
@@ -84,12 +93,10 @@ export function useConversationFiles() {
             stopPolling();
             return;
           }
-          const pending = next.some(
-            (file) =>
-              file.status === "embedding" ||
-              file.status === "awaiting_chunks" ||
-              file.status === "stored" ||
-              file.status === "processing",
+          const pending = next.some((file) =>
+            isKnowledgeIndexPending(file.status, {
+              semanticEnabled: semanticSearchEnabled,
+            }),
           );
           if (!pending || ticks >= 120) {
             stopPolling();
@@ -97,7 +104,7 @@ export function useConversationFiles() {
         });
       }, 1500);
     },
-    [refresh, stopPolling],
+    [refresh, semanticSearchEnabled, stopPolling],
   );
 
   const pollJobProgress = useCallback(
@@ -135,7 +142,11 @@ export function useConversationFiles() {
               setNotice(`已完成，可关键词检索：${fileName}`);
               clearInterval(timer);
               jobTimers.current.delete(timer);
-              void refresh(conversationId);
+              void refresh(conversationId).then(() => {
+                if (conversationIdRef.current === conversationId) {
+                  startStatusPolling(conversationId);
+                }
+              });
             } else if (job?.status === "failed") {
               const err = String(job.error || "");
               setError(
@@ -157,7 +168,7 @@ export function useConversationFiles() {
       }, 1200);
       jobTimers.current.add(timer);
     },
-    [refresh],
+    [refresh, startStatusPolling],
   );
 
   const clear = useCallback(() => {
@@ -179,7 +190,11 @@ export function useConversationFiles() {
     ): Promise<ConversationFileUploadResult | null> => {
       const kind = detectBrowserFileKind(file);
       if (!kind) {
-        setError("目前只支持 PDF、TXT、Markdown（.md）文件");
+        setError(KNOWLEDGE_FILE_KIND_LABEL);
+        return null;
+      }
+      if (kind === "office" && officeConverter !== "anydoc") {
+        setError(KNOWLEDGE_FILE_KIND_LABEL_NO_OFFICE);
         return null;
       }
       if (file.size > MAX_KNOWLEDGE_FILE_SIZE) {
@@ -207,7 +222,10 @@ export function useConversationFiles() {
               "POST",
               `/api/conversations/${encodeURIComponent(conversationId)}/files`,
             );
-            xhr.setRequestHeader("content-type", mimeForKind(kind));
+            xhr.setRequestHeader(
+              "content-type",
+              mimeForKind(kind, officeFormatFromFileName(file.name)),
+            );
             xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
             xhr.setRequestHeader("x-file-kind", kind);
             xhr.responseType = "json";
@@ -277,7 +295,7 @@ export function useConversationFiles() {
         setUploadState(null);
       }
     },
-    [pollJobProgress, refresh, startStatusPolling],
+    [officeConverter, pollJobProgress, refresh, startStatusPolling],
   );
 
   const remove = useCallback(

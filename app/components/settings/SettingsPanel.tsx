@@ -967,6 +967,15 @@ export function SettingsPanel({
                     </dd>
                   </div>
                   <div>
+                    <dt>Office</dt>
+                    <dd>
+                      本机 <strong>@firecrawl/anydoc</strong>（
+                      <code>convert_office</code>
+                      ）；docx/pptx/xlsx 等 → Markdown 再索引。
+                      <strong>禁止</strong> Firecrawl 云端 Parse
+                    </dd>
+                  </div>
+                  <div>
                     <dt>存储与协议</dt>
                     <dd>
                       SQLite + Job Worker（Data Service <code>:4318</code>

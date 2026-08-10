@@ -15,6 +15,7 @@ import {
   highlightSearchSnippet,
 } from "../../lib/highlight-search-terms";
 import { MAX_KNOWLEDGE_FILE_SIZE_LABEL } from "../../../config/defaults";
+import { knowledgeFileAccept } from "../../../services/knowledge/formats";
 import { useDocumentPreview } from "../../lib/document-preview";
 import { Icon } from "../ui/Icon";
 import { ModalShell } from "../ui/ModalShell";
@@ -89,6 +90,10 @@ export function KnowledgeView({
 }: KnowledgeViewProps) {
   const { openPreview } = useDocumentPreview();
   const fileInput = useRef<HTMLInputElement>(null);
+  const officeReady = meta?.officeConverter === "anydoc";
+  const fileAccept = knowledgeFileAccept({
+    officeConverter: meta?.officeConverter ?? null,
+  });
   const [pickedIds, setPickedIds] = useState<string[]>([]);
   const [page, setPage] = useState(1);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
@@ -386,7 +391,7 @@ export function KnowledgeView({
           className="visually-hidden"
           type="file"
           multiple
-          accept="application/pdf,.pdf,text/plain,.txt,text/markdown,.md,.markdown"
+          accept={fileAccept}
           onChange={(event) => {
             const files = Array.from(event.target.files ?? []);
             if (files.length > 0) onFilesChosen(files);
@@ -394,6 +399,14 @@ export function KnowledgeView({
           }}
         />
       </div>
+
+      {!officeReady && meta ? (
+        <p className="knowledge-feedback" role="status">
+          本机 Office 转换不可用（@firecrawl/anydoc），docx/pptx/xlsx
+          等暂不可导入；PDF / TXT / Markdown 仍可用。可运行{" "}
+          <code>npm run doctor</code> 检查。
+        </p>
+      ) : null}
 
       {feedback ? (
         <p

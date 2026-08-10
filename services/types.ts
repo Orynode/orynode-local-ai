@@ -2,7 +2,10 @@
  * 全局共享类型 — 仅保留实际被前后端引用的定义
  */
 
+import type { KnowledgeFileKind } from "./knowledge/formats";
+
 export type MessageRole = "user" | "assistant";
+export type { KnowledgeFileKind };
 
 /** 用户消息上展示的附件引用（资料库或本会话文件） */
 export type MessageAttachment =
@@ -98,6 +101,8 @@ export interface KnowledgeDocument {
   originalName?: string;
   /** 内容身份 SHA-256 hex；资料库全局唯一 */
   contentHash?: string;
+  /** 摄取分流：pdf / txt / md / office */
+  fileKind?: KnowledgeFileKind | null;
   size: number;
   pageCount: number;
   chunkCount: number;
@@ -113,6 +118,7 @@ export interface ConversationFile {
   id: string;
   conversationId: string;
   name: string;
+  fileKind?: KnowledgeFileKind | null;
   size: number;
   pageCount: number;
   chunkCount: number;

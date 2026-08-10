@@ -5,16 +5,22 @@ import type { KnowledgeDocument } from "../../services/types";
 import {
   detectBrowserFileKind,
   mimeForKind,
+  officeFormatFromFileName,
+  KNOWLEDGE_FILE_KIND_LABEL,
+  KNOWLEDGE_FILE_KIND_LABEL_NO_OFFICE,
 } from "../../services/knowledge/formats";
 import {
   MAX_KNOWLEDGE_FILE_SIZE,
   MAX_KNOWLEDGE_FILE_SIZE_LABEL,
 } from "../../config/defaults";
+import { isKnowledgeIndexPending } from "../../services/knowledge/status";
 
 export interface KnowledgeMeta {
   semanticSearchEnabled: boolean;
   embeddingModel: string;
   embeddingDim: number;
+  /** 本机 Office 转换；none 时 UI 应灰显 Office 上传 */
+  officeConverter?: "anydoc" | "none";
 }
 
 /** 上传进度（仅 UI；不表示对话选中） */
@@ -54,8 +60,10 @@ function postKnowledgeFile(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/knowledge");
-    xhr.setRequestHeader("content-type", mimeForKind(kind));
-    xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
+    xhr.setRequestHeader(
+      "content-type",
+      mimeForKind(kind, officeFormatFromFileName(file.name)),
+    );    xhr.setRequestHeader("x-file-name", encodeURIComponent(file.name));
     if (options.displayName?.trim()) {
       xhr.setRequestHeader(
         "x-display-name",
@@ -257,19 +265,17 @@ export function useKnowledge(options?: { onJobsChanged?: () => void }) {
           if (ticks >= 120) stopPolling();
           return;
         }
-        const pending = docs.some(
-          (doc) =>
-            doc.status === "embedding" ||
-            doc.status === "awaiting_chunks" ||
-            doc.status === "stored" ||
-            doc.status === "processing",
+        const pending = docs.some((doc) =>
+          isKnowledgeIndexPending(doc.status, {
+            semanticEnabled: Boolean(meta?.semanticSearchEnabled),
+          }),
         );
         if (!pending || ticks >= 120) {
           stopPolling();
         }
       });
     }, 1500);
-  }, [refresh, stopPolling]);
+  }, [meta?.semanticSearchEnabled, refresh, stopPolling]);
 
   const pollJobProgress = useCallback(
     (jobId: string, fileName: string) => {
@@ -300,7 +306,7 @@ export function useKnowledge(options?: { onJobsChanged?: () => void }) {
             ) {
               setNotice(`已完成，可关键词检索：${fileName}`);
               clearInterval(timer);
-              void refresh();
+              void refresh().then(() => startStatusPolling());
             } else if (job?.status === "failed") {
               const err = String(job.error || "");
               setError(
@@ -317,7 +323,7 @@ export function useKnowledge(options?: { onJobsChanged?: () => void }) {
         if (ticks >= 120) clearInterval(timer);
       }, 1200);
     },
-    [refresh],
+    [refresh, startStatusPolling],
   );
 
   const upload = useCallback(
@@ -327,7 +333,11 @@ export function useKnowledge(options?: { onJobsChanged?: () => void }) {
     ): Promise<KnowledgeUploadResult | null> => {
       const kind = detectBrowserFileKind(file);
       if (!kind) {
-        setError("目前只支持 PDF、TXT、Markdown（.md）文件");
+        setError(KNOWLEDGE_FILE_KIND_LABEL);
+        return null;
+      }
+      if (kind === "office" && meta?.officeConverter !== "anydoc") {
+        setError(KNOWLEDGE_FILE_KIND_LABEL_NO_OFFICE);
         return null;
       }
       if (file.size > MAX_KNOWLEDGE_FILE_SIZE) {
@@ -368,7 +378,13 @@ export function useKnowledge(options?: { onJobsChanged?: () => void }) {
         if (!result.deduplicated) {
           startStatusPolling();
           if (result.jobId) {
-            flash(`正在分析 PDF：${label}`);
+            flash(
+              kind === "office"
+                ? `正在转换 Office：${label}`
+                : kind === "pdf"
+                  ? `正在分析 PDF：${label}`
+                  : `正在处理：${label}`,
+            );
             pollJobProgress(result.jobId, label);
             onJobsChanged?.();
           } else if (
@@ -389,7 +405,7 @@ export function useKnowledge(options?: { onJobsChanged?: () => void }) {
         setUploadState(null);
       }
     },
-    [flash, onJobsChanged, pollJobProgress, refresh, startStatusPolling],
+    [flash, meta?.officeConverter, onJobsChanged, pollJobProgress, refresh, startStatusPolling],
   );
 
   /**
@@ -445,7 +461,14 @@ export function useKnowledge(options?: { onJobsChanged?: () => void }) {
           if (!kind) {
             skipped.push({
               fileName: label,
-              error: "仅支持 PDF、TXT、Markdown",
+              error: KNOWLEDGE_FILE_KIND_LABEL,
+            });
+            continue;
+          }
+          if (kind === "office" && meta?.officeConverter !== "anydoc") {
+            skipped.push({
+              fileName: label,
+              error: KNOWLEDGE_FILE_KIND_LABEL_NO_OFFICE,
             });
             continue;
           }
@@ -531,6 +554,7 @@ export function useKnowledge(options?: { onJobsChanged?: () => void }) {
     },
     [
       flash,
+      meta?.officeConverter,
       onJobsChanged,
       pollJobProgress,
       refresh,

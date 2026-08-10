@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { OCR_CONFIG } from "../../../config/defaults";
 import type { OcrEngine } from "../../platform/types";
 import type { RenderedPageImage } from "./pdf-render";
+import { resolveKnowledgeFileKind } from "../formats";
 
 export type ChunkBlockRef = {
   blockId: string;
@@ -161,7 +162,12 @@ export type ProcessRevisionJobContext = {
   getDocumentMeta: (
     namespace: string,
     documentId: string,
-  ) => { storedPath?: string } | null;
+  ) => {
+    storedPath?: string;
+    fileKind?: string | null;
+    name?: string | null;
+    originalName?: string | null;
+  } | null;
   ocrMode?: string;
 };
 
@@ -270,6 +276,16 @@ export async function runProcessRevisionJob(ctx: ProcessRevisionJobContext) {
 
   const meta = getDocumentMeta(namespace, documentId);
   if (!meta?.storedPath) throw new Error("文档原件不存在");
+
+  const resolvedKind = resolveKnowledgeFileKind({
+    fileKind: meta.fileKind,
+    paths: [meta.storedPath, meta.originalName, meta.name],
+  });
+  if (resolvedKind !== "pdf") {
+    throw new Error(
+      `PROCESS_REVISION_WRONG_KIND:${resolvedKind ?? "unknown"}（非 PDF 请走 convert_office 或同步文本轨）`,
+    );
+  }
 
   let processingBuildId =
     typeof payload.processingBuildId === "string"

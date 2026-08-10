@@ -156,4 +156,15 @@ describe("preview-mime", () => {
     assert.equal(previewKindFromMeta(null, "notes.md"), "text");
     assert.equal(previewKindFromMeta("text/plain", "a"), "text");
   });
+
+  it("detects office by extension and mime", () => {
+    assert.equal(previewKindFromMeta(null, "report.docx"), "office");
+    assert.equal(
+      previewKindFromMeta(
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "deck",
+      ),
+      "office",
+    );
+  });
 });

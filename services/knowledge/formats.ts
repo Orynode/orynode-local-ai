@@ -1,57 +1,74 @@
 /**
  * 资料库支持的文件类型（入库前识别）
  *
- * 下游只认 ParsedDocument 文本页；格式差异止步于本模块 + parser。
+ * 扩展名 / MIME / kind 的唯一表在 format-registry.mjs；本模块提供类型安全 API
+ * 与魔数探测。下游只认 ParsedDocument 文本页；格式差异止步于本模块 + parser /
+ * OfficeConverter。
  */
 
-export type KnowledgeFileKind = "pdf" | "txt" | "md";
+export type {
+  KnowledgeFileKind,
+  OfficeFormat,
+} from "./format-registry.mjs";
 
-const KIND_BY_EXT: Record<string, KnowledgeFileKind> = {
-  ".pdf": "pdf",
-  ".txt": "txt",
-  ".md": "md",
-  ".markdown": "md",
-};
+export {
+  KIND_BY_EXT,
+  KIND_BY_MIME,
+  OFFICE_EXTS,
+  OFFICE_MIME,
+  OFFICE_FORMAT_BY_EXT,
+  MIME_BY_OFFICE_FORMAT,
+  EXT_BY_OFFICE_FORMAT,
+  FORMAT_ENTRIES,
+  kindFromFileName,
+  kindFromMime,
+  officeFormatFromFileName,
+  resolveKnowledgeFileKind,
+  extensionForKind,
+  mimeForKind,
+  isZipMagic,
+  isPdfMagic,
+  KNOWLEDGE_FILE_ACCEPT_CORE,
+  KNOWLEDGE_FILE_ACCEPT,
+} from "./format-registry.mjs";
 
-const KIND_BY_MIME: Record<string, KnowledgeFileKind> = {
-  "application/pdf": "pdf",
-  "text/plain": "txt",
-  "text/markdown": "md",
-  "text/x-markdown": "md",
-};
+import type { KnowledgeFileKind } from "./format-registry.mjs";
+import {
+  KNOWLEDGE_FILE_ACCEPT as ACCEPT_FULL,
+  KNOWLEDGE_FILE_ACCEPT_CORE as ACCEPT_CORE,
+  isPdfMagic,
+  isZipMagic,
+  kindFromFileName,
+  kindFromMime,
+  officeFormatFromFileName,
+} from "./format-registry.mjs";
 
-export function extensionForKind(kind: KnowledgeFileKind): string {
-  if (kind === "pdf") return "pdf";
-  if (kind === "md") return "md";
-  return "txt";
+export const KNOWLEDGE_FILE_KIND_LABEL =
+  "目前只支持 PDF、TXT、Markdown（.md）与常见 Office（docx/pptx/xlsx、odt/epub/rtf/csv 等）文件";
+
+export const KNOWLEDGE_FILE_KIND_LABEL_NO_OFFICE =
+  "目前只支持 PDF、TXT、Markdown（.md）。本机 Office 转换组件不可用，无法导入 docx/pptx/xlsx 等";
+
+/**
+ * 按 Office 转换能力生成 accept。
+ * 仅 `anydoc` 时暴露 Office；未知 / none 用 CORE（meta 未加载也不误放行）。
+ */
+export function knowledgeFileAccept(options?: {
+  officeConverter?: "anydoc" | "none" | null;
+}): string {
+  if (options?.officeConverter === "anydoc") {
+    return ACCEPT_FULL;
+  }
+  return ACCEPT_CORE;
 }
 
-export function mimeForKind(kind: KnowledgeFileKind): string {
-  if (kind === "pdf") return "application/pdf";
-  if (kind === "md") return "text/markdown";
-  return "text/plain";
-}
-
-export function kindFromFileName(name: string): KnowledgeFileKind | null {
-  const lower = name.trim().toLowerCase();
-  const dot = lower.lastIndexOf(".");
-  if (dot < 0) return null;
-  return KIND_BY_EXT[lower.slice(dot)] ?? null;
-}
-
-export function kindFromMime(contentType: string | null | undefined): KnowledgeFileKind | null {
-  if (!contentType) return null;
-  const mime = contentType.split(";")[0]?.trim().toLowerCase();
-  return mime ? (KIND_BY_MIME[mime] ?? null) : null;
-}
-
-/** 浏览器 File → 种类（扩展名优先，其次 MIME） */
+/** 浏览器 File → 种类（扩展名优先，其次 MIME；无魔数，最终 kind 以服务端为准） */
 export function detectBrowserFileKind(file: File): KnowledgeFileKind | null {
   return kindFromFileName(file.name) ?? kindFromMime(file.type);
 }
 
 /**
- * 服务端识别：扩展名 / MIME / PDF 魔数。
+ * 服务端识别：PDF 魔数优先 → 扩展名 / MIME → 文本启发式。
  * txt/md 需为可解码文本（拒绝明显二进制）。
  */
 export function detectKnowledgeKind(options: {
@@ -71,31 +88,34 @@ export function detectKnowledgeKind(options: {
   if (kind === "pdf") {
     return null; // 声称 PDF 但魔数不对
   }
+  if (kind === "office") {
+    const format = officeFormatFromFileName(options.fileName ?? "");
+    if (format === "csv" || format === "rtf") {
+      return looksLikeText(bytes) ? "office" : null;
+    }
+    if (isZipMagic(bytes) || byName === "office" || byMime === "office") {
+      return "office";
+    }
+    return null;
+  }
   if (kind === "txt" || kind === "md") {
     return looksLikeText(bytes) ? kind : null;
   }
-  // 无扩展名时：纯文本可当 txt
+  // 无扩展名时：纯文本可当 txt；ZIP 不当 office（避免误收任意 zip）
   if (looksLikeText(bytes) && !byMime && !byName) {
     return "txt";
   }
   return null;
 }
 
-export function isPdfMagic(bytes: Uint8Array): boolean {
-  // 规范允许文件头前有空白；部分 PDF 前几字节还有垃圾，在前 1KB 内找 %PDF-
-  const limit = Math.min(bytes.byteLength, 1024);
-  for (let i = 0; i <= limit - 5; i += 1) {
-    if (
-      bytes[i] === 0x25 &&
-      bytes[i + 1] === 0x50 &&
-      bytes[i + 2] === 0x44 &&
-      bytes[i + 3] === 0x46 &&
-      bytes[i + 4] === 0x2d
-    ) {
-      return true;
-    }
-  }
-  return false;
+/** PreviewKind 映射：KnowledgeFileKind → 预览层 */
+export function previewKindFromKnowledgeKind(
+  kind: KnowledgeFileKind | null,
+): "pdf" | "text" | "office" | "unknown" {
+  if (kind === "pdf") return "pdf";
+  if (kind === "office") return "office";
+  if (kind === "txt" || kind === "md") return "text";
+  return "unknown";
 }
 
 function looksLikeText(bytes: Uint8Array): boolean {
@@ -105,7 +125,6 @@ function looksLikeText(bytes: Uint8Array): boolean {
   for (let i = 0; i < sample.length; i += 1) {
     const b = sample[i];
     if (b === 0) return false;
-    // allow tab/lf/cr and printable + high utf-8 bytes
     if (b < 7 || (b > 14 && b < 32)) weird += 1;
   }
   return weird / sample.length < 0.05;

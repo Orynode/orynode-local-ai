@@ -17,8 +17,10 @@ export {
   kindFromFileName,
   mimeForKind,
   extensionForKind,
+  resolveKnowledgeFileKind,
+  knowledgeFileAccept,
 } from "./formats";
-export type { KnowledgeFileKind } from "./formats";
+export type { KnowledgeFileKind, OfficeFormat } from "./formats";
 export { createChunker } from "./chunker";
 export {
   HybridRetriever,

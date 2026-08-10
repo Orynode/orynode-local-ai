@@ -33,12 +33,12 @@ V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复�
 ## 当前功能
 
 - 本地 Web 对话（流式输出、停止生成、自动滚动；Orynode SSE v1 + 结构化引用）
-- **RAG / Knowledge Engine**（1.1.0 主链路 + **1.2.0** 检索闭环 + **1.2.1** 引用可用性修订）：Scope 授权、Hybrid、可学习 Query Rewrite、词法阶梯、Citation、ProcessingBuild、处理队列、知识工作台 Search 预览
+- **RAG / Knowledge Engine**（1.1.0 主链路 + **1.2.x** 检索/引用修订 + **1.3.0** 本地 Office 摄取）：Scope 授权、Hybrid、可学习 Query Rewrite、词法阶梯、Citation、ProcessingBuild、处理队列、知识工作台 Search 预览；Office 经本机 anydoc → Markdown
 - TurboFieldfare 连接状态与当前模型显示（经 ModelRuntime，不直连）
 - OpenAI 兼容对话接口代理
 - 可复现的 TurboFieldfare / Gemma 4 安装；一条命令同时启动模型与 Web
 - 本地 SQLite 自动保存对话；会话附件与持久资料库双命名空间
-- 本地 PDF / TXT / Markdown；扫描 PDF 可经 **Apple Vision OCR** 进索引
+- 本地 PDF / TXT / Markdown / 常见 Office（docx/pptx/xlsx 等）；扫描 PDF 可经 **Apple Vision OCR** 进索引
 - 设置页：采样参数、知识检索档位（自动 / 省资源 / 更高质量）、OCR 模式、Trusted-LAN 配对
 - 默认关键词检索；可选语义向量（`multilingual-e5-small` 等，需显式开启）
 - 无需账号，不包含统计分析，不在云端保存对话
@@ -56,9 +56,10 @@ V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复�
 | 可选 Embedding | multilingual-e5-small（默认推荐） | ONNX / `@xenova/transformers`；中英 |
 | Embedding 兼容 | bge-small-zh-v1.5 | 旧索引对照；勿与 E5 混用 |
 | OCR | Apple Vision（`orynode-ocr`） | macOS；Windows 预留 PP-OCR/ONNX stub |
+| Office 转换 | `@firecrawl/anydoc` | `npm install` 拉取；**仅本机** Office→Markdown；**禁止** Firecrawl 云端 Parse |
 | 应用栈 | Next.js · React · vinext · TypeScript · SQLite | 本地 Web + Data Service `:4318` |
 
-完整清单与版本边界见 [CHANGELOG 1.2.1](CHANGELOG.md#121--2026-08-09)（检索闭环基线：[1.2.0](CHANGELOG.md#120--2026-08-05)；KE 首发：[1.1.0](CHANGELOG.md#110--2026-08-03)）。
+完整清单与版本边界见 [CHANGELOG 1.3.0](CHANGELOG.md#130--2026-08-09)（引用可用性：[1.2.1](CHANGELOG.md#121--2026-08-09)；检索闭环：[1.2.0](CHANGELOG.md#120--2026-08-05)；KE 首发：[1.1.0](CHANGELOG.md#110--2026-08-03)）。
 
 ## 本地资料与检索
 
@@ -71,7 +72,7 @@ V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复�
 
 处理流程（两条入口共用 **Knowledge Engine** 摄取管线）：
 
-1. **解析**：按类型提取文本（PDF / TXT / Markdown）；扫描/混合 PDF 可走 Apple Vision OCR（`process_revision` Job）
+1. **解析**：按类型提取文本——PDF / TXT / Markdown 走原生解析（扫描/混合 PDF 可走 Apple Vision OCR，`process_revision` Job）；常见 Office（docx/pptx/xlsx 等）走本机 `@firecrawl/anydoc`（`convert_office` Job，**禁止**云端 Parse）
 2. **分块 / 索引**：切成可检索片段写入 SQLite；资料库入库前内容哈希去重
 3. **检索**：按**本轮消息**勾选范围 → `HybridRetriever`（默认 FTS；可选向量 + RRF）→ 注入上下文并带结构化引用
 4. 草稿选中发送后清空；打开历史不自动恢复上次勾选，但可再次从本会话附件列表选择
@@ -128,7 +129,9 @@ npm run ocr:install     # OCR helper（需 Swift；非 macOS 会跳过）
 npm run ocr:bench       # OCR micro-bench（默认 Fake；真机加 ORYNODE_OCR_BENCH_REAL=1）
 ```
 
-`npm run doctor` 可检查 OCR helper 是否可用。
+`npm install` 同时会安装 `@firecrawl/anydoc`（含当前平台的原生绑定），用于本机 Office 文档转 Markdown；**无需**单独安装 LibreOffice。**明令禁止**把文件发到 Firecrawl 云端 Parse 或任何第三方托管解析 API。本版 Office **不索引嵌入图片**，预览为转换后的可检索文本（与引用行号同源）；看图请下载原件。
+
+`npm run doctor` 可检查 OCR helper 与本机 Office 转换（`@firecrawl/anydoc`）是否可用。
 
 ## 日常启动
 
@@ -200,7 +203,7 @@ orynode-local-ai/
 ## 隐私说明
 
 默认情况下，提示词和生成结果只会发送给本机运行的 TurboFieldfare
-服务，并保存在本机SQLite数据库。本项目不包含分析统计或遥测功能。首次安装模型需要联网下载模型文件。
+服务，并保存在本机SQLite数据库。本项目不包含分析统计或遥测功能。首次安装模型需要联网下载模型文件；`npm install` 也可能下载 AnyDoc 的平台原生二进制。Office 转换（若启用）必须在本机完成；**禁止**使用 Firecrawl 云端 Parse 或其它云端文档解析服务。
 
 本地运行可以减少资料被发送到外部服务器的风险，但不能代替设备安全、访问控制和备份措施。重要资料仍应由用户自行保护。
 

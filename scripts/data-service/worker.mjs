@@ -19,6 +19,7 @@ const JOB_TYPES = [
   "sync_source",
   "garbage_collect",
   "process_revision",
+  "convert_office",
 ];
 
 /**
@@ -38,6 +39,7 @@ export function startIndexWorker(deps) {
     runSyncSource = null,
     runGarbageCollect = null,
     runProcessRevision = null,
+    runConvertOffice = null,
     log = console,
   } = deps;
 
@@ -236,6 +238,39 @@ export function startIndexWorker(deps) {
     }
   }
 
+  async function processConvertOfficeJob(job) {
+    if (typeof runConvertOffice !== "function") {
+      throw new Error("convert_office handler 未注入");
+    }
+    jobs.setProgress(job.id, WORKER_ID, { phase: "converting" });
+    const heartbeat = setInterval(() => {
+      try {
+        jobs.heartbeat(job.id, WORKER_ID, LEASE_MS);
+      } catch {
+        // ignore
+      }
+    }, Math.floor(LEASE_MS / 3));
+    if (typeof heartbeat.unref === "function") heartbeat.unref();
+
+    try {
+      const result = await runConvertOffice(job.payload ?? {}, {
+        jobId: job.id,
+        onProgress: (progress) => {
+          jobs.setProgress(job.id, WORKER_ID, progress);
+          jobs.heartbeat(job.id, WORKER_ID, LEASE_MS);
+        },
+        deferIfBusy: true,
+      });
+      if (result?.deferred) {
+        jobs.defer(job.id, WORKER_ID, 3000);
+        return { deferred: true, reason: result.reason };
+      }
+      return { convertOffice: result };
+    } finally {
+      clearInterval(heartbeat);
+    }
+  }
+
   async function tick() {
     if (stopped || tickRunning) return;
     tickRunning = true;
@@ -254,6 +289,8 @@ export function startIndexWorker(deps) {
           progress = await processGarbageCollectJob(job);
         } else if (job.type === "process_revision") {
           progress = await processRevisionJob(job);
+        } else if (job.type === "convert_office") {
+          progress = await processConvertOfficeJob(job);
         } else {
           progress = await processEmbedJob(job);
         }
@@ -263,7 +300,8 @@ export function startIndexWorker(deps) {
         jobs.complete(job.id, WORKER_ID, progress);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (String(message).startsWith("OCR_LEASE_BUSY")) {
+        if (String(message).startsWith("OCR_LEASE_BUSY") ||
+            String(message).startsWith("OFFICE_LEASE_BUSY")) {
           jobs.defer(job.id, WORKER_ID, 3000);
           return;
         }

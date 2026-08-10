@@ -454,3 +454,89 @@ test("process_revision: ocrMode=disabled 且 needsOcr 时整体 OCR_DISABLED", a
   assert.equal(builds.get(build.id).isActive, 0);
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("process_revision: fileKind=office 时拒绝（应走 convert_office）", async () => {
+  const builds = createMemoryProcessingBuilds();
+  const build = builds.beginBuild({ revisionId: "rev-o", configHash: "t" });
+  await assert.rejects(
+    () =>
+      runProcessRevisionJob({
+        payload: {
+          namespace: "library",
+          documentId: "doc-o",
+          revisionId: "rev-o",
+          processingBuildId: build.id,
+        },
+        resolveOcrEngine: async () => null,
+        tryAcquireOcr: () => ({ ok: true, leaseId: "x" }),
+        releaseOcr: () => undefined,
+        analyzePdfPages: async () => {
+          throw new Error("不应分析 PDF");
+        },
+        summarizePageQualities: () => ({
+          needsOcr: false,
+          ocrPageCount: 0,
+          nativePageCount: 0,
+          blankPageCount: 0,
+        }),
+        renderPdfPageToPng: async () => {
+          throw new Error("不应渲染");
+        },
+        cleanupRenderTemp: async () => undefined,
+        createChunker: () => ({ chunkDocument: () => [] }),
+        assignChunkIds: (c) => c,
+        commitChunks: async () => ({}),
+        setDocumentStatus: async () => undefined,
+        processingBuilds: builds,
+        documentBlocks: createMemoryBlockStore(),
+        getDocumentMeta: () => ({
+          storedPath: "/tmp/report.docx",
+          fileKind: "office",
+        }),
+      }),
+    /PROCESS_REVISION_WRONG_KIND:office/,
+  );
+});
+
+test("process_revision: fileKind 缺失时按路径推断拒绝 office", async () => {
+  const builds = createMemoryProcessingBuilds();
+  const build = builds.beginBuild({ revisionId: "rev-p", configHash: "t" });
+  await assert.rejects(
+    () =>
+      runProcessRevisionJob({
+        payload: {
+          namespace: "library",
+          documentId: "doc-p",
+          revisionId: "rev-p",
+          processingBuildId: build.id,
+        },
+        resolveOcrEngine: async () => null,
+        tryAcquireOcr: () => ({ ok: true, leaseId: "x" }),
+        releaseOcr: () => undefined,
+        analyzePdfPages: async () => {
+          throw new Error("不应分析 PDF");
+        },
+        summarizePageQualities: () => ({
+          needsOcr: false,
+          ocrPageCount: 0,
+          nativePageCount: 0,
+          blankPageCount: 0,
+        }),
+        renderPdfPageToPng: async () => {
+          throw new Error("不应渲染");
+        },
+        cleanupRenderTemp: async () => undefined,
+        createChunker: () => ({ chunkDocument: () => [] }),
+        assignChunkIds: (c) => c,
+        commitChunks: async () => ({}),
+        setDocumentStatus: async () => undefined,
+        processingBuilds: builds,
+        documentBlocks: createMemoryBlockStore(),
+        getDocumentMeta: () => ({
+          storedPath: "/tmp/deck.pptx",
+          fileKind: null,
+        }),
+      }),
+    /PROCESS_REVISION_WRONG_KIND:office/,
+  );
+});

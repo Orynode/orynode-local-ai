@@ -1,9 +1,9 @@
 /**
- * 共享摄取管线：detect → 先存原件 → PDF 一律 process_revision / TXT·MD 同步
+ * 共享摄取管线：detect → 先存原件 → 按 kind 分轨
  *
  * library：内容哈希身份；显示名仅为元数据；命中哈希则短路不重解析。
  * conversation：不做全局去重。
- * PDF：保存原件 → 完整 ProcessRevisionJobV1 → HTTP 侧立即返回（分析/chunk 在 Job 内）。
+ * pdf → process_revision；office → convert_office；txt/md → 同步解析 chunk。
  */
 
 import {
@@ -15,7 +15,12 @@ import {
   detectKnowledgeKind,
   mimeForKind,
   extensionForKind,
+  officeFormatFromFileName,
+  KNOWLEDGE_FILE_KIND_LABEL,
+  KNOWLEDGE_FILE_KIND_LABEL_NO_OFFICE,
+  type KnowledgeFileKind,
 } from "./formats";
+import { probeOfficeConverterAvailability } from "./adapters/office-probe";
 import { createChunker } from "./chunker";
 import {
   assignChunkIds,
@@ -58,6 +63,23 @@ function processRevisionIdempotencyKey(
   return `process_revision:${namespace}:${documentId}`;
 }
 
+function convertOfficeIdempotencyKey(
+  namespace: "library" | "conversation",
+  documentId: string,
+): string {
+  return `convert_office:${namespace}:${documentId}`;
+}
+
+function processingIdempotencyKey(
+  kind: KnowledgeFileKind,
+  namespace: "library" | "conversation",
+  documentId: string,
+): string {
+  return kind === "office"
+    ? convertOfficeIdempotencyKey(namespace, documentId)
+    : processRevisionIdempotencyKey(namespace, documentId);
+}
+
 async function lookupJobByIdempotency(
   key: string,
 ): Promise<{ id: string; status: string } | null> {
@@ -94,7 +116,11 @@ async function maybeRemoveFailedLibraryDocument(
     // awaiting_chunks 等：若无在途 Job 才清理
     if (hit.status !== "awaiting_chunks") return false;
   }
-  const key = processRevisionIdempotencyKey("library", hit.id);
+  const key = processingIdempotencyKey(
+    (hit.fileKind as KnowledgeFileKind) || "pdf",
+    "library",
+    hit.id,
+  );
   const job = await lookupJobByIdempotency(key);
   if (job && IN_FLIGHT_JOB.has(job.status)) {
     return false;
@@ -152,7 +178,10 @@ async function storeLibraryBytes(input: {
   const storeResponse = await fetch(`${ORYNODE_DATA_URL}/knowledge`, {
     method: "POST",
     headers: {
-      "content-type": mimeForKind(input.kind as "pdf" | "txt" | "md"),
+      "content-type": mimeForKind(
+        input.kind as KnowledgeFileKind,
+        officeFormatFromFileName(input.originalName),
+      ),
       "x-file-name": encodeURIComponent(input.originalName),
       "x-display-name": encodeURIComponent(input.displayName),
       "x-content-hash": input.contentHash,
@@ -180,7 +209,10 @@ async function storeLibraryBytes(input: {
     const retry = await fetch(`${ORYNODE_DATA_URL}/knowledge`, {
       method: "POST",
       headers: {
-        "content-type": mimeForKind(input.kind as "pdf" | "txt" | "md"),
+        "content-type": mimeForKind(
+          input.kind as KnowledgeFileKind,
+          officeFormatFromFileName(input.originalName),
+        ),
         "x-file-name": encodeURIComponent(input.originalName),
         "x-display-name": encodeURIComponent(input.displayName),
         "x-content-hash": input.contentHash,
@@ -246,6 +278,57 @@ async function enqueueProcessRevision(input: {
   return String(body.job?.id || body.id || "");
 }
 
+async function enqueueConvertOffice(input: {
+  namespace: "library" | "conversation";
+  documentId: string;
+  formatHint?: string | null;
+}): Promise<string> {
+  const response = await fetch(`${ORYNODE_DATA_URL}/jobs`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      type: "convert_office",
+      idempotencyKey: convertOfficeIdempotencyKey(
+        input.namespace,
+        input.documentId,
+      ),
+      payload: {
+        schemaVersion: 1,
+        namespace: input.namespace,
+        documentId: input.documentId,
+        formatHint: input.formatHint || undefined,
+      },
+      maxAttempts: 3,
+    }),
+    signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error || "无法排队 Office 转换任务");
+  }
+  return String(body.job?.id || body.id || "");
+}
+
+async function enqueueProcessingForKind(input: {
+  kind: KnowledgeFileKind;
+  namespace: "library" | "conversation";
+  documentId: string;
+  fileName?: string | null;
+}): Promise<string> {
+  if (input.kind === "office") {
+    return enqueueConvertOffice({
+      namespace: input.namespace,
+      documentId: input.documentId,
+      formatHint: officeFormatFromFileName(input.fileName || ""),
+    });
+  }
+  return enqueueProcessRevision({
+    namespace: input.namespace,
+    documentId: input.documentId,
+    ocrMode: await readOcrMode(),
+  });
+}
+
 async function setStatus(
   namespace: "library" | "conversation",
   id: string,
@@ -296,7 +379,10 @@ async function storeConversationBytes(input: {
     {
       method: "POST",
       headers: {
-        "content-type": mimeForKind(input.kind as "pdf" | "txt" | "md"),
+        "content-type": mimeForKind(
+          input.kind as KnowledgeFileKind,
+          officeFormatFromFileName(input.originalName),
+        ),
         "x-file-name": encodeURIComponent(input.originalName),
         "x-file-kind": input.kind,
         "x-conversation-id": input.conversationId,
@@ -330,7 +416,14 @@ export async function ingestDocument(options: {
     buffer: bytes,
   });
   if (!kind) {
-    throw new Error("目前只支持 PDF、TXT、Markdown（.md）文件");
+    throw new Error(KNOWLEDGE_FILE_KIND_LABEL);
+  }
+
+  if (kind === "office") {
+    const officeConverter = await probeOfficeConverterAvailability();
+    if (officeConverter !== "anydoc") {
+      throw new Error(KNOWLEDGE_FILE_KIND_LABEL_NO_OFFICE);
+    }
   }
 
   const originalName = decodeFileName(
@@ -362,10 +455,11 @@ export async function ingestDocument(options: {
       }
       // in-progress：幂等复用现有 Job，绝不删除
       if (hit?.id && IN_PROGRESS_DOC.has(String(hit.status || ""))) {
-        const jobId = await enqueueProcessRevision({
+        const jobId = await enqueueProcessingForKind({
+          kind: (hit.fileKind as KnowledgeFileKind) || kind,
           namespace: "library",
           documentId: hit.id,
-          ocrMode: await readOcrMode(),
+          fileName: options.fileName,
         });
         return {
           namespace: "library",
@@ -380,9 +474,8 @@ export async function ingestDocument(options: {
     }
   }
 
-  // PDF：先存原件，一律 enqueue process_revision（分析/chunk 不在上传 HTTP 内）
-  if (kind === "pdf") {
-    const ocrMode = await readOcrMode();
+  // PDF / Office：先存原件，enqueue 对应 Job（分析/转换不在上传 HTTP 内）
+  if (kind === "pdf" || kind === "office") {
     let storedId: string | null = null;
 
     try {
@@ -403,10 +496,11 @@ export async function ingestDocument(options: {
             };
           }
           if (IN_PROGRESS_DOC.has(String(stored.document.status || ""))) {
-            const jobId = await enqueueProcessRevision({
+            const jobId = await enqueueProcessingForKind({
+              kind,
               namespace: "library",
               documentId: stored.document.id,
-              ocrMode,
+              fileName: originalName,
             });
             return {
               namespace: "library",
@@ -431,10 +525,11 @@ export async function ingestDocument(options: {
         storedId!,
         "processing",
       );
-      const jobId = await enqueueProcessRevision({
+      const jobId = await enqueueProcessingForKind({
+        kind,
         namespace: target.namespace === "library" ? "library" : "conversation",
         documentId: storedId!,
-        ocrMode,
+        fileName: originalName,
       });
       if (target.namespace === "library") {
         const document = (await setStatus(

@@ -102,6 +102,24 @@ else
   check "OCR helper" "macOS only (Windows OCR pending)" "yes"
 fi
 
+ANYDOC_PROBE="$(
+  cd "${PROJECT_ROOT}" && node --input-type=module -e '
+import { createRequire } from "node:module";
+const require = createRequire(process.cwd() + "/");
+try {
+  require("@firecrawl/anydoc");
+  console.log("ok");
+} catch (error) {
+  console.log("fail:" + (error instanceof Error ? error.message : String(error)));
+}
+' 2>/dev/null || echo "fail:node"
+)"
+if [[ "${ANYDOC_PROBE}" == "ok" ]]; then
+  check "Office converter" "@firecrawl/anydoc loadable" "yes"
+else
+  check "Office converter" "anydoc unavailable (${ANYDOC_PROBE#fail:}); reinstall with npm install" "no"
+fi
+
 printf '\n'
 if [[ "${problems}" -eq 0 ]]; then
   printf 'Everything required by Orynode is ready.\n'

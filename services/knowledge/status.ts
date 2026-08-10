@@ -6,6 +6,10 @@ import type {
   KnowledgeDocument,
   KnowledgeDocumentStatus,
 } from "../types";
+import {
+  isOfficeSectionsTruncated,
+  officeSectionsTruncatedDetail,
+} from "./office-contract";
 
 /** 与 FTS / data-service 白名单一致；改这里必须同步 scripts/data-service/searchable-document-statuses.mjs */
 export const SEARCHABLE_DOCUMENT_STATUSES = [
@@ -15,8 +19,34 @@ export const SEARCHABLE_DOCUMENT_STATUSES = [
   "error",
 ] as const;
 
+/** 摄取/索引尚未到终态（不含 ready；语义开启时 ready 另判） */
+export const IN_FLIGHT_DOCUMENT_STATUSES = [
+  "awaiting_chunks",
+  "stored",
+  "processing",
+  "embedding",
+] as const;
+
 export type SearchableDocumentStatus =
   (typeof SEARCHABLE_DOCUMENT_STATUSES)[number];
+
+/**
+ * 资料库 / 会话附件列表是否应继续轮询。
+ * 语义开启时 `ready` 表示关键词已好、向量仍在路上（Job 成功 ≠ 文档终态）。
+ */
+export function isKnowledgeIndexPending(
+  status: string | null | undefined,
+  options?: { semanticEnabled?: boolean },
+): boolean {
+  const value = status ?? "";
+  if (
+    (IN_FLIGHT_DOCUMENT_STATUSES as readonly string[]).includes(value)
+  ) {
+    return true;
+  }
+  if (options?.semanticEnabled && value === "ready") return true;
+  return false;
+}
 
 function isSearchableStatus(
   status: string | null | undefined,
@@ -56,6 +86,23 @@ function includesCode(
   return Boolean(code?.includes(expected));
 }
 
+/** OCR / Office 内容截断：成功可检索但 fitness=degraded */
+function isContentTruncated(errorCode: string | null | undefined): boolean {
+  return (
+    includesCode(errorCode, "OCR_PAGE_TRUNCATED") ||
+    isOfficeSectionsTruncated(errorCode)
+  );
+}
+
+function contentTruncationDetail(
+  errorCode: string | null | undefined,
+): string {
+  if (isOfficeSectionsTruncated(errorCode)) {
+    return officeSectionsTruncatedDetail(errorCode);
+  }
+  return truncatedOcrDetail(errorCode);
+}
+
 /**
  * 将持久层状态投影为用户关心的三条轴：
  * 内容是否可检索、语义索引是否可用、失败是否值得重试。
@@ -64,19 +111,27 @@ function includesCode(
 export function documentViewStatus(
   document: Pick<
     KnowledgeDocument,
-    "status" | "chunkCount" | "errorMessage"
+    "status" | "chunkCount" | "errorMessage" | "fileKind"
   >,
   semanticEnabled: boolean,
 ): KnowledgeDocumentViewStatus {
   const status = document.status ?? "ready";
   const hasChunks = (document.chunkCount ?? 0) > 0;
   const errorCode = document.errorMessage;
+  const fileKind = document.fileKind;
 
   if (status === "processing_error") {
     const pageLimit = includesCode(errorCode, "OCR_PAGE_LIMIT_EXCEEDED");
     const noText = includesCode(errorCode, "OCR_NO_TEXT");
     const disabled = includesCode(errorCode, "OCR_DISABLED");
-    const unsuitable = pageLimit || noText || disabled;
+    const officeEncrypted = includesCode(errorCode, "OFFICE_ENCRYPTED");
+    const officeUnsupported = includesCode(errorCode, "OFFICE_UNSUPPORTED");
+    const unsuitable =
+      pageLimit ||
+      noText ||
+      disabled ||
+      officeEncrypted ||
+      officeUnsupported;
     const detail = pageLimit
       ? "扫描页超过本机安全上限；请拆分 PDF，或先转为带文字层的 PDF"
       : noText
@@ -106,7 +161,9 @@ export function documentViewStatus(
       semantic: semanticEnabled ? "pending" : "off",
       fitness: "ok",
       severity: "info",
-      label: hasChunks ? "正在更新，暂不可检索" : statusLabel(status),
+      label: hasChunks
+        ? "正在更新，暂不可检索"
+        : statusLabel(status, fileKind),
       detail: hasChunks
         ? "更新完成前暂时无法检索和对话，完成后会自动恢复"
         : "原件已保留，完成后才可用于检索和对话",
@@ -147,15 +204,11 @@ export function documentViewStatus(
     return {
       content: "usable",
       semantic: semanticEnabled ? "ready" : "off",
-      fitness: includesCode(errorCode, "OCR_PAGE_TRUNCATED")
-        ? "degraded"
-        : "ok",
-      severity: includesCode(errorCode, "OCR_PAGE_TRUNCATED")
-        ? "warning"
-        : "neutral",
+      fitness: isContentTruncated(errorCode) ? "degraded" : "ok",
+      severity: isContentTruncated(errorCode) ? "warning" : "neutral",
       label: semanticEnabled ? "关键词 + 语义已就绪" : "可关键词检索",
-      detail: includesCode(errorCode, "OCR_PAGE_TRUNCATED")
-        ? truncatedOcrDetail(errorCode)
+      detail: isContentTruncated(errorCode)
+        ? contentTruncationDetail(errorCode)
         : "可用于检索和对话",
       canAttach: true,
       canRetryProcessing: false,
@@ -165,17 +218,15 @@ export function documentViewStatus(
   return {
     content: "usable",
     semantic: semanticEnabled ? "pending" : "off",
-    fitness: includesCode(errorCode, "OCR_PAGE_TRUNCATED")
-      ? "degraded"
-      : "ok",
-    severity: includesCode(errorCode, "OCR_PAGE_TRUNCATED")
+    fitness: isContentTruncated(errorCode) ? "degraded" : "ok",
+    severity: isContentTruncated(errorCode)
       ? "warning"
       : semanticEnabled
         ? "info"
         : "neutral",
     label: semanticEnabled ? "关键词可用 · 语义索引中" : "可关键词检索",
-    detail: includesCode(errorCode, "OCR_PAGE_TRUNCATED")
-      ? truncatedOcrDetail(errorCode)
+    detail: isContentTruncated(errorCode)
+      ? contentTruncationDetail(errorCode)
       : "可用于检索和对话",
     canAttach: true,
     canRetryProcessing: false,
@@ -184,16 +235,18 @@ export function documentViewStatus(
 
 export function statusLabel(
   status: KnowledgeDocumentStatus | undefined,
+  fileKind?: string | null,
 ): string {
+  const isOffice = fileKind === "office";
   switch (status) {
     case "awaiting_chunks":
       return "处理中";
     case "stored":
       return "已存原件";
     case "processing":
-      return "正在识别";
+      return isOffice ? "正在转换" : "正在识别";
     case "processing_error":
-      return "识别失败";
+      return isOffice ? "转换失败" : "识别失败";
     case "embedding":
       return "索引中";
     case "indexed":
@@ -210,6 +263,39 @@ export function statusLabel(
 /** OCR / 处理失败的稳定错误码 → 用户可读说明 */
 export function processingErrorLabel(code: string | null | undefined): string {
   if (!code) return "处理失败，原文件已保留";
+  if (code.includes("OFFICE_ENCRYPTED")) {
+    return "文件已加密，无法转换";
+  }
+  if (code.includes("OFFICE_UNSUPPORTED")) {
+    return "不支持的 Office 格式";
+  }
+  if (code.includes("OFFICE_MALFORMED")) {
+    return "Office 文件损坏或无法解析";
+  }
+  if (code.includes("OFFICE_TIMEOUT")) {
+    return "转换超时，可重试";
+  }
+  if (code.includes("OFFICE_OUTPUTTOOLARGE") || code.includes("OFFICE_OUTPUT_TOO_LARGE")) {
+    return "转换结果过大";
+  }
+  if (code.includes("OFFICE_RESOURCELIMIT") || code.includes("OFFICE_RESOURCE_LIMIT")) {
+    return "文件超过 Office 转换资源上限";
+  }
+  if (code.includes("OFFICE_MISSINGPART") || code.includes("OFFICE_MISSING_PART")) {
+    return "Office 文件缺少必要组成部分";
+  }
+  if (code.includes("OFFICE_IO")) {
+    return "读取 Office 文件失败";
+  }
+  if (code.includes("OFFICE_UNAVAILABLE")) {
+    return "Office 转换组件不可用";
+  }
+  if (isOfficeSectionsTruncated(code)) {
+    return officeSectionsTruncatedDetail(code);
+  }
+  if (code.includes("OFFICE_")) {
+    return "Office 转换失败，原文件已保留";
+  }
   if (code.includes("OCR_UNAVAILABLE")) {
     return "OCR 不可用，原文件已保留";
   }

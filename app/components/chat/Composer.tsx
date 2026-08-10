@@ -11,6 +11,9 @@ import type {
 } from "../../../services/types";
 import type { KnowledgeUploadState } from "../../hooks/useKnowledge";
 import {
+  knowledgeFileAccept,
+} from "../../../services/knowledge/formats";
+import {
   allDocumentsAttachment,
   isLibraryAll,
   removeDraftAttachment,
@@ -78,6 +81,8 @@ interface ComposerProps {
   uploadState?: KnowledgeUploadState | null;
   /** 上传为本对话附件并自动选中 */
   onAttachFileSelect: (file: File) => void;
+  /** 本机 Office 转换；none 时 accept 不含 Office */
+  officeConverter?: "anydoc" | "none" | null;
   /** 删除本会话附件（落盘 + 索引） */
   onRemoveConversationFile?: (fileId: string) => void;
   /** 重建本会话附件向量 */
@@ -101,6 +106,7 @@ export function Composer({
   uploading,
   uploadState = null,
   onAttachFileSelect,
+  officeConverter = null,
   onRemoveConversationFile,
   onReindexConversationFile,
   hotSettings,
@@ -112,6 +118,7 @@ export function Composer({
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragDepth = useRef(0);
   const [panel, setPanel] = useState<PanelMode>("closed");
+  const fileAccept = knowledgeFileAccept({ officeConverter });
   const [draft, setDraft] = useState<HotSettings>(hotSettings);
   const [prevHotSettings, setPrevHotSettings] = useState(hotSettings);
   if (hotSettings !== prevHotSettings) {
@@ -639,7 +646,7 @@ export function Composer({
             ref={fileInput}
             className="visually-hidden"
             type="file"
-            accept="application/pdf,.pdf,text/plain,.txt,text/markdown,.md,.markdown"
+            accept={fileAccept}
             onChange={(event) => {
               const file = event.target.files?.[0];
               if (file) onAttachFileSelect(file);

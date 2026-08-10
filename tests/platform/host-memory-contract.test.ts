@@ -78,6 +78,20 @@ test("host-memory: pressure 合成", () => {
     }),
     "critical",
   );
+  assert.equal(
+    resolveMemoryPressure({
+      hostClass: "low",
+      heavyKind: "office_convert",
+    }),
+    "critical",
+  );
+  assert.equal(
+    fromScripts.resolveMemoryPressure({
+      hostClass: "medium",
+      heavyKind: "office_convert",
+    }),
+    "critical",
+  );
   assert.equal(memoryPressureToResourcePressure("constrained"), "high");
   assert.equal(fromScripts.memoryPressureToResourcePressure("normal"), "normal");
 });

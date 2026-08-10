@@ -27,8 +27,48 @@ import {
   resolveOriginalFromResponse,
   type PreviewKind,
 } from "../../lib/preview-mime";
+import {
+  officePreviewBanner,
+  officePreviewPendingCopy,
+} from "../../../services/knowledge/office-contract";
 import { Icon } from "../ui/Icon";
 import { PdfPreviewCanvas } from "./PdfPreviewCanvas";
+
+function officeVersionNote(intent: DocumentPreviewIntent): string {
+  return officePreviewBanner({ revisionId: intent.revisionId });
+}
+
+/**
+ * 行号高亮必须读 IndexedText（与 citation startLine 同源），禁止 chunks 装饰拼装。
+ * @see services/knowledge/indexed-text.ts
+ */
+async function fetchIndexedPreviewText(
+  intent: DocumentPreviewIntent,
+): Promise<{ text: string; missingArtifact: boolean }> {
+  const path =
+    intent.sourceType === "library"
+      ? `/api/knowledge/${encodeURIComponent(intent.documentId)}/indexed-text`
+      : intent.sourceType === "conversation_file" && intent.conversationId
+        ? `/api/conversations/${encodeURIComponent(intent.conversationId)}/files/${encodeURIComponent(intent.documentId)}/indexed-text`
+        : null;
+  if (!path) return { text: "", missingArtifact: false };
+  const response = await fetch(path, { cache: "no-store" });
+  const marker = response.headers.get("x-orynode-indexed-text");
+  if (response.status === 415) {
+    // PDF 等无 IndexedText：留给原件路径，不假装有行号文本
+    return { text: "", missingArtifact: false };
+  }
+  const text =
+    response.ok || response.status === 409 ? await response.text() : "";
+  if (response.status === 409 || marker === "missing") {
+    return { text, missingArtifact: true };
+  }
+  if (!response.ok) {
+    // 服务不可达 / 404：勿静默当成「尚未转换完成」
+    return { text: "", missingArtifact: true };
+  }
+  return { text, missingArtifact: false };
+}
 
 function initialPage(intent: DocumentPreviewIntent): number {
   const page = intent.page;
@@ -266,6 +306,22 @@ function DocumentPreviewPanel({
         setFileName(name);
         const nextKind = previewKindFromMeta(contentType, name);
 
+        if (nextKind === "office") {
+          if (cancelled) return;
+          setKind("office");
+          setFileUrl(url);
+          const indexed = await fetchIndexedPreviewText(current);
+          if (cancelled) return;
+          setVersionNote(
+            officeVersionNote(current) +
+              (indexed.missingArtifact
+                ? "\n尚未写入 IndexedText 快照，行号高亮可能不准；请对该文档执行重新处理。"
+                : ""),
+          );
+          setTextContent(indexed.text);
+          return;
+        }
+
         if (nextKind === "pdf") {
           if (cancelled) return;
           setKind("pdf");
@@ -357,6 +413,21 @@ function DocumentPreviewPanel({
           return;
         }
 
+        if (resolved.kind === "office") {
+          setKind("office");
+          setFileUrl(url);
+          const indexed = await fetchIndexedPreviewText(current);
+          if (cancelled) return;
+          setVersionNote(
+            officeVersionNote(current) +
+              (indexed.missingArtifact
+                ? "\n尚未写入 IndexedText 快照，行号高亮可能不准；请对该文档执行重新处理。"
+                : ""),
+          );
+          setTextContent(indexed.text);
+          return;
+        }
+
         setKind("unknown");
         setFileUrl(url);
       } catch (err) {
@@ -405,7 +476,7 @@ function DocumentPreviewPanel({
   }, [closePreview]);
 
   useEffect(() => {
-    if (kind !== "text" || !textContent) return;
+    if ((kind !== "text" && kind !== "office") || !textContent) return;
     const raf = requestAnimationFrame(() => {
       const el = textRef.current;
       if (!el) return;
@@ -596,10 +667,23 @@ function DocumentPreviewPanel({
               onNumPages={onNumPages}
               onError={onPdfError}
             />
-          ) : kind === "text" ? (
+          ) : kind === "text" || (kind === "office" && textContent) ? (
             <pre ref={textRef} className="doc-preview-text">
               {renderHighlightedText(textContent, intent)}
             </pre>
+          ) : kind === "office" ? (
+            <div className="doc-preview-status">
+              <p>{officePreviewPendingCopy()}</p>
+              {fileUrl ? (
+                <a
+                  className="doc-preview-page-btn"
+                  href={fileUrl}
+                  download={fileName || "download"}
+                >
+                  下载原件
+                </a>
+              ) : null}
+            </div>
           ) : fileUrl ? (
             <div className="doc-preview-status">
               <p>暂不支持此格式的内嵌预览。</p>

@@ -71,6 +71,8 @@ export function jobTypeLabel(type: string): string {
       return "向量重建";
     case "process_revision":
       return "PDF/OCR 处理";
+    case "convert_office":
+      return "Office 转换";
     case "sync_source":
       return "来源同步";
     case "garbage_collect":
@@ -176,19 +178,32 @@ function snapshotHasActive(snapshot: KnowledgeJobsSnapshot): boolean {
  * 资料库处理中心：拉取 / 轮询全局 Job 队列。
  * 轮询仅在有 active 任务时持续；空闲后停止，避免「一直在更新」的错觉。
  */
-export function useKnowledgeJobs() {
+export function useKnowledgeJobs(options?: {
+  /** 队列从有任务变为空闲时回调（用于刷新资料库列表状态） */
+  onQueueSettled?: () => void;
+}) {
   const [jobs, setJobs] = useState<KnowledgeJob[]>([]);
   const [summary, setSummary] = useState<KnowledgeJobsSummary>(EMPTY_SUMMARY);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const hadActiveRef = useRef(false);
+  const onQueueSettledRef = useRef(options?.onQueueSettled);
+  onQueueSettledRef.current = options?.onQueueSettled;
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
+  }, []);
+
+  const noteActiveTransition = useCallback((active: boolean) => {
+    if (hadActiveRef.current && !active) {
+      onQueueSettledRef.current?.();
+    }
+    hadActiveRef.current = active;
   }, []);
 
   const applySnapshot = useCallback((result: FetchResult) => {
@@ -208,10 +223,13 @@ export function useKnowledgeJobs() {
       if (!quiet) setLoading(true);
       const result = await fetchJobsSnapshot();
       const applied = applySnapshot(result);
+      if (applied) {
+        noteActiveTransition(snapshotHasActive(applied));
+      }
       if (!quiet) setLoading(false);
       return applied;
     },
-    [applySnapshot],
+    [applySnapshot, noteActiveTransition],
   );
 
   const startPolling = useCallback(() => {

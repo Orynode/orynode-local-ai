@@ -22,7 +22,57 @@ export async function parseDocument(
   if (kind === "pdf") {
     return parsePdf(buffer);
   }
+  if (kind === "office") {
+    throw new Error(
+      "Office 原件不可同步 parseDocument；请走 convert_office → parseOfficeMarkdown",
+    );
+  }
   return parsePlainText(buffer, kind);
+}
+
+/**
+ * Office 转换后的约定 Markdown → 文本页。
+ * 优先按 ## Slide N / ## Sheet: name 切段，否则回退标题切段。
+ */
+export function parseOfficeMarkdown(
+  markdown: string,
+  _format?: string,
+): ParsedDocument {
+  const text = markdown.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").trim();
+  if (!text) return { pageCount: 0, pages: [] };
+
+  const officeSplit = text
+    .split(/\n(?=##\s+(?:Slide\s+\d+|Sheet:\s*))/i)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (officeSplit.length > 1 || /^##\s+(?:Slide\s+\d+|Sheet:)/i.test(text)) {
+    const parts =
+      officeSplit.length > 0 ? officeSplit : [text];
+    const fullLines = text.split("\n");
+    let searchFrom = 0;
+    const pages: ParsedPage[] = parts.map((part, index) => {
+      const firstLine = part.split("\n")[0] ?? "";
+      const heading = parseMarkdownHeadingLine(firstLine);
+      const headingPath = heading ? [heading.text] : undefined;
+      const startLine = findSectionStartLine(fullLines, part, searchFrom);
+      const lineCount = part.split("\n").length;
+      const endLine = startLine + lineCount - 1;
+      searchFrom = startLine + lineCount - 1;
+      return {
+        pageNumber: index + 1,
+        text: part,
+        headingPath,
+        startLine,
+        endLine,
+      };
+    });
+    return { pageCount: pages.length, pages };
+  }
+
+  // Word 等：复用 Markdown 标题切段
+  const encoder = new TextEncoder();
+  return parsePlainText(encoder.encode(text).buffer, "md");
 }
 
 /**
@@ -67,7 +117,7 @@ export async function parsePdf(buffer: ArrayBuffer): Promise<ParsedDocument> {
  */
 export function parsePlainText(
   buffer: ArrayBuffer,
-  _kind: Exclude<KnowledgeFileKind, "pdf"> = "txt",
+  _kind: Exclude<KnowledgeFileKind, "pdf" | "office"> = "txt",
 ): ParsedDocument {
   const text = new TextDecoder("utf-8")
     .decode(buffer)

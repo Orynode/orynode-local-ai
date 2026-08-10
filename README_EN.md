@@ -37,7 +37,7 @@ layout introduced in V1. See the [roadmap](docs/ROADMAP.md).
 ## Current features
 
 - Local web chat (streaming, stop, Orynode SSE v1 + structured citations)
-- **RAG / Knowledge Engine** (1.1.0): Scope auth, hybrid retrieval, citations, ProcessingBuild, workspace Search preview
+- **RAG / Knowledge Engine** (1.1.0 + **1.2.x** retrieval/citation + **1.3.0** local Office ingest): Scope auth, hybrid retrieval, citations, ProcessingBuild, workspace Search preview; Office via on-device anydoc → Markdown
 - TurboFieldfare status via ModelRuntime (not direct coupling)
 - OpenAI-compatible chat proxy; resumable Gemma 4 install; one-command local start
 - SQLite history; conversation attachments vs durable library namespaces
@@ -58,9 +58,10 @@ layout introduced in V1. See the [roadmap](docs/ROADMAP.md).
 | Optional embedding | multilingual-e5-small (recommended) | ONNX / `@xenova/transformers` |
 | Compat embedding | bge-small-zh-v1.5 | Legacy / Chinese baseline; do not mix with E5 |
 | OCR | Apple Vision (`orynode-ocr`) | macOS; Windows PP-OCR/ONNX stub reserved |
+| Office conversion | `@firecrawl/anydoc` | Via `npm install`; **on-device only**; Firecrawl hosted Parse is **forbidden** |
 | App stack | Next.js · React · vinext · TypeScript · SQLite | Web + Data Service `:4318` |
 
-Full inventory: [CHANGELOG 1.1.0](CHANGELOG.md#110--2026-08-03).
+Full inventory: [CHANGELOG 1.3.0](CHANGELOG.md#130--2026-08-09) (citation fixes: [1.2.1](CHANGELOG.md#121--2026-08-09); retrieval loop: [1.2.0](CHANGELOG.md#120--2026-08-05); KE launch: [1.1.0](CHANGELOG.md#110--2026-08-03)).
 
 ## Local documents and retrieval
 
@@ -73,7 +74,7 @@ Files live in two namespaces (same mental model as common chat products):
 
 Shared pipeline (**Knowledge Engine**):
 
-1. **Parse** — PDF / TXT / Markdown; scanned/hybrid PDFs may use Apple Vision OCR (`process_revision`)
+1. **Parse** — PDF / TXT / Markdown via native parsers (scanned/hybrid PDFs may use Apple Vision OCR, `process_revision`); common Office (docx/pptx/xlsx, …) via on-device `@firecrawl/anydoc` (`convert_office`; **no** Firecrawl cloud Parse)
 2. **Chunk / index** — passages in SQLite; library content-hash dedupe
 3. **Retrieve** — per-message scope → `HybridRetriever` (FTS default; optional vectors + RRF) → context + structured citations
 4. Draft selection clears after send; history does not restore the previous draft, but conversation files stay selectable
@@ -125,6 +126,13 @@ This observes the current progress without restarting or interrupting it.
 
 `npm run setup` installs TurboFieldfare first and then downloads the model. You
 can also run `npm run turbo:install` and `npm run model:install` separately.
+
+`npm install` also installs `@firecrawl/anydoc` (with a platform-native
+binding) for local Office→Markdown conversion. LibreOffice is **not** required.
+Sending files to Firecrawl’s hosted Parse API (or any third-party cloud parse
+endpoint) is **forbidden**. This release does **not** index embedded Office
+images; preview shows converted searchable text (same coordinate system as
+citation line numbers). Download the original to view images.
 
 ## Daily use
 
@@ -198,7 +206,10 @@ For the full service layer breakdown, data flow, knowledge base / RAG system des
 Prompts and generated responses are sent only to the locally configured
 TurboFieldfare service by default and are saved in the local SQLite database.
 The project does not include analytics or telemetry. The first model
-installation requires a network connection.
+installation requires a network connection; `npm install` may also download
+AnyDoc’s platform-native binary. Office conversion (when used) must run
+on-device. Firecrawl hosted Parse and other cloud document-parse APIs are
+**forbidden**.
 
 Local execution reduces external data transfer, but it does not replace device
 security, access controls, or backups. Users remain responsible for protecting

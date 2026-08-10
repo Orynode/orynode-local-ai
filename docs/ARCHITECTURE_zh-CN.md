@@ -293,10 +293,12 @@ orynode-local-ai/
 > **1.2.0**：在 1.1.0 Knowledge Engine 上闭合检索升级——可学习 Rewrite、词法阶梯、处理队列与诚实 diagnostics。工作台走 **Search**；Chat 走 **Retrieve + buildContext**；共用 `HybridRetriever`。细节见下文与 [CHANGELOG 1.2.0](../CHANGELOG.md#120--2026-08-05)。
 >
 > **1.2.1**：在 1.2.0 上修 Chat 引用可用性（单文件确定性读取、阶段化资源调度、TXT 行号预览、PDF 目录降权等）。见 [CHANGELOG 1.2.1](../CHANGELOG.md#121--2026-08-09)。
+>
+> **1.3.0**：本地 Office 摄取（`convert_office` + 本机 `@firecrawl/anydoc`）；IndexedText 预览与引用行号同源；不索引嵌入图。见 [CHANGELOG 1.3.0](../CHANGELOG.md#130--2026-08-09)。
 
 ```
-上传 PDF / TXT / MD（或 Web/GitHub Connector）
-  → ingest（detect → 可选 OCR process_revision → parse → chunk）
+上传 PDF / TXT / MD / Office（或 Web/GitHub Connector）
+  → ingest（detect → PDF 可选 OCR process_revision / Office 走 convert_office → parse → chunk）
   → ProcessingBuild activate → data-service 存原件 / chunks / blocks
   →（可选）embed Job → vector_entries
 对话 / 工作台

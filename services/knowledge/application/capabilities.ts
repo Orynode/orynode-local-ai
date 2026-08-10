@@ -81,6 +81,8 @@ export type KnowledgeCapabilities = HostCapabilities & {
   /** 本地重排真实类型 */
   rerankerType: RerankerCapabilityType | null;
   resourcePressure: "normal" | "high";
+  /** Office 转换组件：anydoc 已加载 / 不可用 */
+  officeConverter: "anydoc" | "none";
 };
 
 export type VectorCoverage = {
@@ -338,10 +340,13 @@ async function resolveOcrDetail(
 export async function getKnowledgeCapabilities(
   requestedTier: KnowledgeTier = "auto",
 ): Promise<KnowledgeCapabilities> {
-  const [snap, ocrMode, coverage] = await Promise.all([
+  const [snap, ocrMode, coverage, officeConverter] = await Promise.all([
     probeCapabilitySnapshot(),
     readOcrModeSetting(),
     probeVectorCoverage(),
+    import("../adapters/office-probe").then((m) =>
+      m.probeOfficeConverterAvailability(),
+    ),
   ]);
   const { resolveRetrievalProfile } = await import("../retrieval/profile");
   const profile = resolveRetrievalProfile(requestedTier, snap);
@@ -391,6 +396,7 @@ export async function getKnowledgeCapabilities(
     knowledgeSearch,
     vectorCoverage: coverage,
     resourcePressure: snap.resourcePressure ?? "normal",
+    officeConverter,
   };
 }
 

@@ -113,7 +113,7 @@ export function hostKnowledgeCeiling(hostClass, semanticEnabled) {
  */
 export function resolveMemoryPressure(input) {
   if (input.chatActive) return "critical";
-  if (input.heavyKind === "ocr" || input.heavyKind === "embedding") {
+  if (input.heavyKind === "ocr" || input.heavyKind === "embedding" || input.heavyKind === "office_convert") {
     return "critical";
   }
   return "normal";

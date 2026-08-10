@@ -11,6 +11,7 @@ import {
 test("job 文案与进度格式", () => {
   assert.equal(jobTypeLabel("embed_document"), "向量重建");
   assert.equal(jobTypeLabel("process_revision"), "PDF/OCR 处理");
+  assert.equal(jobTypeLabel("convert_office"), "Office 转换");
   assert.equal(jobStatusLabel("queued"), "排队中");
   assert.equal(jobStatusLabel("running"), "进行中");
   assert.equal(

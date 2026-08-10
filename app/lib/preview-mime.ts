@@ -1,24 +1,28 @@
-/** 预览 MIME / 种类探测（纯函数，便于单测） */
+/**
+ * 预览 MIME / 种类探测（纯函数，便于单测）
+ *
+ * 支持集委托 formats registry；本模块只做 PreviewKind 映射与流式读取。
+ */
 
-export type PreviewKind = "pdf" | "text" | "unknown";
+import {
+  isPdfMagic,
+  kindFromFileName,
+  kindFromMime,
+  previewKindFromKnowledgeKind,
+} from "../../services/knowledge/formats";
+
+export type PreviewKind = "pdf" | "text" | "office" | "unknown";
+
+export function isOfficeFileName(fileName: string): boolean {
+  return kindFromFileName(fileName) === "office";
+}
 
 export function looksLikePdf(bytes: ArrayBuffer | Uint8Array): boolean {
   const sample =
     bytes instanceof Uint8Array
-      ? bytes.subarray(0, Math.min(bytes.byteLength, 1024))
-      : new Uint8Array(bytes, 0, Math.min(bytes.byteLength, 1024));
-  for (let i = 0; i <= sample.length - 5; i += 1) {
-    if (
-      sample[i] === 0x25 &&
-      sample[i + 1] === 0x50 &&
-      sample[i + 2] === 0x44 &&
-      sample[i + 3] === 0x46 &&
-      sample[i + 4] === 0x2d
-    ) {
-      return true;
-    }
-  }
-  return false;
+      ? bytes
+      : new Uint8Array(bytes);
+  return isPdfMagic(sample);
 }
 
 export function previewKindFromMeta(
@@ -26,19 +30,28 @@ export function previewKindFromMeta(
   fileName: string,
   headBytes?: ArrayBuffer | Uint8Array,
 ): PreviewKind {
-  const type = (contentType || "").toLowerCase();
-  const lower = fileName.toLowerCase();
-  if (type.includes("pdf") || lower.endsWith(".pdf")) return "pdf";
   if (headBytes && looksLikePdf(headBytes)) return "pdf";
+
+  const byName = kindFromFileName(fileName);
+  const byMime = kindFromMime(contentType);
+  // PDF 魔数已优先；声明为 pdf 时也映射为 pdf（无 head 时）
+  const kind = byName ?? byMime;
+  if (kind === "pdf") return "pdf";
+  if (kind) return previewKindFromKnowledgeKind(kind);
+
+  // MIME 子串兜底（部分网关返回不完整 content-type）
+  const type = (contentType || "").toLowerCase();
+  if (type.includes("pdf")) return "pdf";
   if (
-    type.includes("text/") ||
-    type.includes("markdown") ||
-    lower.endsWith(".md") ||
-    lower.endsWith(".markdown") ||
-    lower.endsWith(".txt")
+    type.includes("officedocument") ||
+    type.includes("msword") ||
+    type.includes("ms-powerpoint") ||
+    type.includes("ms-excel") ||
+    type.includes("opendocument")
   ) {
-    return "text";
+    return "office";
   }
+  if (type.includes("text/") || type.includes("markdown")) return "text";
   return "unknown";
 }
 
@@ -173,6 +186,7 @@ export type ResolvedOriginal =
   | { kind: "pdf"; mode: "data"; data: ArrayBuffer }
   | { kind: "pdf"; mode: "url" }
   | { kind: "text"; text: string; truncated: boolean }
+  | { kind: "office" }
   | { kind: "unknown" };
 
 /**
@@ -216,6 +230,9 @@ export async function resolveOriginalFromResponse(
         text: new TextDecoder("utf-8", { fatal: false }).decode(slice),
         truncated: buf.byteLength > input.textMaxBytes,
       };
+    }
+    if (kind === "office") {
+      return { kind: "office" };
     }
     return { kind: "unknown" };
   }
@@ -278,6 +295,10 @@ export async function resolveOriginalFromResponse(
         text: new TextDecoder("utf-8", { fatal: false }).decode(bytes),
         truncated,
       };
+    }
+
+    if (kind === "office") {
+      return { kind: "office" };
     }
 
     return { kind: "unknown" };

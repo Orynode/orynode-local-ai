@@ -4,6 +4,39 @@
 `0.x` 期间破坏性或用户可见行为变化可递增次版本（`0.Y.0`）。  
 产品线「V1 源码安装版 / V2 签名安装包」见 README，与 npm `version` 不是同一套编号。
 
+## 1.3.0 — 2026-08-09
+
+**本版核心：本地 Office 摄取**（相对 `1.2.1`）。资料库与会话附件支持常见 Word / PowerPoint / Excel 等，经本机 `@firecrawl/anydoc` 转为 Markdown 再进入既有 chunk / 检索管线；**禁止** Firecrawl 云端 Parse 或任何第三方托管文档解析。
+
+> **范围**  
+> 独立 Job `convert_office`（与 PDF `process_revision` 分轨）；转换实现经 `OfficeConverter` Port，默认 anydoc；8GB 上与 OCR / embedding 共享 heavy lease，Chat 优先。本版 **不索引、不预览嵌入图片**（看图请下载原件）。
+
+### Added / 新增
+
+#### Office 摄取与转换
+
+- `KnowledgeFileKind` 增加 `office`；扩展名 / MIME 单一真相源 `format-registry`（含 docx/pptx/xlsx、OpenDocument、rtf/csv/epub 及常见宏/变体映射）
+- 上传 → 存原件 → `convert_office` → canonical Markdown → chunk → ready（可选再 embed）
+- 本机 `@firecrawl/anydoc`（`npm install` 拉取平台原生绑定）；`doctor` 可探测转换组件
+- 能力闸：`officeConverter === "anydoc"` 才开放 Office accept；不可用时 UI 灰显并提示
+- 资源协调：`office_convert` 计入 heavy lease / 内存压力；超时、体积、输出字符、Slide/Sheet 数有硬帽；截断时 `OFFICE_SECTIONS_TRUNCATED` 降级可检索
+
+#### 预览与引用定位（IndexedText）
+
+- Office 预览读取与 citation 行号同源的 **IndexedText**（convert 写入的 canonical markdown，`preview_path`），禁止用 chunks 加「第 N 段」装饰拼装
+- 预览横幅明确：非排版还原、不索引嵌入图；行号高亮 / 滚动与 TXT 同一套坐标契约
+- 旧 Office 文档需 **重新处理**（重新转换）后才有 IndexedText 快照；仅重建向量不够
+
+### Changed / 变更
+
+- README / README_EN / PRIVACY / SECURITY：写清本机 Office 流程与云 Parse 硬禁止
+- `THIRD_PARTY_NOTICES`：不把 npm 依赖 anydoc 列为「运行时另下」组件（与 Turbo / Gemma 区分）
+
+### Docs / 工程
+
+- 单测：格式 registry、canonicalize / 截断、convert 写 IndexedText、禁止 `toDocument`、云 Parse 主机痕迹检查等
+- 迁移 `016_document_file_kind`、`017_preview_path`
+
 ## 1.2.1 — 2026-08-09
 
 1.2.0 后的修订：修 Chat 引用资料「读不到 / 不引用 / 定位错」与 8GB 资源调度闭环，并压低 PDF 目录页误召回。

@@ -140,11 +140,22 @@ export default function Home() {
   // ---- Hooks ----
   const chat = useChat();
   const conversations = useConversations();
-  const knowledgeJobs = useKnowledgeJobs();
+  const knowledgeRefreshRef = useRef<() => void>(() => undefined);
+  const knowledgeJobs = useKnowledgeJobs({
+    onQueueSettled: () => {
+      knowledgeRefreshRef.current();
+    },
+  });
   const knowledge = useKnowledge({
     onJobsChanged: () => knowledgeJobs.notifyJobsChanged(),
   });
-  const conversationFiles = useConversationFiles();
+  knowledgeRefreshRef.current = () => {
+    void knowledge.refresh();
+  };
+  const conversationFiles = useConversationFiles({
+    officeConverter: knowledge.meta?.officeConverter,
+    semanticSearchEnabled: knowledge.meta?.semanticSearchEnabled,
+  });
   const settingsHook = useSettings();
 
   // ---- Init ----
@@ -652,6 +663,7 @@ export default function Home() {
               onAttachFileSelect={(file) => {
                 void handleAttachConversationFile(file);
               }}
+              officeConverter={knowledge.meta?.officeConverter}
               onRemoveConversationFile={(fileId) => {
                 void handleRemoveConversationFile(fileId);
               }}
@@ -719,6 +731,7 @@ export default function Home() {
               onAttachFileSelect={(file) => {
                 void handleAttachConversationFile(file);
               }}
+              officeConverter={knowledge.meta?.officeConverter}
               onRemoveConversationFile={(fileId) => {
                 void handleRemoveConversationFile(fileId);
               }}

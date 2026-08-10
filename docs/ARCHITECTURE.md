@@ -2,9 +2,9 @@
 
 [简体中文](ARCHITECTURE_zh-CN.md) | [English](ARCHITECTURE.md)
 
-This document describes the **service architecture, data flow, module layering, extension interfaces**, and **knowledge base / RAG system** design of Orynode Local AI (current implementation as of **1.2.1**).
+This document describes the **service architecture, data flow, module layering, extension interfaces**, and **knowledge base / RAG system** design of Orynode Local AI (current implementation as of **1.3.0**).
 
-The Chinese architecture doc is the source of truth for implementation detail: [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md). Release notes: [CHANGELOG 1.2.1](../CHANGELOG.md#121--2026-08-09).
+The Chinese architecture doc is the source of truth for implementation detail: [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md). Release notes: [CHANGELOG 1.3.0](../CHANGELOG.md#130--2026-08-09).
 
 Target audience: developers who want to understand the internals, reuse modules, or extend functionality.
 
@@ -272,12 +272,14 @@ See `config/embedding-artifacts.ts` and [CHANGELOG 1.2.0](../CHANGELOG.md#120--2
 > **1.2.0:** RAG retrieval closed loop on top of the 1.1.0 Knowledge Engine (learnable rewrite, lexical ladder, jobs UI). Workspace uses **Search**; Chat uses **Retrieve + buildContext**; both share `HybridRetriever`. See [CHANGELOG](../CHANGELOG.md) and [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md).
 >
 > **1.2.1:** Citation availability fixes on top of 1.2.0 (scoped document read, phased memory scheduling, text line locators, TOC demotion). See [CHANGELOG 1.2.1](../CHANGELOG.md#121--2026-08-09).
+>
+> **1.3.0:** Local Office ingest (`convert_office` + on-device `@firecrawl/anydoc`); IndexedText preview aligned with citation line numbers; no embedded-image indexing. See [CHANGELOG 1.3.0](../CHANGELOG.md#130--2026-08-09).
 
 
 The full RAG pipeline is implemented across five modules in `services/knowledge/`:
 
 ```
-User uploads PDF / TXT / Markdown
+User uploads PDF / TXT / Markdown / Office
     │
     ▼
 ┌─────────┐

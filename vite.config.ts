@@ -4,6 +4,7 @@ import vinext from "vinext";
 import { defineConfig } from "vite";
 import hostingConfig from "./.openai/hosting.json";
 import { sites } from "./build/sites-vite-plugin";
+import { NATIVE_NODE_PACKAGES } from "./config/native-node-packages.mjs";
 
 const LOCAL_PLACEHOLDER_DATABASE_ID = "00000000-0000-4000-8000-000000000000";
 const require = createRequire(import.meta.url);
@@ -65,6 +66,8 @@ export default defineConfig(async () => {
       alias: {
         // pdfjs optional native canvas — unavailable in vinext Workers
         "@napi-rs/canvas": resolve(__dirname, "stubs/napi-rs-canvas.mjs"),
+        // anydoc 含原生 .node，只能在 data-service 加载；Workers 用 stub
+        "@firecrawl/anydoc": resolve(__dirname, "stubs/firecrawl-anydoc.mjs"),
         // semantic search is optional; stub only when package is absent
         ...optionalPackageAlias(
           "@xenova/transformers",
@@ -75,12 +78,14 @@ export default defineConfig(async () => {
     optimizeDeps: {
       // pdfjs worker 不能被 Vite 预构建进 deps_rsc（会丢 worker 文件）
       // jsdom/octokit 仅在 Node data-service 使用，勿预构建进 Workers
+      // anydoc 原生绑定不可被 rolldown 当 UTF-8 读入
       exclude: [
         "@xenova/transformers",
         "pdfjs-dist",
         "jsdom",
         "@mozilla/readability",
         "@octokit/rest",
+        ...NATIVE_NODE_PACKAGES,
       ],
     },
     ssr: {
@@ -90,6 +95,7 @@ export default defineConfig(async () => {
         "jsdom",
         "@mozilla/readability",
         "@octokit/rest",
+        ...NATIVE_NODE_PACKAGES,
       ],
     },
     plugins: [

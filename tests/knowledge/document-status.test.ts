@@ -41,6 +41,24 @@ test("documentViewStatus: OCR 截断成功仍可挂对话（降级提示）", ()
   assert.match(status.detail, /833/);
 });
 
+test("documentViewStatus: Office slide/sheet 截断同为降级可检索", () => {
+  const status = documentViewStatus(
+    {
+      status: "ready",
+      chunkCount: 2,
+      fileKind: "office",
+      errorMessage: "OFFICE_SECTIONS_TRUNCATED:2/40",
+    },
+    false,
+  );
+
+  assert.equal(status.content, "usable");
+  assert.equal(status.fitness, "degraded");
+  assert.equal(status.canAttach, true);
+  assert.match(status.detail, /前 2 个/);
+  assert.match(status.detail, /40/);
+});
+
 test("documentViewStatus: OCR 超时为可重试处理失败", () => {
   const status = documentViewStatus(
     {

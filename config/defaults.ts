@@ -195,6 +195,37 @@ export const OCR_CONFIG = {
 
 export type OcrMode = "auto" | "disabled";
 
+/**
+ * Office 转换安全上限（与 OCR_CONFIG 并列；按 hostMemoryClass 可再收紧）。
+ * 转换实现经 OfficeConverter Port；默认 anydoc，禁止写进 ingest。
+ * **禁止** Firecrawl 云端 Parse 或任何第三方托管解析 API。
+ */
+export const OFFICE_CONFIG = {
+  /** low 主机建议单文件上限（全局上传帽仍可能更大） */
+  maxInputBytesLow: 64 * 1024 * 1024,
+  maxInputBytesMedium: 100 * 1024 * 1024,
+  maxInputBytesHigh: 150 * 1024 * 1024,
+  convertTimeoutMs: 90_000,
+  /** Markdown 输出硬顶，防撑爆 chunk/SQLite */
+  maxOutputChars: 2_000_000,
+  maxSlidesOrSheets: 500,
+  /** P0 不物化嵌入资源 bytes（与 office-contract.OFFICE_PRODUCT_CONTRACT 一致） */
+  materializeAssets: false,
+  /**
+   * 产品硬约束：不得启用云端文档解析。
+   * 保留常量供测试与文档对齐；代码路径不得读取为 true。
+   */
+  allowCloudParse: false,
+} as const;
+
+export function officeMaxInputBytes(
+  hostClass: "low" | "medium" | "high" = "medium",
+): number {
+  if (hostClass === "low") return OFFICE_CONFIG.maxInputBytesLow;
+  if (hostClass === "high") return OFFICE_CONFIG.maxInputBytesHigh;
+  return OFFICE_CONFIG.maxInputBytesMedium;
+}
+
 
 /**
  * 访问模式类型（解析请用 services/platform/access.resolveAccessMode）

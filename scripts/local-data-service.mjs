@@ -14,9 +14,20 @@ import {
 } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { migrateDatabase } from "./data-service/migrations/index.mjs";
+import { loadTsModule, loadTsModules } from "./data-service/load-ts-module.mjs";
+import {
+  OFFICE_EXTS,
+  OFFICE_MIME,
+  isZipMagic,
+  kindFromFileName,
+  mimeForKind,
+  officeFormatFromFileName,
+  resolveKnowledgeFileKind,
+} from "../services/knowledge/format-registry.mjs";
 import {
   deleteFtsForDocument,
   searchKeywordIndex,
@@ -55,11 +66,29 @@ import { exportKnowledgePackage } from "./data-service/export-package.mjs";
 // Web/GitHub connectors (jsdom/octokit) also run here — Workers cannot require() CJS.
 
 const projectRoot = resolve(new URL("..", import.meta.url).pathname);
+const requireFromProject = createRequire(resolve(projectRoot, "package.json"));
+
+/** @returns {{ available: boolean, engine: "anydoc" | null, error?: string }} */
+function probeOfficeStatusSync() {
+  try {
+    requireFromProject.resolve("@firecrawl/anydoc");
+    requireFromProject("@firecrawl/anydoc");
+    return { available: true, engine: "anydoc" };
+  } catch (error) {
+    return {
+      available: false,
+      engine: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
 const databasePath =
   process.env.ORYNODE_DATABASE_PATH ??
   resolve(projectRoot, ".orynode/data/orynode.db");
 const knowledgeFilesPath = resolve(projectRoot, ".orynode/knowledge/files");
+const knowledgePreviewPath = resolve(projectRoot, ".orynode/knowledge/preview");
 const attachmentsRootPath = resolve(projectRoot, ".orynode/attachments");
+const attachmentsPreviewPath = resolve(projectRoot, ".orynode/attachments/preview");
 const settingsPath =
   process.env.ORYNODE_SETTINGS_PATH ??
   resolve(projectRoot, ".orynode/runtime-settings.json");
@@ -137,7 +166,9 @@ const ALLOWED_MAX_CONTEXT = new Set(runtimeDefaults.allowedMaxContext ?? []);
 
 mkdirSync(dirname(databasePath), { recursive: true });
 mkdirSync(knowledgeFilesPath, { recursive: true });
+mkdirSync(knowledgePreviewPath, { recursive: true });
 mkdirSync(attachmentsRootPath, { recursive: true });
+mkdirSync(attachmentsPreviewPath, { recursive: true });
 mkdirSync(dirname(settingsPath), { recursive: true });
 const database = new DatabaseSync(databasePath);
 database.exec("PRAGMA journal_mode = WAL");
@@ -167,16 +198,13 @@ storageStaging.reconcileOnStartup({
   log: console,
 });
 
-/** Lazy-load TS connectors via tsx (jsdom/octokit stay out of vinext Workers). */
+/** Lazy-load TS connectors via loadTsModule（tsx 只 register 一次）。 */
 let syncModulePromise = null;
 async function loadSyncModule() {
   if (!syncModulePromise) {
-    const { register } = await import("tsx/esm/api");
-    register();
-    syncModulePromise = import(
-      pathToFileURL(
-        resolve(projectRoot, "services/knowledge/application/sync-source.ts"),
-      ).href,
+    syncModulePromise = loadTsModule(
+      projectRoot,
+      "services/knowledge/application/sync-source.ts",
     );
   }
   return syncModulePromise;
@@ -199,52 +227,15 @@ async function runSyncSourceJob(payload) {
 let processRevisionModulePromise = null;
 async function loadProcessRevisionModules() {
   if (!processRevisionModulePromise) {
-    const { register } = await import("tsx/esm/api");
-    register();
-    processRevisionModulePromise = Promise.all([
-      import(
-        pathToFileURL(
-          resolve(
-            projectRoot,
-            "services/knowledge/processing/run-process-revision.ts",
-          ),
-        ).href,
-      ),
-      import(
-        pathToFileURL(
-          resolve(projectRoot, "services/knowledge/processing/analyze-pdf.ts"),
-        ).href,
-      ),
-      import(
-        pathToFileURL(
-          resolve(
-            projectRoot,
-            "services/knowledge/processing/page-quality.ts",
-          ),
-        ).href,
-      ),
-      import(
-        pathToFileURL(
-          resolve(projectRoot, "services/knowledge/processing/pdf-render.ts"),
-        ).href,
-      ),
-      import(
-        pathToFileURL(resolve(projectRoot, "services/knowledge/chunker.ts"))
-          .href,
-      ),
-      import(
-        pathToFileURL(resolve(projectRoot, "services/knowledge/indexer.ts"))
-          .href,
-      ),
-      import(
-        pathToFileURL(
-          resolve(projectRoot, "services/platform/macos/apple-vision-ocr.ts"),
-        ).href,
-      ),
-      import(
-        pathToFileURL(resolve(projectRoot, "services/platform/ocr/fake-ocr.ts"))
-          .href,
-      ),
+    processRevisionModulePromise = loadTsModules(projectRoot, [
+      "services/knowledge/processing/run-process-revision.ts",
+      "services/knowledge/processing/analyze-pdf.ts",
+      "services/knowledge/processing/page-quality.ts",
+      "services/knowledge/processing/pdf-render.ts",
+      "services/knowledge/chunker.ts",
+      "services/knowledge/indexer.ts",
+      "services/platform/macos/apple-vision-ocr.ts",
+      "services/platform/ocr/fake-ocr.ts",
     ]);
   }
   return processRevisionModulePromise;
@@ -254,12 +245,24 @@ function getDocumentMetaForProcess(namespace, documentId) {
   if (namespace === "conversation") {
     const row = getConversationFile.get(documentId);
     return row
-      ? { storedPath: row.storedPath, contentHash: row.contentHash }
+      ? {
+          storedPath: row.storedPath,
+          contentHash: row.contentHash,
+          name: row.name,
+          originalName: row.name,
+          fileKind: row.fileKind ?? null,
+        }
       : null;
   }
   const row = getKnowledgeDocument.get(documentId);
   return row
-    ? { storedPath: row.storedPath, contentHash: row.contentHash }
+    ? {
+        storedPath: row.storedPath,
+        contentHash: row.contentHash,
+        name: row.name,
+        originalName: row.originalName ?? row.name,
+        fileKind: row.fileKind ?? null,
+      }
     : null;
 }
 
@@ -526,6 +529,74 @@ async function runProcessRevisionJob(payload, hooks = {}) {
   }
 }
 
+let convertOfficeModulePromise = null;
+async function loadConvertOfficeModule() {
+  if (!convertOfficeModulePromise) {
+    convertOfficeModulePromise = loadTsModule(
+      projectRoot,
+      "services/knowledge/processing/run-convert-office.ts",
+    );
+  }
+  return convertOfficeModulePromise;
+}
+
+async function runConvertOfficeJob(payload, hooks = {}) {
+  const runMod = await loadConvertOfficeModule();
+  const snap =
+    typeof resourceCoordinator.snapshot === "function"
+      ? resourceCoordinator.snapshot()
+      : null;
+  const hostClass = snap?.hostMemoryClass || "medium";
+  let officeLeaseId = null;
+  try {
+    return await runMod.runConvertOfficeJob({
+      payload,
+      onProgress: hooks.onProgress,
+      deferIfBusy: hooks.deferIfBusy !== false,
+      jobId: hooks.jobId,
+      workerOwner: `convert-office:${payload?.documentId || ""}`,
+      hostMemoryClass: hostClass,
+      getDocumentMeta: getDocumentMetaForProcess,
+      setDocumentStatus: setDocumentStatusForWorker,
+      tryAcquireOffice: ({ owner, attemptId }) => {
+        const acquire = resourceCoordinator.tryAcquire({
+          kind: "office_convert",
+          owner,
+          attemptId,
+        });
+        if (acquire.ok) officeLeaseId = acquire.leaseId;
+        return acquire;
+      },
+      releaseOffice: (leaseId) => {
+        resourceCoordinator.release(leaseId || officeLeaseId);
+        officeLeaseId = null;
+      },
+      commitChunks: async (namespace, documentId, pageCount, chunks) => {
+        if (namespace === "conversation") {
+          return commitConversationFileChunks(documentId, pageCount, chunks);
+        }
+        return commitKnowledgeChunks(documentId, pageCount, chunks);
+      },
+      writeIndexedText: (namespace, documentId, markdown) => {
+        writeIndexedTextArtifact(namespace, documentId, markdown);
+      },
+    });
+  } catch (error) {
+    if (String(error?.message || "").startsWith("OFFICE_LEASE_BUSY")) {
+      return { deferred: true, reason: "office_busy" };
+    }
+    throw error;
+  } finally {
+    if (officeLeaseId) {
+      try {
+        resourceCoordinator.release(officeLeaseId);
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
 async function waitForJob(jobId, timeoutMs = 120_000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -613,6 +684,7 @@ const listKnowledgeDocuments = database.prepare(`
     name,
     original_name AS originalName,
     content_hash AS contentHash,
+    file_kind AS fileKind,
     size,
     page_count AS pageCount,
     chunk_count AS chunkCount,
@@ -631,7 +703,9 @@ const getKnowledgeDocument = database.prepare(`
     name,
     original_name AS originalName,
     content_hash AS contentHash,
+    file_kind AS fileKind,
     stored_path AS storedPath,
+    preview_path AS previewPath,
     size,
     page_count AS pageCount,
     chunk_count AS chunkCount,
@@ -650,7 +724,9 @@ const getKnowledgeDocumentByHash = database.prepare(`
     name,
     original_name AS originalName,
     content_hash AS contentHash,
+    file_kind AS fileKind,
     stored_path AS storedPath,
+    preview_path AS previewPath,
     size,
     page_count AS pageCount,
     chunk_count AS chunkCount,
@@ -667,8 +743,8 @@ const insertKnowledgeDocument = database.prepare(`
   INSERT INTO knowledge_documents (
     id, name, original_name, content_hash, stored_path, size, page_count,
     chunk_count, created_at, status, embedding_model, embedding_dim,
-    error_message, status_updated_at
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    error_message, status_updated_at, file_kind
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const updateKnowledgeDocumentName = database.prepare(`
   UPDATE knowledge_documents SET name = ? WHERE id = ?
@@ -867,12 +943,19 @@ const deleteChunksForDocument = database.prepare(
 const deleteKnowledgeDocument = database.prepare(
   "DELETE FROM knowledge_documents WHERE id = ?",
 );
+const setKnowledgePreviewPath = database.prepare(`
+  UPDATE knowledge_documents SET preview_path = ? WHERE id = ?
+`);
+const setConversationPreviewPath = database.prepare(`
+  UPDATE conversation_files SET preview_path = ? WHERE id = ?
+`);
 
 const listConversationFilesByConversation = database.prepare(`
   SELECT
     id,
     conversation_id AS conversationId,
     name,
+    file_kind AS fileKind,
     size,
     page_count AS pageCount,
     chunk_count AS chunkCount,
@@ -882,7 +965,8 @@ const listConversationFilesByConversation = database.prepare(`
     embedding_dim AS embeddingDim,
     error_message AS errorMessage,
     status_updated_at AS statusUpdatedAt,
-    stored_path AS storedPath
+    stored_path AS storedPath,
+    preview_path AS previewPath
   FROM conversation_files
   WHERE conversation_id = ?
   ORDER BY created_at DESC
@@ -892,7 +976,9 @@ const getConversationFile = database.prepare(`
     id,
     conversation_id AS conversationId,
     name,
+    file_kind AS fileKind,
     stored_path AS storedPath,
+    preview_path AS previewPath,
     size,
     page_count AS pageCount,
     chunk_count AS chunkCount,
@@ -909,8 +995,8 @@ const insertConversationFile = database.prepare(`
   INSERT INTO conversation_files (
     id, conversation_id, name, stored_path, size, page_count, chunk_count,
     created_at, status, embedding_model, embedding_dim, error_message,
-    status_updated_at
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    status_updated_at, file_kind
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const insertConversationFileChunk = database.prepare(`
   INSERT INTO conversation_file_chunks (
@@ -1045,6 +1131,7 @@ function mapDocumentRow(row) {
     name: row.name,
     originalName: row.originalName ?? row.name,
     contentHash: row.contentHash ?? null,
+    fileKind: row.fileKind ?? null,
     size: row.size,
     pageCount: row.pageCount,
     chunkCount: row.chunkCount,
@@ -1054,6 +1141,110 @@ function mapDocumentRow(row) {
     embeddingDim: row.embeddingDim ?? null,
     errorMessage: row.errorMessage ?? null,
   };
+}
+
+function previewArtifactPath(namespace, documentId) {
+  const safe = String(documentId || "").replace(/[^a-zA-Z0-9_-]/g, "_") || "unknown";
+  const dir =
+    namespace === "conversation" ? attachmentsPreviewPath : knowledgePreviewPath;
+  return resolve(dir, `${safe}.md`);
+}
+
+/**
+ * 写入 IndexedText（Office canonical markdown）。
+ * citation 行号与预览必须读此文件，禁止 chunks 装饰拼装。
+ */
+function writeIndexedTextArtifact(namespace, documentId, markdown) {
+  const path = previewArtifactPath(namespace, documentId);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, String(markdown ?? ""), "utf8");
+  if (namespace === "conversation") {
+    setConversationPreviewPath.run(path, documentId);
+  } else {
+    setKnowledgePreviewPath.run(path, documentId);
+  }
+  return path;
+}
+
+function unlinkPreviewPath(previewPath) {
+  if (!previewPath) return;
+  try {
+    unlinkSync(previewPath);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * 解析 IndexedText 字节来源。
+ * @param {object} row
+ * @param {"library"|"conversation"} namespace
+ * @returns {{ status: 'ok'|'missing'|'unsupported', path?: string, body?: string }}
+ */
+function resolveIndexedText(row, namespace) {
+  if (!row) return { status: "unsupported" };
+  const kind = row.fileKind || null;
+  if (kind === "txt" || kind === "md") {
+    if (!row.storedPath) return { status: "missing" };
+    return { status: "ok", path: row.storedPath };
+  }
+  if (kind === "office") {
+    if (row.previewPath) {
+      try {
+        if (existsSync(row.previewPath)) {
+          return { status: "ok", path: row.previewPath };
+        }
+      } catch {
+        // fall through
+      }
+    }
+    // 旧文档：无装饰拼装仅供阅读；行号仍可能偏差，客户端应提示重新处理
+    const list =
+      namespace === "conversation"
+        ? getConversationFileChunks.all(row.id)
+        : getKnowledgeChunks.all(row.id);
+    const body = (Array.isArray(list) ? list : [])
+      .slice()
+      .sort(
+        (a, b) =>
+          (a.pageNumber ?? 0) - (b.pageNumber ?? 0) ||
+          (a.position ?? 0) - (b.position ?? 0),
+      )
+      .map((c) => String(c.content ?? ""))
+      .filter((t) => t.length > 0)
+      .join("\n\n");
+    return { status: "missing", body };
+  }
+  return { status: "unsupported" };
+}
+
+function sendIndexedTextResponse(response, row, namespace) {
+  const resolved = resolveIndexedText(row, namespace);
+  if (resolved.status === "unsupported") {
+    json(response, 415, { error: "此格式无 IndexedText（PDF 请用页码/区域预览）" });
+    return;
+  }
+  if (resolved.status === "ok" && resolved.path) {
+    try {
+      const text = readFileSync(resolved.path, "utf8");
+      response.writeHead(200, {
+        "content-type": "text/plain; charset=utf-8",
+        "x-orynode-indexed-text": "ok",
+        "cache-control": "no-store",
+      });
+      response.end(text);
+      return;
+    } catch {
+      json(response, 404, { error: "IndexedText 文件不存在" });
+      return;
+    }
+  }
+  response.writeHead(409, {
+    "content-type": "text/plain; charset=utf-8",
+    "x-orynode-indexed-text": "missing",
+    "cache-control": "no-store",
+  });
+  response.end(resolved.body || "");
 }
 
 function hashBuffer(buffer) {
@@ -1074,7 +1265,8 @@ function backfillKnowledgeContentHashes() {
   const rows = database
     .prepare(
       `SELECT id, name, original_name AS originalName, content_hash AS contentHash,
-              stored_path AS storedPath, created_at AS createdAt
+    file_kind AS fileKind,
+              stored_path AS storedPath, preview_path AS previewPath, created_at AS createdAt
        FROM knowledge_documents
        ORDER BY created_at ASC`,
     )
@@ -1098,6 +1290,7 @@ function backfillKnowledgeContentHashes() {
         try {
           unlinkSync(row.storedPath);
         } catch {}
+        unlinkPreviewPath(row.previewPath);
       } catch {
         try {
           database.exec("ROLLBACK");
@@ -1130,6 +1323,7 @@ function mapConversationFileRow(row) {
     id: row.id,
     conversationId: row.conversationId,
     name: row.name,
+    fileKind: row.fileKind ?? null,
     size: row.size,
     pageCount: row.pageCount,
     chunkCount: row.chunkCount,
@@ -1178,6 +1372,7 @@ function deleteConversationWithFiles(conversationId) {
         // ignore
       }
     }
+    unlinkPreviewPath(file.previewPath);
   }
   return result;
 }
@@ -1192,6 +1387,7 @@ function clearAllConversations() {
     try {
       rmSync(attachmentsRootPath, { recursive: true, force: true });
       mkdirSync(attachmentsRootPath, { recursive: true });
+      mkdirSync(attachmentsPreviewPath, { recursive: true });
     } catch {
       // best-effort
     }
@@ -1287,11 +1483,31 @@ function extensionFromName(name) {
 }
 
 function contentTypeForName(name) {
-  const ext = extensionFromName(name);
-  if (ext === "pdf") return "application/pdf";
-  if (ext === "md" || ext === "markdown") return "text/markdown; charset=utf-8";
-  if (ext === "txt") return "text/plain; charset=utf-8";
-  return "application/octet-stream";
+  const kind = kindFromFileName(name);
+  if (!kind) return "application/octet-stream";
+  const officeFormat = officeFormatFromFileName(name);
+  const mime = mimeForKind(kind, officeFormat);
+  if (kind === "txt" || kind === "md") return `${mime}; charset=utf-8`;
+  if (kind === "office" && officeFormat === "csv") {
+    return "text/csv; charset=utf-8";
+  }
+  return mime;
+}
+
+function isZipMagicBuffer(buffer) {
+  return isZipMagic(buffer);
+}
+
+function resolveStoredExtension(kind, sourceName) {
+  const extFromName = extensionFromName(sourceName);
+  if (kind === "pdf") return "pdf";
+  if (kind === "md") return "md";
+  if (kind === "txt") return "txt";
+  if (kind === "office") {
+    if (OFFICE_EXTS.has(extFromName)) return extFromName;
+    return "docx";
+  }
+  return "bin";
 }
 
 function resolveStoredFileMeta(fileRow, bytes) {
@@ -1421,6 +1637,8 @@ function storeKnowledgeFile(
       kind = "pdf";
     } else if (extFromName === "md" || extFromName === "markdown") {
       kind = "md";
+    } else if (OFFICE_EXTS.has(extFromName)) {
+      kind = "office";
     } else if (extFromName === "txt" || looksLikeTextBuffer(buffer)) {
       kind = "txt";
     }
@@ -1434,11 +1652,21 @@ function storeKnowledgeFile(
     if (!looksLikeTextBuffer(buffer)) {
       throw new Error("请选择有效的文本文件");
     }
+  } else if (kind === "office") {
+    if (extFromName === "csv" || extFromName === "rtf") {
+      if (!looksLikeTextBuffer(buffer)) {
+        throw new Error("请选择有效的 Office 文本文件");
+      }
+    } else if (!isZipMagicBuffer(buffer) && !OFFICE_EXTS.has(extFromName)) {
+      throw new Error("请选择有效的 Office 文件");
+    }
   } else {
-    throw new Error("目前只支持 PDF、TXT、Markdown（.md）文件");
+    throw new Error(
+      "目前只支持 PDF、TXT、Markdown（.md）与常见 Office（docx/pptx/xlsx 等）文件",
+    );
   }
 
-  const ext = kind === "pdf" ? "pdf" : kind === "md" ? "md" : "txt";
+  const ext = resolveStoredExtension(kind, sourceName);
   const original =
     sourceName && /\.[a-z0-9]+$/i.test(sourceName)
       ? sourceName
@@ -1472,6 +1700,7 @@ function storeKnowledgeFile(
       null,
       null,
       createdAt,
+      kind,
     );
     storageStaging.markCommitted(staged.stagingId, id);
   } catch (error) {
@@ -1889,6 +2118,8 @@ function storeConversationFile(buffer, name, kindHint, conversationId) {
       kind = "pdf";
     } else if (extFromName === "md" || extFromName === "markdown") {
       kind = "md";
+    } else if (OFFICE_EXTS.has(extFromName)) {
+      kind = "office";
     } else if (extFromName === "txt" || looksLikeTextBuffer(buffer)) {
       kind = "txt";
     }
@@ -1902,11 +2133,21 @@ function storeConversationFile(buffer, name, kindHint, conversationId) {
     if (!looksLikeTextBuffer(buffer)) {
       throw new Error("请选择有效的文本文件");
     }
+  } else if (kind === "office") {
+    if (extFromName === "csv" || extFromName === "rtf") {
+      if (!looksLikeTextBuffer(buffer)) {
+        throw new Error("请选择有效的 Office 文本文件");
+      }
+    } else if (!isZipMagicBuffer(buffer) && !OFFICE_EXTS.has(extFromName)) {
+      throw new Error("请选择有效的 Office 文件");
+    }
   } else {
-    throw new Error("目前只支持 PDF、TXT、Markdown（.md）文件");
+    throw new Error(
+      "目前只支持 PDF、TXT、Markdown（.md）与常见 Office（docx/pptx/xlsx 等）文件",
+    );
   }
 
-  const ext = kind === "pdf" ? "pdf" : kind === "md" ? "md" : "txt";
+  const ext = resolveStoredExtension(kind, name);
   const safeName =
     name && /\.[a-z0-9]+$/i.test(name) ? name : `${name || "未命名"}.${ext}`;
 
@@ -1939,6 +2180,7 @@ function storeConversationFile(buffer, name, kindHint, conversationId) {
       null,
       null,
       createdAt,
+      kind,
     );
     storageStaging.markCommitted(staged.stagingId, id);
   } catch (error) {
@@ -2822,6 +3064,7 @@ const indexWorker = startIndexWorker({
   getDocumentStatus: getDocumentStatusForWorker,
   runSyncSource: runSyncSourceJob,
   runProcessRevision: runProcessRevisionJob,
+  runConvertOffice: runConvertOfficeJob,
   runGarbageCollect: (payload) => {
     const targets = Array.isArray(payload?.targets)
       ? payload.targets
@@ -2902,6 +3145,7 @@ const server = createServer(async (request, response) => {
           dimension: EMBED_DIM,
           role: activeEmbedArtifact.role,
         },
+        office: probeOfficeStatusSync(),
         worker: { id: indexWorker.workerId },
         resources: resourceCoordinator.snapshot(),
       });
@@ -3286,6 +3530,11 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "GET" && url.pathname === "/knowledge/office/status") {
+      json(response, 200, probeOfficeStatusSync());
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/knowledge/embed") {
       const body = await readJson(request);
       const texts = Array.isArray(body.texts) ? body.texts : null;
@@ -3425,10 +3674,12 @@ const server = createServer(async (request, response) => {
         "text/plain",
         "text/markdown",
         "text/x-markdown",
+        ...OFFICE_MIME,
       ]);
-      if (!allowed.has(contentType)) {
+      if (!allowed.has(contentType) && contentType !== "application/octet-stream") {
         json(response, 415, {
-          error: "目前只支持 PDF、TXT、Markdown（.md）文件",
+          error:
+            "目前只支持 PDF、TXT、Markdown（.md）与常见 Office（docx/pptx/xlsx 等）文件",
         });
         return;
       }
@@ -3436,14 +3687,21 @@ const server = createServer(async (request, response) => {
         .trim()
         .toLowerCase();
       const kindHint =
-        kindHeader === "pdf" || kindHeader === "txt" || kindHeader === "md"
+        kindHeader === "pdf" ||
+        kindHeader === "txt" ||
+        kindHeader === "md" ||
+        kindHeader === "office"
           ? kindHeader
           : contentType === "application/pdf"
             ? "pdf"
             : contentType === "text/markdown" ||
                 contentType === "text/x-markdown"
               ? "md"
-              : "txt";
+              : OFFICE_MIME.has(contentType)
+                ? "office"
+                : contentType === "application/octet-stream"
+                  ? undefined
+                  : "txt";
       const buffer = await readBuffer(request);
       const originalName = decodeFileName(request.headers["x-file-name"]);
       const displayHeader = request.headers["x-display-name"];
@@ -3730,10 +3988,12 @@ const server = createServer(async (request, response) => {
         "text/plain",
         "text/markdown",
         "text/x-markdown",
+        ...OFFICE_MIME,
       ]);
-      if (!allowed.has(contentType)) {
+      if (!allowed.has(contentType) && contentType !== "application/octet-stream") {
         json(response, 415, {
-          error: "目前只支持 PDF、TXT、Markdown（.md）文件",
+          error:
+            "目前只支持 PDF、TXT、Markdown（.md）与常见 Office（docx/pptx/xlsx 等）文件",
         });
         return;
       }
@@ -3741,14 +4001,21 @@ const server = createServer(async (request, response) => {
         .trim()
         .toLowerCase();
       const kindHint =
-        kindHeader === "pdf" || kindHeader === "txt" || kindHeader === "md"
+        kindHeader === "pdf" ||
+        kindHeader === "txt" ||
+        kindHeader === "md" ||
+        kindHeader === "office"
           ? kindHeader
           : contentType === "application/pdf"
             ? "pdf"
             : contentType === "text/markdown" ||
                 contentType === "text/x-markdown"
               ? "md"
-              : "txt";
+              : OFFICE_MIME.has(contentType)
+                ? "office"
+                : contentType === "application/octet-stream"
+                  ? undefined
+                  : "txt";
       const buffer = await readBuffer(request);
       const name = decodeFileName(request.headers["x-file-name"]);
       try {
@@ -3859,6 +4126,7 @@ const server = createServer(async (request, response) => {
           try {
             unlinkSync(file.storedPath);
           } catch {}
+          unlinkPreviewPath(file.previewPath);
           json(response, 200, { deleted: true });
         } catch (error) {
           database.exec("ROLLBACK");
@@ -3914,6 +4182,16 @@ const server = createServer(async (request, response) => {
           chunks: getConversationFileChunks.all(fileId),
           documentName: file.name,
         });
+        return;
+      }
+
+      if (action === "indexed-text" && request.method === "GET") {
+        const file = getConversationFile.get(fileId);
+        if (!file) {
+          json(response, 404, { error: "会话附件不存在" });
+          return;
+        }
+        sendIndexedTextResponse(response, file, "conversation");
         return;
       }
 
@@ -4042,6 +4320,16 @@ const server = createServer(async (request, response) => {
         return;
       }
 
+      if (action === "indexed-text" && request.method === "GET") {
+        const document = getKnowledgeDocument.get(docId);
+        if (!document) {
+          json(response, 404, { error: "资料不存在" });
+          return;
+        }
+        sendIndexedTextResponse(response, document, "library");
+        return;
+      }
+
       if (
         action === "bytes" &&
         (request.method === "GET" || request.method === "HEAD")
@@ -4122,6 +4410,59 @@ const server = createServer(async (request, response) => {
           json(response, 400, { error: "原件不存在，无法重试" });
           return;
         }
+        const inferredKind =
+          resolveKnowledgeFileKind({
+            fileKind: document.fileKind,
+            paths: [
+              document.storedPath,
+              document.originalName,
+              document.name,
+            ],
+          }) || null;
+
+        if (!inferredKind) {
+          json(response, 400, {
+            error: "无法识别文件类型，无法重试",
+            code: "REPROCESS_UNKNOWN_KIND",
+          });
+          return;
+        }
+
+        if (inferredKind === "office") {
+          setDocumentIndexStatus(docId, "processing", { errorMessage: null });
+          const idempotencyKey = `convert_office:library:${docId}`;
+          const existing = jobRepository.getByIdempotencyKey(idempotencyKey);
+          let job = existing;
+          if (existing && ["queued", "running", "retry_wait"].includes(existing.status)) {
+            job = existing;
+          } else if (existing) {
+            job = jobRepository.requeueFromTerminal(existing.id);
+          } else {
+            job = jobRepository.enqueue({
+              type: "convert_office",
+              idempotencyKey,
+              payload: {
+                schemaVersion: 1,
+                namespace: "library",
+                documentId: docId,
+              },
+            });
+          }
+          json(response, 202, {
+            document: mapDocumentRow(getKnowledgeDocument.get(docId)),
+            jobId: job?.id,
+          });
+          return;
+        }
+
+        if (inferredKind !== "pdf") {
+          json(response, 400, {
+            error: "该文件类型不支持 OCR 重试",
+            code: "REPROCESS_UNSUPPORTED",
+          });
+          return;
+        }
+
         const settings = readRuntimeSettings();
         if (settings.ocrMode === "disabled") {
           json(response, 422, {
@@ -4179,6 +4520,7 @@ const server = createServer(async (request, response) => {
           try {
             unlinkSync(document.storedPath);
           } catch {}
+          unlinkPreviewPath(document.previewPath);
           json(response, 200, { deleted: true });
         } catch (error) {
           database.exec("ROLLBACK");

@@ -52,6 +52,14 @@ import {
   id as chunkTextLocatorsId,
   up as chunkTextLocatorsUp,
 } from "./015_chunk_text_locators.mjs";
+import {
+  id as documentFileKindId,
+  up as documentFileKindUp,
+} from "./016_document_file_kind.mjs";
+import {
+  id as previewPathId,
+  up as previewPathUp,
+} from "./017_preview_path.mjs";
 import { runMigrations } from "./runner.mjs";
 
 /** @type {import("./runner.mjs").Migration[]} */
@@ -71,6 +79,8 @@ export const MIGRATIONS = [
   { id: ftsV2Id, up: ftsV2Up },
   { id: terminologyId, up: terminologyUp },
   { id: chunkTextLocatorsId, up: chunkTextLocatorsUp },
+  { id: documentFileKindId, up: documentFileKindUp },
+  { id: previewPathId, up: previewPathUp },
 ];
 
 /**
