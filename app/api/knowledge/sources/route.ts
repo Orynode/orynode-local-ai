@@ -9,7 +9,7 @@ import {
   ORYNODE_DATA_URL,
   HTTP_TIMEOUT,
 } from "../../../../config/defaults";
-import { lanDeniedResponse } from "../../../../services/platform";
+import { lanDeniedResponse, sanitizedErrorResponse } from "../../../../services/platform";
 
 const dataUrl = ORYNODE_DATA_URL;
 
@@ -45,8 +45,9 @@ export async function POST(request: Request) {
     const result = await response.json().catch(() => ({}));
     return Response.json(result, { status: response.status });
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "来源同步失败";
-    return Response.json({ error: message }, { status: 502 });
+    return sanitizedErrorResponse(error, "来源同步失败", {
+      status: 502,
+      logTag: "[knowledge/sources]",
+    });
   }
 }

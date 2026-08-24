@@ -12,7 +12,7 @@ import {
   conversationOriginalAccess,
   copyPreviewUpstreamHeaders,
 } from "../../../../../../lib/preview-file-auth";
-import { lanDeniedResponse } from "../../../../../../../services/platform";
+import { lanDeniedResponse, sanitizedErrorResponse } from "../../../../../../../services/platform";
 
 type RouteContext = { params: Promise<{ id: string; fileId: string }> };
 
@@ -74,10 +74,10 @@ export async function GET(request: Request, context: RouteContext) {
   try {
     return await authorizeAndUpstream(request, context, "GET");
   } catch (error) {
-    return Response.json(
-      { error: error instanceof Error ? error.message : "读取原件失败" },
-      { status: 502 },
-    );
+    return sanitizedErrorResponse(error, "读取原件失败", {
+      status: 502,
+      logTag: "[conversation-file/content]",
+    });
   }
 }
 
@@ -85,9 +85,9 @@ export async function HEAD(request: Request, context: RouteContext) {
   try {
     return await authorizeAndUpstream(request, context, "HEAD");
   } catch (error) {
-    return Response.json(
-      { error: error instanceof Error ? error.message : "读取原件失败" },
-      { status: 502 },
-    );
+    return sanitizedErrorResponse(error, "读取原件失败", {
+      status: 502,
+      logTag: "[conversation-file/content]",
+    });
   }
 }

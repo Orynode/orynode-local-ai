@@ -15,7 +15,10 @@ import {
 } from "../../../../services/knowledge/application/run-search";
 import { describeIndexBackend } from "../../../../services/knowledge/adapters/index-backend-info";
 import { listConnectorTypes } from "../../../../services/knowledge/connectors/registry";
-import { lanDeniedResponse } from "../../../../services/platform";
+import {
+  lanDeniedResponse,
+  sanitizedErrorResponse,
+} from "../../../../services/platform";
 
 export async function GET(request: Request) {
   const denied = lanDeniedResponse(request);
@@ -51,12 +54,10 @@ export async function POST(request: Request) {
     const { emptyScope: _empty, ...payload } = result;
     return Response.json({ apiVersion: "v1", ...payload });
   } catch (error) {
-    return Response.json(
-      {
-        error: error instanceof Error ? error.message : "检索失败",
-        code: "retrieval_failed",
-      },
-      { status: 502 },
-    );
+    return sanitizedErrorResponse(error, "检索失败", {
+      status: 502,
+      code: "retrieval_failed",
+      logTag: "[knowledge/v1]",
+    });
   }
 }

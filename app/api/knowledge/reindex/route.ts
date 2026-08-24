@@ -3,7 +3,10 @@
  */
 
 import { reindexAllDocuments } from "../../../../services/knowledge";
-import { lanDeniedResponse } from "../../../../services/platform";
+import {
+  lanDeniedResponse,
+  sanitizedErrorResponse,
+} from "../../../../services/platform";
 
 export async function POST(request: Request) {
   const denied = lanDeniedResponse(request);
@@ -12,12 +15,9 @@ export async function POST(request: Request) {
     const result = await reindexAllDocuments();
     return Response.json(result);
   } catch (error) {
-    return Response.json(
-      {
-        error:
-          error instanceof Error ? error.message : "批量重建向量索引失败",
-      },
-      { status: 503 },
-    );
+    return sanitizedErrorResponse(error, "批量重建向量索引失败", {
+      status: 503,
+      logTag: "[knowledge/reindex-all]",
+    });
   }
 }

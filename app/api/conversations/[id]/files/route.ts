@@ -87,16 +87,24 @@ export async function POST(request: Request, context: RouteContext) {
       { status: 201 },
     );
   } catch (error) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : "会话附件上传失败，请确认本地服务正在运行";
+    const message = error instanceof Error ? error.message : "";
     const status =
       message.includes("只支持") ? 415
       : message.includes("没有可提取") || message.includes("扫描版") ? 422
       : message.includes("为空") ? 400
       : message.includes("对话不存在") ? 404
       : 503;
-    return Response.json({ error: message }, { status });
+    // 已知业务错误透传语义化文案；未知错误脱敏为兜底提示（完整信息进日志）
+    const known =
+      status !== 503 && /只支持|没有可提取|扫描版|为空|对话不存在/.test(message);
+    if (!known) console.error("[conversation-files] upload error:", error);
+    return Response.json(
+      {
+        error: known
+          ? message
+          : "会话附件上传失败，请确认本地服务正在运行",
+      },
+      { status },
+    );
   }
 }

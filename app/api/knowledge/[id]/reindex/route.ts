@@ -3,7 +3,10 @@
  */
 
 import { reindexDocument } from "../../../../../services/knowledge";
-import { lanDeniedResponse } from "../../../../../services/platform";
+import {
+  lanDeniedResponse,
+  sanitizedErrorResponse,
+} from "../../../../../services/platform";
 
 type RouteContext = {
   params: Promise<{ id: string }>;
@@ -17,12 +20,9 @@ export async function POST(request: Request, context: RouteContext) {
     const result = await reindexDocument(id);
     return Response.json({ documentId: id, ...result });
   } catch (error) {
-    return Response.json(
-      {
-        error:
-          error instanceof Error ? error.message : "重建向量索引失败",
-      },
-      { status: 503 },
-    );
+    return sanitizedErrorResponse(error, "重建向量索引失败", {
+      status: 503,
+      logTag: "[knowledge/reindex]",
+    });
   }
 }

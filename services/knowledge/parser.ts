@@ -78,6 +78,13 @@ export function parseOfficeMarkdown(
 /**
  * 从 PDF 文件 buffer 中提取文本
  */
+/**
+ * native 文本提取的资源上限（与 OCR 链路的预算对齐）：
+ * 恶意 PDF 可声明海量页对象或单页超长文本流，无上限会占满主进程 CPU/内存。
+ */
+const MAX_NATIVE_PDF_PAGES = 500;
+const MAX_NATIVE_PAGE_TEXT_CHARS = 100_000;
+
 export async function parsePdf(buffer: ArrayBuffer): Promise<ParsedDocument> {
   const { getDocument } = await loadPdfJs();
   // pdfjs 可能 transfer 掉 data 底层 ArrayBuffer；用副本避免调用方缓冲被掏空
@@ -90,14 +97,22 @@ export async function parsePdf(buffer: ArrayBuffer): Promise<ParsedDocument> {
   });
   const pdf = await loadingTask.promise;
   const pages: ParsedPage[] = [];
+  let truncated = false;
 
   try {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      if (pageNumber > MAX_NATIVE_PDF_PAGES) {
+        truncated = true;
+        break;
+      }
       const page = await pdf.getPage(pageNumber);
       const textContent = await page.getTextContent();
-      const text = textContent.items
+      let text = textContent.items
         .map((item) => ("str" in item ? item.str : ""))
         .join(" ");
+      if (text.length > MAX_NATIVE_PAGE_TEXT_CHARS) {
+        text = text.slice(0, MAX_NATIVE_PAGE_TEXT_CHARS);
+      }
       pages.push({ pageNumber, text });
       page.cleanup();
     }
@@ -106,7 +121,7 @@ export async function parsePdf(buffer: ArrayBuffer): Promise<ParsedDocument> {
   }
 
   return {
-    pageCount: pdf.numPages,
+    pageCount: truncated ? pages.length : pdf.numPages,
     pages,
   };
 }

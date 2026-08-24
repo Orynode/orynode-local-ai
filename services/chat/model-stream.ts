@@ -103,15 +103,17 @@ export function openAiChatStreamToModelEvents(
         emitDone("stop");
         controller.close();
       } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "MODEL_STREAM_FAILED";
         const aborted =
           error instanceof Error &&
           (error.name === "AbortError" || error.name === "TimeoutError");
+        // 错误脱敏：不把内部异常细节（路径/URL/堆栈摘要）透传给客户端
+        console.error("[model-stream] upstream error:", error);
         controller.enqueue({
           type: "error",
           code: aborted ? "MODEL_ABORTED" : "MODEL_STREAM_FAILED",
-          message,
+          message: aborted
+            ? "本地模型响应超时"
+            : "模型流式响应中断，请重试",
           recoverable: aborted,
         });
         emitDone(aborted ? "cancelled" : "error");

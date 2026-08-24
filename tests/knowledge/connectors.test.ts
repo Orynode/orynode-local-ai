@@ -24,6 +24,26 @@ test("isPrivateIp: IPv4-mapped IPv6 与链路本地", () => {
   assert.equal(isPrivateIp("::ffff:8.8.8.8"), false);
 });
 
+test("isPrivateIp: WHATWG 序列化形态与 IPv4-compatible/NAT64（rebinding 变体）", () => {
+  // WHATWG URL 会把 [0:0:0:0:0:ffff:127.0.0.1] 序列化为 [::ffff:7f00:1]
+  assert.equal(isPrivateIp("::ffff:7f00:1"), true);
+  assert.equal(isPrivateIp("[::ffff:7f00:1]"), true);
+  // IPv4-compatible IPv6：RFC 4291 已废弃但 Linux 内核仍按 IPv4 路由
+  assert.equal(isPrivateIp("::7f00:1"), true);
+  assert.equal(isPrivateIp("::a9fe:a9fe"), true); // ::169.254.169.254
+  // NAT64 64:ff9b::/96：DNS64 网络中真实路由到内嵌 IPv4
+  assert.equal(isPrivateIp("64:ff9b::7f00:1"), true);
+  assert.equal(isPrivateIp("64:ff9b::a9fe:a9fe"), true);
+  // NAT64 内嵌公网地址应放行
+  assert.equal(isPrivateIp("64:ff9b::808:808"), false);
+  // ULA / 组播 / 文档段
+  assert.equal(isPrivateIp("fd00::1"), true);
+  assert.equal(isPrivateIp("ff02::1"), true);
+  assert.equal(isPrivateIp("2001:db8::1"), true);
+  // 公网 IPv6 放行
+  assert.equal(isPrivateIp("2606:4700:4700::1111"), false);
+});
+
 test("assertSafeHttpUrl: 拒绝 localhost / 私网 / 非默认端口", async () => {
   await assert.rejects(
     () => assertSafeHttpUrl("http://localhost/x"),
@@ -100,4 +120,12 @@ test("redactSecrets: 脱敏 token 与 Bearer", () => {
     ),
     false,
   );
+});
+
+test("redactSecrets: fine-grained PAT（github_pat_ 前缀）同样脱敏", () => {
+  const fineGrained =
+    "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz1234567890abcd";
+  const out = redactSecrets(`request failed for ${fineGrained} upstream`);
+  assert.equal(out.includes(fineGrained), false);
+  assert.match(out, /REDACTED_GITHUB_TOKEN/);
 });

@@ -3,7 +3,10 @@
  */
 
 import { ensurePendingVectorBackfill } from "../../../../services/knowledge";
-import { lanDeniedResponse } from "../../../../services/platform";
+import {
+  lanDeniedResponse,
+  sanitizedErrorResponse,
+} from "../../../../services/platform";
 import { SEARCH_CONFIG } from "../../../../config/defaults";
 
 export async function POST(request: Request) {
@@ -20,12 +23,9 @@ export async function POST(request: Request) {
     const result = await ensurePendingVectorBackfill();
     return Response.json(result ?? { enqueued: 0 });
   } catch (error) {
-    return Response.json(
-      {
-        error:
-          error instanceof Error ? error.message : "向量补建入队失败",
-      },
-      { status: 503 },
-    );
+    return sanitizedErrorResponse(error, "向量补建入队失败", {
+      status: 503,
+      logTag: "[knowledge/vector-backfill]",
+    });
   }
 }

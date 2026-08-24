@@ -261,7 +261,7 @@ export function SettingsPanel({
       }
       setPairingCode(body.pairing?.code ?? null);
       setPairingExpiresAt(body.pairing?.expiresAt ?? null);
-      setLanMessage("请把下方配对码发给局域网设备；也可查看服务器终端日志。");
+      setLanMessage("请把下方配对码发给局域网设备。");
       await refreshLanSessions();
     } catch (error) {
       setLanMessage(error instanceof Error ? error.message : "配对失败");

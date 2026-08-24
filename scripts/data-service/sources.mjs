@@ -139,6 +139,21 @@ export function createSourcesRepository(database) {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
+  /**
+   * 键名模式化脱敏：覆盖 token/password/secret/apiKey/authorization 等常见命名
+   * （精确三键会漏掉 apiKey、api_key、personalAccessToken 等）。
+   */
+  const SECRET_KEY_RE = /(token|secret|password|passwd|api[_-]?key|authorization|bearer|credential)/i;
+
+  function redactConfigSecrets(config) {
+    for (const key of Object.keys(config)) {
+      if (SECRET_KEY_RE.test(key)) {
+        delete config[key];
+      }
+    }
+    return config;
+  }
+
   function mapSource(row) {
     if (!row) return null;
     let config = {};
@@ -147,9 +162,7 @@ export function createSourcesRepository(database) {
     } catch {
       config = {};
     }
-    delete config.token;
-    delete config.password;
-    delete config.secret;
+    redactConfigSecrets(config);
     return {
       id: row.id,
       type: row.type,
@@ -196,10 +209,7 @@ export function createSourcesRepository(database) {
     create({ type, name, config }) {
       const now = new Date().toISOString();
       const id = randomUUID();
-      const safe = { ...(config || {}) };
-      delete safe.token;
-      delete safe.password;
-      delete safe.secret;
+      const safe = redactConfigSecrets({ ...(config || {}) });
       insertSource.run(id, type, name, JSON.stringify(safe), now, now);
       return mapSource(getSource.get(id));
     },

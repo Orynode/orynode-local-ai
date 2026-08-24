@@ -103,10 +103,7 @@ export async function POST(request: Request) {
       },
     );
   } catch (error) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : "资料导入失败，请确认本地资料库服务正在运行";
+    const message = error instanceof Error ? error.message : "";
     const status =
       message.includes("只支持") ? 415
       : message.includes("OCR_DISABLED") ||
@@ -115,12 +112,20 @@ export async function POST(request: Request) {
         ? 422
       : message.includes("为空") ? 400
       : 503;
+    // 已知业务错误透传语义化文案；未知错误脱敏为兜底提示（完整信息进日志）
+    const known =
+      status !== 503 &&
+      (message === "OCR_DISABLED" ||
+        /只支持|没有可提取|扫描版|为空/.test(message));
+    if (!known) console.error("[knowledge] upload error:", error);
     return Response.json(
       {
         error:
           message === "OCR_DISABLED"
             ? "已关闭扫描 PDF 文字识别。可在设置中开启，或上传带可选中文本的 PDF。"
-            : message,
+            : known
+              ? message
+              : "资料导入失败，请确认本地资料库服务正在运行",
       },
       { status },
     );

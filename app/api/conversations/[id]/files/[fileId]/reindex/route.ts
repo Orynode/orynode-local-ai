@@ -4,7 +4,10 @@
 
 import { ORYNODE_DATA_URL, HTTP_TIMEOUT } from "../../../../../../../config/defaults";
 import { reindexDocument } from "../../../../../../../services/knowledge";
-import { lanDeniedResponse } from "../../../../../../../services/platform";
+import {
+  lanDeniedResponse,
+  sanitizedErrorResponse,
+} from "../../../../../../../services/platform";
 
 type RouteContext = {
   params: Promise<{ id: string; fileId: string }>;
@@ -37,12 +40,9 @@ export async function POST(request: Request, context: RouteContext) {
     const result = await reindexDocument(fileId, "conversation");
     return Response.json({ fileId, conversationId, ...result });
   } catch (error) {
-    return Response.json(
-      {
-        error:
-          error instanceof Error ? error.message : "重建向量索引失败",
-      },
-      { status: 503 },
-    );
+    return sanitizedErrorResponse(error, "重建向量索引失败", {
+      status: 503,
+      logTag: "[conversation-file/reindex]",
+    });
   }
 }

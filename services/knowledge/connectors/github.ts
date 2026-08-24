@@ -72,6 +72,42 @@ export const githubConnectorConfigSchema = z.object({
 
 export type GitHubConnectorConfig = z.infer<typeof githubConnectorConfigSchema>;
 
+/** owner/repo 白名单：GitHub 用户名/仓库名允许的字符（防 URL 拼接改写与 argv 语义漂移） */
+const GITHUB_NAME_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/;
+/** commit/ref 校验：SHA 全长或短 SHA，或安全的分支/tag 名 */
+const SAFE_COMMIT_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$/;
+
+/**
+ * fetch() 的 item.metadata 来自可被篡改的数据面（source_items 表），
+ * 必须按 schema 语义复验，防止：
+ * - path 穿越 clone 目录读任意文件
+ * - commit 以 "-" 开头成为 git checkout 的选项注入位
+ * - owner/repo 改写 remote URL 指向任意 git 主机
+ */
+function assertSafeFetchMetadata(meta: {
+  path: string;
+  commit: string;
+  owner: string;
+  repo: string;
+}): void {
+  if (!GITHUB_NAME_RE.test(meta.owner) || !GITHUB_NAME_RE.test(meta.repo)) {
+    throw new Error("非法的 GitHub owner/repo");
+  }
+  if (meta.path.startsWith("/") || meta.path.split("/").includes("..")) {
+    throw new Error("非法的仓库文件路径");
+  }
+  if (meta.path.includes("\\") || meta.path.includes("\0")) {
+    throw new Error("非法的仓库文件路径");
+  }
+  if (
+    !SAFE_COMMIT_RE.test(meta.commit) ||
+    meta.commit.startsWith("-") ||
+    meta.commit.includes(" ")
+  ) {
+    throw new Error("非法的 commit 引用");
+  }
+}
+
 function sha256Text(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
@@ -101,8 +137,13 @@ export function redactSecrets(text: string, token?: string): string {
     /Bearer\s+[A-Za-z0-9._\-]+/gi,
     "Bearer [REDACTED]",
   );
+  // classic PAT（ghp_/gho_/ghu_/ghs_/ghr_）+ fine-grained PAT（github_pat_）
   out = out.replace(
     /gh[pousr]_[A-Za-z0-9_]{20,}/g,
+    "[REDACTED_GITHUB_TOKEN]",
+  );
+  out = out.replace(
+    /github_pat_[A-Za-z0-9_]{20,}/g,
     "[REDACTED_GITHUB_TOKEN]",
   );
   return out;
@@ -295,6 +336,7 @@ export class GitHubRepoConnector implements SourceConnector {
     const commit = String(meta.commit || parsed.ref);
     const owner = String(meta.owner || parsed.owner);
     const repo = String(meta.repo || parsed.repo);
+    assertSafeFetchMetadata({ path, commit, owner, repo });
     const token = resolveToken(parsed);
 
     let text: string | null = null;

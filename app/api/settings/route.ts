@@ -6,7 +6,10 @@
  */
 
 import { settingsService } from "../../../services/settings";
-import { lanDeniedResponse } from "../../../services/platform";
+import {
+  lanDeniedResponse,
+  sanitizedErrorResponse,
+} from "../../../services/platform";
 
 export async function GET(request: Request) {
   const denied = lanDeniedResponse(request);
@@ -32,12 +35,9 @@ export async function PUT(request: Request) {
     );
     return Response.json(result);
   } catch (error) {
-    return Response.json(
-      {
-        error:
-          error instanceof Error ? error.message : "本地设置服务尚未启动",
-      },
-      { status: 503 },
-    );
+    return sanitizedErrorResponse(error, "本地设置服务尚未启动", {
+      status: 503,
+      logTag: "[settings]",
+    });
   }
 }

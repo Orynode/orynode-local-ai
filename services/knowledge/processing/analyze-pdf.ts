@@ -47,6 +47,13 @@ async function pageHasLargeRaster(
   }
 }
 
+/**
+ * native 文本提取的资源上限（与 parsePdf 对齐）：
+ * 分析阶段同样逐页执行 getOperatorList，无上限可被恶意 PDF 拖垮主进程。
+ */
+const MAX_ANALYZE_PDF_PAGES = 500;
+const MAX_ANALYZE_PAGE_TEXT_CHARS = 100_000;
+
 export async function analyzePdfPages(buffer: ArrayBuffer): Promise<AnalyzedPdf> {
   const { getDocument } = await loadPdfJs();
   const data = new Uint8Array(buffer.slice(0));
@@ -59,14 +66,22 @@ export async function analyzePdfPages(buffer: ArrayBuffer): Promise<AnalyzedPdf>
   const pdf = await loadingTask.promise;
   const pages: AnalyzedPdfPage[] = [];
   const parsedPages: ParsedPage[] = [];
+  let truncated = false;
 
   try {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      if (pageNumber > MAX_ANALYZE_PDF_PAGES) {
+        truncated = true;
+        break;
+      }
       const page = await pdf.getPage(pageNumber);
       const textContent = await page.getTextContent();
-      const text = textContent.items
+      let text = textContent.items
         .map((item) => ("str" in item ? item.str : ""))
         .join(" ");
+      if (text.length > MAX_ANALYZE_PAGE_TEXT_CHARS) {
+        text = text.slice(0, MAX_ANALYZE_PAGE_TEXT_CHARS);
+      }
       const hasLargeRasterImage = await pageHasLargeRaster(page);
       const quality = assessPageTextQuality({
         pageNumber,
@@ -81,9 +96,10 @@ export async function analyzePdfPages(buffer: ArrayBuffer): Promise<AnalyzedPdf>
     await loadingTask.destroy();
   }
 
+  const effectivePageCount = truncated ? pages.length : pdf.numPages;
   return {
-    pageCount: pdf.numPages,
+    pageCount: effectivePageCount,
     pages,
-    parsed: { pageCount: pdf.numPages, pages: parsedPages },
+    parsed: { pageCount: effectivePageCount, pages: parsedPages },
   };
 }

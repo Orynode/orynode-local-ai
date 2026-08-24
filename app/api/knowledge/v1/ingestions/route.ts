@@ -8,7 +8,10 @@ import {
   MAX_KNOWLEDGE_FILE_SIZE_LABEL,
 } from "../../../../../config/defaults";
 import { ingestDocument } from "../../../../../services/knowledge";
-import { requireLanAccess } from "../../../../../services/platform";
+import {
+  requireLanAccess,
+  sanitizedErrorResponse,
+} from "../../../../../services/platform";
 
 const metaSchema = z.object({
   fileName: z.string().optional(),
@@ -99,12 +102,10 @@ export async function POST(request: Request) {
       },
     );
   } catch (error) {
-    return Response.json(
-      {
-        error: error instanceof Error ? error.message : "入库失败",
-        code: "ingest_failed",
-      },
-      { status: 502 },
-    );
+    return sanitizedErrorResponse(error, "入库失败", {
+      status: 502,
+      code: "ingest_failed",
+      logTag: "[knowledge/v1/ingestions]",
+    });
   }
 }

@@ -12,7 +12,6 @@ import { isIP } from "node:net";
 import http from "node:http";
 import https from "node:https";
 import type { IncomingMessage } from "node:http";
-
 const BLOCKED_HOSTNAMES = new Set([
   "localhost",
   "metadata.google.internal",
@@ -26,6 +25,14 @@ const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
 
 const SAFE_REJECT = "目标地址不安全或不可达";
 
+/** WHATWG URL 保留 IPv6 字面量的方括号（hostname === "[::1]"）；判定前必须剥离 */
+function stripIpv6Brackets(host: string): string {
+  if (host.startsWith("[") && host.endsWith("]")) {
+    return host.slice(1, -1);
+  }
+  return host;
+}
+
 function normalizeIp(ip: string): string {
   const v = ip.toLowerCase().trim();
   // IPv4-mapped IPv6 → 提取 IPv4
@@ -34,35 +41,115 @@ function normalizeIp(ip: string): string {
   return v;
 }
 
-export function isPrivateIp(ip: string): boolean {
-  const v = normalizeIp(ip);
-  if (v === "::1" || v === "0.0.0.0" || v === "::") return true;
-  if (v.startsWith("fc") || v.startsWith("fd") || v.startsWith("fe80:")) {
-    return true;
-  }
-  // IPv6 文档/未指定等
-  if (v === "2001:db8::" || v.startsWith("2001:db8:")) return true;
-
-  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(v);
-  if (!m) {
-    // 其它 IPv6：仅允许全局单播粗检（非 fe80/fc/fd/::1 已覆盖一部分）
-    if (v.includes(":")) {
-      if (v.startsWith("::") && v !== "::1") {
-        // ::ffff: 已 normalize；其它压缩本地
-        return v === "::" || v.startsWith("::ffff:");
+/**
+ * IPv6 → 16 字节。覆盖 WHATWG URL 序列化形态（如 ::ffff:7f00:1）、
+ * IPv4-compatible（::7f00:1，Linux 内核仍按 IPv4 路由）与
+ * NAT64（64:ff9b::/96，DNS64 网络中真实路由到内嵌 IPv4）。
+ */
+function ipv6ToBytes(ip: string): Uint8Array | null {
+  const groups = ip.split("::");
+  if (groups.length > 2) return null;
+  const parseSide = (side: string): number[] | null => {
+    if (side === "") return [];
+    const parts = side.split(":");
+    const out: number[] = [];
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i]!;
+      // 内嵌 IPv4（点分形式只允许出现在最后一组）
+      if (part.includes(".")) {
+        if (i !== parts.length - 1) return null;
+        const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(part);
+        if (!m) return null;
+        out.push(Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4]));
+        continue;
       }
-      return false;
+      if (!/^[0-9a-f]{1,4}$/.test(part)) return null;
+      const value = parseInt(part, 16);
+      out.push(value >> 8, value & 0xff);
     }
-    return true; // 无法识别的形式一律拒绝
+    return out;
+  };
+  let head: number[] | null;
+  let tail: number[] | null;
+  if (groups.length === 2) {
+    head = parseSide(groups[0]!);
+    tail = parseSide(groups[1]!);
+  } else {
+    const side = parseSide(groups[0]!);
+    head = side;
+    tail = side ? [] : null;
   }
-  const a = Number(m[1]);
-  const b = Number(m[2]);
+  if (!head || !tail) return null;
+  const total = head.length + tail.length;
+  if (total > 16 || (groups.length === 2 && total === 16)) return null;
+  const bytes = new Uint8Array(16);
+  bytes.set(head, 0);
+  bytes.set(tail, 16 - tail.length);
+  return bytes;
+}
+
+function ipv4InPrivateRange(bytes: Uint8Array): boolean {
+  const a = bytes[0]!;
+  const b = bytes[1]!;
   if (a === 10 || a === 127 || a === 0) return true;
   if (a === 169 && b === 254) return true;
   if (a === 172 && b >= 16 && b <= 31) return true;
   if (a === 192 && b === 168) return true;
   if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
   if (a >= 224) return true; // multicast / reserved
+  return false;
+}
+
+/** IPv6 低 32 位是否内嵌私网 IPv4（mapped / compatible / NAT64 同判） */
+function ipv6EmbedsPrivateV4(bytes: Uint8Array): boolean {
+  const tail = bytes.slice(12);
+  const allZeroPrefix = bytes.slice(0, 10).every((b) => b === 0);
+  const isMappedOrCompatible =
+    allZeroPrefix &&
+    (bytes[10] === 0xff ? bytes[11] === 0xff : bytes[10] === 0 && bytes[11] === 0);
+  const nat64 =
+    bytes[0] === 0x00 &&
+    bytes[1] === 0x64 &&
+    bytes[2] === 0xff &&
+    bytes[3] === 0x9b &&
+    bytes.slice(4, 12).every((b) => b === 0);
+  if (isMappedOrCompatible || nat64) {
+    return ipv4InPrivateRange(tail);
+  }
+  return false;
+}
+
+export function isPrivateIp(ip: string): boolean {
+  const bare = stripIpv6Brackets(normalizeIp(ip));
+  if (bare === "::1" || bare === "0.0.0.0" || bare === "::") return true;
+
+  const family = isIP(bare);
+  if (family === 6) {
+    const bytes = ipv6ToBytes(bare);
+    if (!bytes) return true; // 解析失败一律拒绝
+    // ULA fc00::/7、链路本地 fe80::/10、组播 ff00::/8、文档 2001:db8::/32
+    if (bytes[0]! >= 0xfc && bytes[0]! <= 0xfd) return true;
+    if (bytes[0] === 0xfe && (bytes[1]! & 0xc0) === 0x80) return true;
+    if (bytes[0] === 0xff) return true;
+    if (
+      bytes[0] === 0x20 &&
+      bytes[1] === 0x01 &&
+      bytes[2] === 0x0d &&
+      bytes[3] === 0xb8
+    ) {
+      return true;
+    }
+    if (ipv6EmbedsPrivateV4(bytes)) return true;
+    return false;
+  }
+
+  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(bare);
+  if (!m) {
+    return true; // 无法识别的形式一律拒绝
+  }
+  if (ipv4InPrivateRange(new Uint8Array([Number(m[1])!, Number(m[2])!, Number(m[3])!, Number(m[4])!]))) {
+    return true;
+  }
   return false;
 }
 
@@ -106,11 +193,13 @@ export async function resolveSafeHttpUrl(raw: string): Promise<ResolvedSafeUrl> 
     throw new Error(SAFE_REJECT);
   }
 
-  if (isIP(host)) {
-    if (isPrivateIp(host)) {
+  // IPv6 字面量（含方括号形态）一律本地校验，绝不做 DNS lookup
+  const bareHost = stripIpv6Brackets(host);
+  if (isIP(bareHost)) {
+    if (isPrivateIp(bareHost)) {
       throw new Error(SAFE_REJECT);
     }
-    return { url, addresses: [normalizeIp(host)] };
+    return { url, addresses: [normalizeIp(bareHost)] };
   }
 
   let records: Array<{ address: string; family: number }>;

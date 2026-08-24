@@ -5,7 +5,14 @@
  */
 
 import { createHash, randomBytes, randomInt } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 
 /**
@@ -20,9 +27,12 @@ export function createLanAuthStore(options = {}) {
   /** 配对码连续失败锁定：防局域网暴力枚举（6 位码 + 5 分钟 TTL 可被穷举） */
   const MAX_CLAIM_FAILURES = 5;
   const CLAIM_LOCKOUT_MS = 60_000;
+  /** start 动作限频：防止借高频 start 刷码或干扰 claim */
+  const MIN_START_INTERVAL_MS = 1_000;
 
   /** @type {{ count: number, lockedUntil: number }} */
   let claimFailures = { count: 0, lockedUntil: 0 };
+  let lastStartAt = -Infinity;
 
   function loadState() {
     if (!existsSync(statePath)) return { pairing: null, sessions: [] };
@@ -37,9 +47,24 @@ export function createLanAuthStore(options = {}) {
     }
   }
 
+  /**
+   * 原子写：先写临时文件再 rename，避免并发/崩溃留下半截 JSON。
+   * @param {LanAuthState} state
+   */
   function saveState(state) {
     mkdirSync(dirname(statePath), { recursive: true });
-    writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    const tmp = `${statePath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`);
+      renameSync(tmp, statePath);
+    } catch (error) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // 清理失败不影响主流程
+      }
+      throw error;
+    }
   }
 
   function hashToken(token) {
@@ -48,7 +73,15 @@ export function createLanAuthStore(options = {}) {
 
   return {
     startPairing(ttlMs = 5 * 60_000) {
-      claimFailures = { count: 0, lockedUntil: 0 };
+      // 锁定期内拒绝生成新配对码：否则攻击者可借 start 重置失败计数绕过锁定
+      if (now() < claimFailures.lockedUntil) {
+        throw new Error("PAIRING_LOCKED");
+      }
+      const since = now() - lastStartAt;
+      if (since < MIN_START_INTERVAL_MS) {
+        throw new Error("PAIRING_RATE_LIMITED");
+      }
+      lastStartAt = now();
       const state = loadState();
       const createdAt = new Date(now()).toISOString();
       const challenge = {
@@ -58,8 +91,9 @@ export function createLanAuthStore(options = {}) {
       };
       state.pairing = challenge;
       saveState(state);
+      // 日志不落全码：终端日志常被复制分享/收集，完整码仅经本机 Settings UI 展示
       console.info(
-        `[lan-auth] Pairing code: ${challenge.code} (expires ${challenge.expiresAt})`,
+        `[lan-auth] Pairing code generated: ${challenge.code.slice(0, 2)}**** (expires ${challenge.expiresAt})`,
       );
       return challenge;
     },
@@ -129,8 +163,15 @@ export function createLanAuthStore(options = {}) {
       );
       if (!session) return null;
       if (Date.parse(session.expiresAt) < now()) return null;
+
+      // lastSeenAt 仅内存更新：高频请求下每次全量写盘得不偿失；
+      // 顺带清理已撤销/已过期会话（防 sessions 无限增长）时才落盘
       session.lastSeenAt = new Date(now()).toISOString();
-      saveState(state);
+      const before = state.sessions.length;
+      state.sessions = state.sessions.filter(
+        (s) => !s.revokedAt && Date.parse(s.expiresAt) >= now(),
+      );
+      if (state.sessions.length !== before) saveState(state);
       return session;
     },
   };

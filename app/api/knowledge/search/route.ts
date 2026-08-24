@@ -9,7 +9,10 @@ import {
   runKnowledgeSearch,
   knowledgeSearchBodySchema,
 } from "../../../../services/knowledge/application/run-search";
-import { lanDeniedResponse } from "../../../../services/platform";
+import {
+  lanDeniedResponse,
+  sanitizedErrorResponse,
+} from "../../../../services/platform";
 
 export async function POST(request: Request) {
   const denied = lanDeniedResponse(request);
@@ -30,9 +33,9 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
-    return Response.json(
-      { error: error instanceof Error ? error.message : "检索失败" },
-      { status: 502 },
-    );
+    return sanitizedErrorResponse(error, "检索失败", {
+      status: 502,
+      logTag: "[knowledge/search]",
+    });
   }
 }

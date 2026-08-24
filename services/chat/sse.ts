@@ -120,11 +120,12 @@ export function wrapModelStreamAsOrynodeSse(
         );
         controller.close();
       } catch (error) {
+        console.error("[sse] encode failed:", error);
         controller.enqueue(
           encodeSseEvent("error", {
             version: ORYNODE_SSE_VERSION,
             code: "SSE_ENCODE_FAILED",
-            message: error instanceof Error ? error.message : "stream failed",
+            message: "流式响应中断，请重试",
             recoverable: false,
           }),
         );

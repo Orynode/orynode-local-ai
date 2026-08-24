@@ -18,6 +18,66 @@ import {
   type OfficeConverter,
 } from "../ports/office-converter";
 
+/**
+ * zip 容器（OOXML/ODF）未压缩总大小预检上限。
+ * 高压缩比包（zip bomb）会在原生库内部物化成 GB 级字符串，
+ * 输出预算裁剪发生在 toMarkdownBytes 返回之后，无法阻止内存峰值；
+ * 读 central directory 预检是唯一便宜的拦截点。
+ */
+const MAX_ZIP_UNCOMPRESSED_BYTES = 512 * 1024 * 1024;
+
+/**
+ * 解析 zip central directory 累加未压缩大小。
+ * 只读文件尾 + 目录项，不触碰本地条目数据；解析失败返回 null（交由后续流程处理）。
+ */
+function estimateZipUncompressedSize(bytes: Uint8Array): number | null {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // 从尾部向前找 EOCD 签名 0x06054b50
+  let eocd = -1;
+  const minEocd = Math.max(0, bytes.length - 66_000);
+  for (let i = bytes.length - 22; i >= minEocd; i -= 1) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) return null;
+  const entryCount = view.getUint16(eocd + 10, true);
+  const cdSize = view.getUint32(eocd + 12, true);
+  const cdOffset = view.getUint32(eocd + 16, true);
+  if (cdOffset + cdSize > bytes.length) return null;
+
+  let total = 0;
+  const limit = cdOffset + cdSize;
+  let pos = cdOffset;
+  for (let i = 0; i < entryCount && pos + 46 <= limit; i += 1) {
+    if (view.getUint32(pos, true) !== 0x02014b50) return null;
+    // zip64 条目：uncompressed size 为 0xFFFFFFFF，真实值在 zip64 extra 字段；
+    // 此处保守按超限处理（拒绝而非低估）
+    const size32 = view.getUint32(pos + 24, true);
+    total += size32 === 0xffffffff ? MAX_ZIP_UNCOMPRESSED_BYTES + 1 : size32;
+    const nameLen = view.getUint16(pos + 28, true);
+    const extraLen = view.getUint16(pos + 30, true);
+    const commentLen = view.getUint16(pos + 32, true);
+    if (total > MAX_ZIP_UNCOMPRESSED_BYTES) return total;
+    pos += 46 + nameLen + extraLen + commentLen;
+  }
+  return total;
+}
+
+function assertZipInputBudget(bytes: Uint8Array, format: OfficeFormat): void {
+  if (!["docx", "xlsx", "pptx", "odt", "ods", "odp"].includes(format)) {
+    return;
+  }
+  const uncompressed = estimateZipUncompressedSize(bytes);
+  if (uncompressed != null && uncompressed > MAX_ZIP_UNCOMPRESSED_BYTES) {
+    throw new OfficeConvertError(
+      "ResourceLimit",
+      `Office 包解压后体积超过上限（${MAX_ZIP_UNCOMPRESSED_BYTES} 字节）`,
+    );
+  }
+}
+
 /** anydoc Format 枚举值 → 本仓库 OfficeFormat（与 registry 对齐，无独立 xls） */
 function mapAnydocFormat(raw: unknown): OfficeFormat | null {
   const s = String(raw ?? "").toLowerCase();
@@ -140,6 +200,7 @@ export function createAnydocOfficeConverter(): OfficeConverter {
       if (!format) {
         throw new OfficeConvertError("Unsupported", "无法识别 Office 格式");
       }
+      assertZipInputBudget(bytes, format);
 
       const anydoc = await loadAnydoc();
       const formatArg =

@@ -12,7 +12,14 @@
  */
 
 import { createHash, randomBytes, randomInt } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import {
   resolveAccessMode,
@@ -72,9 +79,21 @@ function loadState(path: string): LanAuthState {
   }
 }
 
+/** 原子写：先写临时文件再 rename，避免并发/崩溃留下半截 JSON */
 function saveState(path: string, state: LanAuthState): void {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`);
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`);
+    renameSync(tmp, path);
+  } catch (error) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // 清理失败不影响主流程
+    }
+    throw error;
+  }
 }
 
 function parseCookieHeader(header: string | null): Record<string, string> {
@@ -166,14 +185,24 @@ export function createLanAuthStore(options?: {
   /** 配对码连续失败锁定：防局域网暴力枚举（6 位码 + 5 分钟 TTL 可被穷举） */
   const MAX_CLAIM_FAILURES = 5;
   const CLAIM_LOCKOUT_MS = 60_000;
+  /** start 动作限频：防止借高频 start 刷码或干扰 claim */
+  const MIN_START_INTERVAL_MS = 1_000;
   let claimFailures: { count: number; lockedUntil: number } = {
     count: 0,
     lockedUntil: 0,
   };
+  let lastStartAt = -Infinity;
 
   return {
     startPairing(ttlMs = 5 * 60_000): PairingChallenge {
-      claimFailures = { count: 0, lockedUntil: 0 };
+      // 锁定期内拒绝生成新配对码：否则攻击者可借 start 重置失败计数绕过锁定
+      if (now() < claimFailures.lockedUntil) {
+        throw new Error("PAIRING_LOCKED");
+      }
+      if (now() - lastStartAt < MIN_START_INTERVAL_MS) {
+        throw new Error("PAIRING_RATE_LIMITED");
+      }
+      lastStartAt = now();
       const state = loadState(statePath);
       const createdAt = new Date(now()).toISOString();
       const challenge: PairingChallenge = {
@@ -183,8 +212,9 @@ export function createLanAuthStore(options?: {
       };
       state.pairing = challenge;
       saveState(statePath, state);
+      // 日志不落全码：终端日志常被复制分享/收集，完整码仅经本机 Settings UI 展示
       console.info(
-        `[lan-auth] Pairing code: ${challenge.code} (expires ${challenge.expiresAt})`,
+        `[lan-auth] Pairing code generated: ${challenge.code.slice(0, 2)}**** (expires ${challenge.expiresAt})`,
       );
       return challenge;
     },
@@ -258,8 +288,15 @@ export function createLanAuthStore(options?: {
       );
       if (!session) return null;
       if (Date.parse(session.expiresAt) < now()) return null;
+
+      // lastSeenAt 仅内存更新：高频请求下每次全量写盘得不偿失；
+      // 顺带清理已撤销/已过期会话（防 sessions 无限增长）时才落盘
       session.lastSeenAt = new Date(now()).toISOString();
-      saveState(statePath, state);
+      const before = state.sessions.length;
+      state.sessions = state.sessions.filter(
+        (s) => !s.revokedAt && Date.parse(s.expiresAt) >= now(),
+      );
+      if (state.sessions.length !== before) saveState(statePath, state);
       return session;
     },
   };
@@ -304,11 +341,32 @@ function assertSameOrigin(request: Request): LanAccessResult | null {
 }
 
 /**
+ * Host 必须是本机回环：阻断 DNS rebinding。
+ * 浏览器解析到本机的恶意页面可借 rebinding 把 Host 换成攻击者域名，
+ * 使跨源读取伪装成同源；回环绑定服务只应接受回环 Host。
+ */
+export function assertLoopbackHost(request: Request): LanAccessResult | null {
+  const host = request.headers.get("host");
+  if (!isLoopbackHost(host)) {
+    return {
+      ok: false,
+      status: 403,
+      code: "HOST_NOT_LOOPBACK",
+      error: "Host 必须是 127.0.0.1 / localhost / [::1]",
+    };
+  }
+  return null;
+}
+
+/**
  * API 网关统一访问检查。
  * - 所有模式：写方法先过 Origin 校验（CSRF）
- * - local_only：放行
+ * - local_only：额外要求 Host 为本机回环——该模式无认证且仅绑回环，
+ *   DNS rebinding 可把攻击者域名解析到 127.0.0.1 使跨源读取伪装成同源；
+ *   反向代理场景可设 ORYNODE_TRUST_LOOPBACK_HOST=0 豁免
+ * - trusted_lan：经 session 认证（cookie 按域隔离，rebinding 无凭据可用），
+ *   合法的局域网直连 Host 不是回环，故不做此校验
  * - trusted_lan + UNSAFE：放行（预览）
- * - trusted_lan：要求有效 session
  * - allowLoopbackWithoutSession：仅当 clientAddress 为回环时豁免（不用 Host）
  */
 export function requireLanAccess(
@@ -330,6 +388,13 @@ export function requireLanAccess(
   const mode = resolveAccessMode(env);
 
   if (mode === "local_only") {
+    const hostCheckDisabled =
+      env.ORYNODE_TRUST_LOOPBACK_HOST === "0" ||
+      env.ORYNODE_TRUST_LOOPBACK_HOST === "false";
+    if (!hostCheckDisabled) {
+      const hostDenied = assertLoopbackHost(request);
+      if (hostDenied) return hostDenied;
+    }
     return { ok: true, mode, session: null };
   }
 

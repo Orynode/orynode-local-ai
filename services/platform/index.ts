@@ -53,3 +53,4 @@ export {
 } from "./lan-auth";
 export type { LanSession, PairingChallenge } from "./lan-auth";
 export { lanDeniedResponse } from "./http-guard";
+export { sanitizedErrorResponse, sanitizeErrorMessage } from "./error-sanitizer";

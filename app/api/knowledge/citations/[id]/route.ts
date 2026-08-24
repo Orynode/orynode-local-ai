@@ -6,7 +6,10 @@
  */
 
 import { createKnowledgeEngine } from "../../../../../services/knowledge/application/engine";
-import { lanDeniedResponse } from "../../../../../services/platform";
+import {
+  lanDeniedResponse,
+  sanitizedErrorResponse,
+} from "../../../../../services/platform";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -42,9 +45,9 @@ export async function GET(request: Request, { params }: Params) {
       status: resolved.available ? 200 : 404,
     });
   } catch (error) {
-    return Response.json(
-      { error: error instanceof Error ? error.message : "引用解析失败" },
-      { status: 502 },
-    );
+    return sanitizedErrorResponse(error, "引用解析失败", {
+      status: 502,
+      logTag: "[knowledge/citations]",
+    });
   }
 }

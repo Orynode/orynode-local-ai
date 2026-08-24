@@ -3150,10 +3150,10 @@ const server = createServer(async (request, response) => {
 
   try {
     if (request.method === "GET" && url.pathname === "/health") {
+      // 不返回 databasePath 等本机路径：/health 无认证，避免内部结构探测
       json(response, 200, {
         ok: true,
         service: "orynode-local-data",
-        databasePath,
         embed: {
           model: activeEmbedArtifact.id,
           artifactId: activeEmbedArtifact.id,
@@ -3181,8 +3181,41 @@ const server = createServer(async (request, response) => {
       if (request.method === "POST") {
         const body = await readJson(request);
         const action = body.action === "claim" ? "claim" : "start";
+        // claim 也过 Origin 校验：防跨域简单请求烧码/试码（start 已由 originAllowed 覆盖）
+        if (action === "claim" && request.headers.origin) {
+          const originHost = (() => {
+            try {
+              return new URL(request.headers.origin).host;
+            } catch {
+              return null;
+            }
+          })();
+          const reqHost = request.headers.host || "";
+          if (originHost && originHost !== reqHost) {
+            json(response, 403, { error: "Origin is not allowed" });
+            return;
+          }
+        }
         if (action === "start") {
-          const challenge = lanAuthStore.startPairing();
+          let challenge;
+          try {
+            challenge = lanAuthStore.startPairing();
+          } catch (error) {
+            const code =
+              error instanceof Error ? error.message : "PAIRING_INVALID";
+            if (code === "PAIRING_LOCKED") {
+              json(response, 429, {
+                error: "配对尝试已被锁定，请稍后再试",
+                code,
+              });
+              return;
+            }
+            if (code === "PAIRING_RATE_LIMITED") {
+              json(response, 429, { error: "请求过于频繁", code });
+              return;
+            }
+            throw error;
+          }
           json(response, 200, {
             pairing: {
               code: challenge.code,
@@ -3293,6 +3326,21 @@ const server = createServer(async (request, response) => {
       const body = await readJson(request);
       if (!body?.type || !body?.idempotencyKey) {
         json(response, 400, { error: "type 与 idempotencyKey 必填" });
+        return;
+      }
+      // 白名单：HTTP 入口只允许业务链路使用的 Job 类型；
+      // sync_source 必须走 /sources/sync（其 payload 需经 connector 校验），
+      // garbage_collect 仅由服务端按日幂等入队。
+      const ENQUEUEABLE_JOB_TYPES = new Set([
+        "embed_document",
+        "process_revision",
+        "convert_office",
+      ]);
+      if (!ENQUEUEABLE_JOB_TYPES.has(String(body.type))) {
+        json(response, 400, {
+          error: `不允许通过 HTTP 入队该类型：${String(body.type)}`,
+          code: "JOB_TYPE_NOT_ALLOWED",
+        });
         return;
       }
       const idempotencyKey = String(body.idempotencyKey);
@@ -4818,6 +4866,21 @@ const server = createServer(async (request, response) => {
         if (!body.externalId || typeof body.externalId !== "string") {
           json(response, 400, { error: "externalId 必填" });
           return;
+        }
+        // documentId 归属校验：必须真实存在于 knowledge_documents 或
+        // conversation_files，防止任意字符串借 visibility 机制操纵检索可见性
+        if (body.documentId != null) {
+          const docId = String(body.documentId);
+          const exists =
+            getKnowledgeDocument.get(docId) != null ||
+            getConversationFile.get(docId) != null;
+          if (!exists) {
+            json(response, 400, {
+              error: "documentId 不存在",
+              code: "DOCUMENT_NOT_FOUND",
+            });
+            return;
+          }
         }
         json(response, 200, {
           item: sourcesRepository.upsertItem(sourceId, body),

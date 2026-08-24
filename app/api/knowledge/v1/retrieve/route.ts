@@ -7,7 +7,10 @@ import { SEARCH_CONFIG } from "../../../../../config/defaults";
 import { createKnowledgeEngine } from "../../../../../services/knowledge/application/engine";
 import { resolveChatRetrievalScope } from "../../../../../services/knowledge/application/resolve-scope";
 import { readKnowledgeTierSetting } from "../../../../../services/knowledge/application/capabilities";
-import { requireLanAccess } from "../../../../../services/platform";
+import {
+  requireLanAccess,
+  sanitizedErrorResponse,
+} from "../../../../../services/platform";
 
 const bodySchema = z.object({
   query: z.string().min(1),
@@ -68,12 +71,10 @@ export async function POST(request: Request) {
     });
     return Response.json({ apiVersion: "v1", ...result });
   } catch (error) {
-    return Response.json(
-      {
-        error: error instanceof Error ? error.message : "检索失败",
-        code: "retrieval_failed",
-      },
-      { status: 502 },
-    );
+    return sanitizedErrorResponse(error, "检索失败", {
+      status: 502,
+      code: "retrieval_failed",
+      logTag: "[knowledge/v1/retrieve]",
+    });
   }
 }

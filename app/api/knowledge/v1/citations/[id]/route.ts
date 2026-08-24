@@ -4,7 +4,10 @@
  */
 
 import { createKnowledgeEngine } from "../../../../../../services/knowledge/application/engine";
-import { requireLanAccess } from "../../../../../../services/platform";
+import {
+  requireLanAccess,
+  sanitizedErrorResponse,
+} from "../../../../../../services/platform";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -54,12 +57,10 @@ export async function GET(request: Request, { params }: Params) {
     }
     return Response.json({ apiVersion: "v1", ...resolved });
   } catch (error) {
-    return Response.json(
-      {
-        error: error instanceof Error ? error.message : "引用解析失败",
-        code: "citation_failed",
-      },
-      { status: 502 },
-    );
+    return sanitizedErrorResponse(error, "引用解析失败", {
+      status: 502,
+      code: "citation_failed",
+      logTag: "[knowledge/v1/citations]",
+    });
   }
 }

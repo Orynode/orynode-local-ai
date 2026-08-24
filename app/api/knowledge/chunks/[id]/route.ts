@@ -10,7 +10,10 @@
 
 import { KnowledgeError } from "../../../../../services/knowledge/core/errors";
 import { createKnowledgeEngine } from "../../../../../services/knowledge/application/engine";
-import { lanDeniedResponse } from "../../../../../services/platform";
+import {
+  lanDeniedResponse,
+  sanitizedErrorResponse,
+} from "../../../../../services/platform";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -52,9 +55,9 @@ export async function GET(request: Request, { params }: Params) {
         { status: 404 },
       );
     }
-    return Response.json(
-      { error: error instanceof Error ? error.message : "读取失败" },
-      { status: 502 },
-    );
+    return sanitizedErrorResponse(error, "读取失败", {
+      status: 502,
+      logTag: "[knowledge/chunks]",
+    });
   }
 }

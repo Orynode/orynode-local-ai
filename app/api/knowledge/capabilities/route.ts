@@ -7,7 +7,10 @@ import {
   readKnowledgeTierSetting,
 } from "../../../../services/knowledge/application/capabilities";
 import { parseKnowledgeTier } from "../../../../config/defaults";
-import { lanDeniedResponse } from "../../../../services/platform";
+import {
+  lanDeniedResponse,
+  sanitizedErrorResponse,
+} from "../../../../services/platform";
 
 export async function GET(request: Request) {
   const denied = lanDeniedResponse(request);
@@ -25,11 +28,9 @@ export async function GET(request: Request) {
       },
     });
   } catch (error) {
-    return Response.json(
-      {
-        error: error instanceof Error ? error.message : "能力探测失败",
-      },
-      { status: 502 },
-    );
+    return sanitizedErrorResponse(error, "能力探测失败", {
+      status: 502,
+      logTag: "[knowledge/capabilities]",
+    });
   }
 }
