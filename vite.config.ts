@@ -2,8 +2,8 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import vinext from "vinext";
 import { defineConfig } from "vite";
-import hostingConfig from "./.openai/hosting.json";
-import { sites } from "./build/sites-vite-plugin";
+import hostingConfig from "./.openai/hosting.json" with { type: "json" };
+import { sites } from "./build/sites-vite-plugin.ts";
 import { NATIVE_NODE_PACKAGES } from "./config/native-node-packages.mjs";
 
 const LOCAL_PLACEHOLDER_DATABASE_ID = "00000000-0000-4000-8000-000000000000";
@@ -65,13 +65,19 @@ export default defineConfig(async () => {
     resolve: {
       alias: {
         // pdfjs optional native canvas — unavailable in vinext Workers
-        "@napi-rs/canvas": resolve(__dirname, "stubs/napi-rs-canvas.mjs"),
+        "@napi-rs/canvas": resolve(
+          import.meta.dirname!,
+          "stubs/napi-rs-canvas.mjs",
+        ),
         // anydoc 含原生 .node，只能在 data-service 加载；Workers 用 stub
-        "@firecrawl/anydoc": resolve(__dirname, "stubs/firecrawl-anydoc.mjs"),
+        "@firecrawl/anydoc": resolve(
+          import.meta.dirname!,
+          "stubs/firecrawl-anydoc.mjs",
+        ),
         // semantic search is optional; stub only when package is absent
         ...optionalPackageAlias(
           "@xenova/transformers",
-          resolve(__dirname, "stubs/xenova-transformers.mjs"),
+          resolve(import.meta.dirname!, "stubs/xenova-transformers.mjs"),
         ),
       },
     },
