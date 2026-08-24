@@ -98,6 +98,7 @@ export async function renderPdfPageToPng(
     useSystemFonts: true,
     useWorkerFetch: false,
     disableFontFace: true,
+    // pdfjs v6 已移除 PostScript eval 路径（旧版需 isEvalSupported:false）
   });
 
   try {

@@ -96,3 +96,14 @@ V2 可以将运行数据迁移到标准的 macOS Application Support
 - 自动更新。
 
 这些工作不应阻碍V1验证本地AI助手的实际使用价值。
+
+## 安全与依赖里程碑
+
+### Embedding 运行时迁移：`@xenova/transformers` → `@huggingface/transformers`
+
+跟踪：[GitHub Milestone #1](https://github.com/Orynode/orynode-local-ai/milestone/1)（[#2 代码迁移](https://github.com/Orynode/orynode-local-ai/issues/2)、[#3 向量重建与质量回归](https://github.com/Orynode/orynode-local-ai/issues/3)）
+
+背景（2026-08 审计）：`@xenova/transformers@2.17.2` 已停止维护，其依赖链包含
+protobufjs critical（任意代码执行）与 onnxruntime-web / sharp 高危漏洞。
+迁移到官方继任包后需全量重建向量索引；`ORYNODE_SEMANTIC_SEARCH=0`
+用户不受影响。

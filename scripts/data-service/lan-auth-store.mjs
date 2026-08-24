@@ -17,6 +17,13 @@ export function createLanAuthStore(options = {}) {
     options.statePath ?? resolve(projectRoot, ".orynode/lan-auth.json");
   const now = options.now ?? (() => Date.now());
 
+  /** 配对码连续失败锁定：防局域网暴力枚举（6 位码 + 5 分钟 TTL 可被穷举） */
+  const MAX_CLAIM_FAILURES = 5;
+  const CLAIM_LOCKOUT_MS = 60_000;
+
+  /** @type {{ count: number, lockedUntil: number }} */
+  let claimFailures = { count: 0, lockedUntil: 0 };
+
   function loadState() {
     if (!existsSync(statePath)) return { pairing: null, sessions: [] };
     try {
@@ -41,6 +48,7 @@ export function createLanAuthStore(options = {}) {
 
   return {
     startPairing(ttlMs = 5 * 60_000) {
+      claimFailures = { count: 0, lockedUntil: 0 };
       const state = loadState();
       const createdAt = new Date(now()).toISOString();
       const challenge = {
@@ -57,6 +65,7 @@ export function createLanAuthStore(options = {}) {
     },
 
     claimPairing(input) {
+      if (now() < claimFailures.lockedUntil) return null;
       const state = loadState();
       const pairing = state.pairing;
       if (!pairing) return null;
@@ -65,8 +74,16 @@ export function createLanAuthStore(options = {}) {
         saveState(state);
         return null;
       }
-      if (String(input.code).trim() !== pairing.code) return null;
+      if (String(input.code).trim() !== pairing.code) {
+        claimFailures.count += 1;
+        if (claimFailures.count >= MAX_CLAIM_FAILURES) {
+          claimFailures.lockedUntil = now() + CLAIM_LOCKOUT_MS;
+          claimFailures.count = 0;
+        }
+        return null;
+      }
 
+      claimFailures = { count: 0, lockedUntil: 0 };
       const token = randomBytes(32).toString("base64url");
       const createdAt = new Date(now()).toISOString();
       const session = {

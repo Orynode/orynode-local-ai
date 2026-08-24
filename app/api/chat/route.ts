@@ -207,20 +207,24 @@ export async function POST(request: Request) {
       },
     });
   } catch (error) {
-    const message =
-      error instanceof Error && error.name === "TimeoutError"
-        ? "本地模型响应超时"
-        : error instanceof Error
-          ? error.message
-          : "无法连接TurboFieldfare，请先启动本地推理服务";
-    const status =
-      message.includes("无法连接") || message.includes("超时") ? 503 : 502;
+    // 错误脱敏：只回传语义化文案，不透出内部堆栈/路径/URL 细节
+    const isAbort =
+      error instanceof Error &&
+      (error.name === "TimeoutError" || error.name === "AbortError");
+    const message = isAbort
+      ? "本地模型响应超时"
+      : error instanceof Error
+        ? error.message
+        : "无法连接TurboFieldfare，请先启动本地推理服务";
+    const sanitized =
+      message.includes("无法连接") || message.includes("超时")
+        ? "无法连接TurboFieldfare，请先启动本地推理服务或检查模型状态"
+        : message;
+    const status = isAbort ? 503 : 502;
+    console.error("[chat] upstream error:", error);
     return Response.json(
       {
-        error:
-          status === 503 && !message.includes("超时")
-            ? "无法连接TurboFieldfare，请先启动本地推理服务"
-            : message,
+        error: sanitized,
         model: EXPECTED_MODEL_ID,
       },
       { status },

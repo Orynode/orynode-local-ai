@@ -98,3 +98,17 @@ but should migrate or detect an existing V1 model installation.
 - Automatic updates
 
 These concerns should not block validation of the V1 assistant experience.
+
+## Security and dependency milestones
+
+### Embedding runtime migration: `@xenova/transformers` → `@huggingface/transformers`
+
+Tracking: [GitHub Milestone #1](https://github.com/Orynode/orynode-local-ai/milestone/1)
+([#2 code migration](https://github.com/Orynode/orynode-local-ai/issues/2),
+[#3 vector rebuild and quality regression](https://github.com/Orynode/orynode-local-ai/issues/3))
+
+Background (2026-08 audit): `@xenova/transformers@2.17.2` is unmaintained and its
+dependency chain carries a critical protobufjs vulnerability (arbitrary code
+execution) plus high-severity onnxruntime-web / sharp advisories. After migrating
+to the official successor package the vector index must be fully rebuilt; users
+with `ORYNODE_SEMANTIC_SEARCH=0` are unaffected.

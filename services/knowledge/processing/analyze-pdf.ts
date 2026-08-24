@@ -54,6 +54,7 @@ export async function analyzePdfPages(buffer: ArrayBuffer): Promise<AnalyzedPdf>
     data,
     useSystemFonts: true,
     useWorkerFetch: false,
+    // pdfjs v6 已移除 PostScript eval 路径（旧版需 isEvalSupported:false）
   });
   const pdf = await loadingTask.promise;
   const pages: AnalyzedPdfPage[] = [];

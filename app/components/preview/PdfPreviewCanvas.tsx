@@ -108,6 +108,7 @@ export function PdfPreviewCanvas({
       try {
         const pdfjs = await loadPdfJs();
         // pdfjs 可能 transfer 掉 data 底层 ArrayBuffer；用副本避免调用方缓冲被掏空
+        // pdfjs v6 已移除 PostScript eval 路径（旧版需 isEvalSupported:false）
         loadingTask = data
           ? pdfjs.getDocument({
               data: new Uint8Array(data.slice(0)),

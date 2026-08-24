@@ -120,6 +120,23 @@ const allowedOrigins = new Set([
   "http://127.0.0.1:3001",
 ]);
 
+/** 额外信任来源（逗号分隔精确 origin，如反向代理地址）；不解析通配 */
+const extraAllowedOrigins = new Set(
+  String(process.env.ORYNODE_DATA_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean),
+);
+
+function isAllowedOrigin(origin) {
+  if (!origin) return false;
+  return (
+    allowedOrigins.has(origin) ||
+    extraAllowedOrigins.has(origin) ||
+    isLoopbackOrigin(origin)
+  );
+}
+
 /** 本机浏览器任意端口（vinext 可能不用 3000） */
 function isLoopbackOrigin(origin) {
   if (!origin) return false;
@@ -1395,8 +1412,7 @@ function clearAllConversations() {
 
 function corsHeaders(request) {
   const origin = request?.headers?.origin;
-  if (!origin) return {};
-  if (!allowedOrigins.has(origin) && !isLoopbackOrigin(origin)) return {};
+  if (!isAllowedOrigin(origin)) return {};
   return {
     "access-control-allow-origin": origin,
     "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
@@ -2770,7 +2786,7 @@ function settingsResponsePayload(settings) {
 
 function originAllowed(request) {
   const origin = request.headers.origin;
-  return !origin || allowedOrigins.has(origin) || isLoopbackOrigin(origin);
+  return !origin || isAllowedOrigin(origin);
 }
 
 const activeEmbedArtifact = getActiveEmbeddingArtifact();

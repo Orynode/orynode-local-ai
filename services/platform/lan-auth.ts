@@ -4,6 +4,7 @@
  * - Local-only：不要求认证
  * - Trusted-LAN + UNSAFE：开发预览，跳过认证（须显式开关）
  * - Trusted-LAN 正式路径：一次性 pairing code → session cookie → 可撤销
+ * - 所有模式统一：写方法校验 Origin（CSRF 第一道防线，local_only 也生效）
  *
  * 配对管理（start/list/revoke）应走 loopback Data Service `/lan-auth/pairing`，
  * 勿仅凭 Host 头判定本机（可伪造）。本模块的 allowLoopbackWithoutSession
@@ -162,8 +163,17 @@ export function createLanAuthStore(options?: {
   const statePath = options?.statePath ?? defaultStatePath(projectRoot);
   const now = options?.now ?? (() => Date.now());
 
+  /** 配对码连续失败锁定：防局域网暴力枚举（6 位码 + 5 分钟 TTL 可被穷举） */
+  const MAX_CLAIM_FAILURES = 5;
+  const CLAIM_LOCKOUT_MS = 60_000;
+  let claimFailures: { count: number; lockedUntil: number } = {
+    count: 0,
+    lockedUntil: 0,
+  };
+
   return {
     startPairing(ttlMs = 5 * 60_000): PairingChallenge {
+      claimFailures = { count: 0, lockedUntil: 0 };
       const state = loadState(statePath);
       const createdAt = new Date(now()).toISOString();
       const challenge: PairingChallenge = {
@@ -184,6 +194,7 @@ export function createLanAuthStore(options?: {
       label?: string;
       sessionTtlMs?: number;
     }): { token: string; session: LanSession } | null {
+      if (now() < claimFailures.lockedUntil) return null;
       const state = loadState(statePath);
       const pairing = state.pairing;
       if (!pairing) return null;
@@ -192,8 +203,16 @@ export function createLanAuthStore(options?: {
         saveState(statePath, state);
         return null;
       }
-      if (String(input.code).trim() !== pairing.code) return null;
+      if (String(input.code).trim() !== pairing.code) {
+        claimFailures.count += 1;
+        if (claimFailures.count >= MAX_CLAIM_FAILURES) {
+          claimFailures.lockedUntil = now() + CLAIM_LOCKOUT_MS;
+          claimFailures.count = 0;
+        }
+        return null;
+      }
 
+      claimFailures = { count: 0, lockedUntil: 0 };
       const token = generateSessionToken();
       const createdAt = new Date(now()).toISOString();
       const session: LanSession = {
@@ -251,7 +270,42 @@ export type LanAccessResult =
   | { ok: false; status: number; code: string; error: string };
 
 /**
+ * CSRF Origin 校验：所有访问模式共用（local_only 也生效）。
+ * 写方法携带 Origin 时必须与 Host 一致，或是本机回环地址；
+ * 无 Origin 的请求（同源 fetch / curl / 表单直发）不因此拒绝。
+ */
+function assertSameOrigin(request: Request): LanAccessResult | null {
+  const method = request.method.toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") {
+    return null;
+  }
+  const origin = request.headers.get("origin");
+  if (!origin) return null;
+  try {
+    const originHost = new URL(origin).host;
+    const host = request.headers.get("host");
+    if ((host && originHost === host) || isLoopbackHost(originHost)) {
+      return null;
+    }
+    return {
+      ok: false,
+      status: 403,
+      code: "CSRF_ORIGIN_MISMATCH",
+      error: "Origin 不被允许",
+    };
+  } catch {
+    return {
+      ok: false,
+      status: 403,
+      code: "CSRF_ORIGIN_INVALID",
+      error: "Origin 无效",
+    };
+  }
+}
+
+/**
  * API 网关统一访问检查。
+ * - 所有模式：写方法先过 Origin 校验（CSRF）
  * - local_only：放行
  * - trusted_lan + UNSAFE：放行（预览）
  * - trusted_lan：要求有效 session
@@ -269,6 +323,10 @@ export function requireLanAccess(
   },
 ): LanAccessResult {
   const env = options?.env ?? process.env;
+
+  const csrfDenied = assertSameOrigin(request);
+  if (csrfDenied) return csrfDenied;
+
   const mode = resolveAccessMode(env);
 
   if (mode === "local_only") {
@@ -288,32 +346,6 @@ export function requireLanAccess(
     isLoopbackAddress(clientAddress)
   ) {
     return { ok: true, mode, session: null };
-  }
-
-  const host = request.headers.get("host");
-  const method = request.method.toUpperCase();
-  if (method !== "GET" && method !== "HEAD" && method !== "OPTIONS") {
-    const origin = request.headers.get("origin");
-    if (origin) {
-      try {
-        const originHost = new URL(origin).host;
-        if (host && originHost !== host && !isLoopbackHost(originHost)) {
-          return {
-            ok: false,
-            status: 403,
-            code: "CSRF_ORIGIN_MISMATCH",
-            error: "Origin 不被允许",
-          };
-        }
-      } catch {
-        return {
-          ok: false,
-          status: 403,
-          code: "CSRF_ORIGIN_INVALID",
-          error: "Origin 无效",
-        };
-      }
-    }
   }
 
   const store = options?.store ?? createLanAuthStore();

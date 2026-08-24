@@ -43,3 +43,37 @@ jobs:
       - run: npm run test:smoke-runtime
       - name: Verify tsx resolves without devDependencies
         run: node -e "require.resolve('tsx/esm/api')"
+
+  # 过渡期门禁：critical 直接失败；high 及以下仅告警。
+  # Embedding 运行时迁移（Milestone #1）完成后改为 high 也失败。
+  audit:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    outputs:
+      critical: ${{ steps.audit.outputs.critical }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci || npm install --no-audit --no-fund
+      - name: npm audit（critical 阻断，high 以下告警）
+        id: audit
+        continue-on-error: false
+        run: |
+          set +e
+          AUDIT_JSON=$(npm audit --json 2>/dev/null)
+          CRITICAL=$(echo "$AUDIT_JSON" | node -e "
+            let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{
+              try{const j=JSON.parse(d);
+              console.log(j.metadata?.vulnerabilities?.critical ?? 0);}
+              catch{console.log(0);}
+            });")
+          echo "critical=$CRITICAL" >> "$GITHUB_OUTPUT"
+          echo "=== npm audit 摘要 ==="
+          npm audit || true
+          if [ "$CRITICAL" != "0" ]; then
+            echo "::error::存在 $CRITICAL 个 critical 漏洞，阻断合并"
+            exit 1
+          fi
