@@ -44,7 +44,7 @@ export const knowledgeExportManifestSchema = z.object({
         type: z.string(),
         name: z.string(),
         /** 已剥离 secret 的配置 */
-        config: z.record(z.unknown()).optional(),
+        config: z.record(z.string(), z.unknown()).optional(),
       }),
     )
     .optional(),
