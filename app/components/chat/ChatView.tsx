@@ -11,6 +11,9 @@ interface ChatViewProps {
   copiedMessageId: string | null;
   conversationId?: string | null;
   onCopy: (message: Message, format: "txt" | "md") => void;
+  onSettleToWiki?: (message: Message) => void;
+  lastSettledMessageId?: string | null;
+  onUndoSettle?: () => void;
 }
 
 export function ChatView({
@@ -20,6 +23,9 @@ export function ChatView({
   copiedMessageId,
   conversationId = null,
   onCopy,
+  onSettleToWiki,
+  lastSettledMessageId = null,
+  onUndoSettle,
 }: ChatViewProps) {
   const ref = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
@@ -60,6 +66,9 @@ export function ChatView({
               copiedMessageId={copiedMessageId}
               conversationId={conversationId}
               onCopy={onCopy}
+              onSettleToWiki={onSettleToWiki}
+              canUndoSettle={lastSettledMessageId === message.id}
+              onUndoSettle={onUndoSettle}
             />
           );
         })}

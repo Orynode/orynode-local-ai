@@ -59,16 +59,57 @@ test("buildKnowledgePrompt: 区分资料库与会话附件并使用 [S#]", () =>
   assert.match(both, /LOCAL_KNOWLEDGE/);
   assert.match(both, /资料库 · 手册\.md/);
   assert.match(both, /本对话附件 · 笔记\.txt/);
+  assert.match(both, /不是资料库的全部/);
 });
 
-test("citationsFromHits: 分配 S1..Sn、chunkId 与 locator", () => {
-  const citations = citationsFromHits([libraryHit, attachmentHit]);
-  assert.equal(citations[0]?.id, "S1");
+test("citationsFromHits: Wiki 综述 citation.chunkId 指向源切片", () => {
+  const citations = citationsFromHits([
+    hit({
+      id: "mirror:library:d1::synthesis",
+      documentId: "d1",
+      documentName: "手册.md",
+      content: "综述正文 [S1]",
+      sourceChunkId: "c1",
+    }),
+    hit({
+      id: "c1",
+      documentId: "d1",
+      documentName: "手册.md",
+      content: "首节摘录",
+    }),
+  ]);
   assert.equal(citations[0]?.chunkId, "c1");
+  assert.equal(citations[1]?.chunkId, "c1");
+  assert.equal(citations[0]?.id, "S1");
   assert.equal(citations[1]?.id, "S2");
-  assert.equal(citations[1]?.chunkId, "c2");
-  assert.equal(citations[0]?.locator.kind, "markdown");
-  assert.equal(citations[0]?.revisionId, "legacy");
+});
+
+test("buildContextPackage: 综述与首节 id 不同时两段都装箱", () => {
+  const pkg = buildContextPackage({
+    hits: [
+      hit({
+        id: "mirror:library:d1::synthesis",
+        documentId: "d1",
+        documentName: "手册.md",
+        content: "这是综述，概括手册在讲安装。",
+        sourceChunkId: "c1",
+        position: 0,
+      }),
+      hit({
+        id: "c1",
+        documentId: "d1",
+        documentName: "手册.md",
+        content: "## 安装\n\nbrew 安装步骤。",
+        position: 1,
+      }),
+    ],
+    expandNeighbors: false,
+  });
+  assert.equal(pkg.citations.length, 2);
+  assert.match(pkg.text, /这是综述/);
+  assert.match(pkg.text, /brew 安装步骤/);
+  assert.equal(pkg.citations[0]?.chunkId, "c1");
+  assert.equal(pkg.citations[1]?.chunkId, "c1");
 });
 
 test("locatorFromHit: PDF 用 page，Markdown 用 markdown", () => {
@@ -161,6 +202,23 @@ test("locatorFromHit: PDF 用 page，Markdown 用 markdown", () => {
       : undefined,
     2,
   );
+});
+
+test("buildContextPackage: 装箱正文带标题栈，citation 摘录仍用原切片", () => {
+  const pkg = buildContextPackage({
+    hits: [
+      hit({
+        id: "h1",
+        documentId: "d1",
+        documentName: "手册.md",
+        content: "先连接电源再打开开关。",
+        headingPath: ["部署", "安装"],
+      }),
+    ],
+  });
+  assert.match(pkg.text, /部署 \/ 安装/);
+  assert.match(pkg.text, /先连接电源再打开开关/);
+  assert.equal(pkg.citations[0]?.excerpt.includes("部署 / 安装"), false);
 });
 
 test("buildContextPackage: text 与 tokenEstimate", () => {

@@ -8,7 +8,7 @@ const MAX_SEARCH_TERMS = 40;
 
 const SINGLE_CHAR_ALLOW = new Set(["c", "r"]);
 
-const ZH_LOW_INFO_BIGRAMS = new Set([
+export const ZH_LOW_INFO_BIGRAMS = new Set([
   "什么",
   "如何",
   "怎么",
@@ -128,9 +128,15 @@ export function extractSearchTerms(query, maxTerms = MAX_SEARCH_TERMS) {
   }
 
   // 非汉字字母数字词——诚实抽取，不做功能词硬删
+  // 中英粘连（zend内存池）拆出拉丁段，Han 段交给汉字步骤
   for (const match of normalized.matchAll(/[\p{L}\p{N}_]+/gu)) {
     const token = match[0];
-    if (/[\p{Script=Han}]/u.test(token)) continue;
+    if (/[\p{Script=Han}]/u.test(token)) {
+      for (const latin of token.matchAll(/[a-z][a-z0-9_]{2,}/gi)) {
+        push(latin[0], 40 + Math.min(latin[0].length, 10), "latin");
+      }
+      continue;
+    }
     if (token.length === 1) {
       push(token, 50, "latin");
       continue;
@@ -192,11 +198,57 @@ export function extractSearchTerms(query, maxTerms = MAX_SEARCH_TERMS) {
 }
 
 /**
- * 原始 content 保留在业务表；search_text = 规范化正文 + 中文 bigram + 技术词扩展
- * @param {string} content
+ * 原始 content 保留在业务表；search_text = 处境化正文 + 中文 bigram + 技术词扩展
+ * @param {unknown} raw
+ * @returns {string[]}
  */
-export function buildSearchText(content) {
-  const normalized = String(content ?? "")
+export function normalizeHeadingPath(raw) {
+  if (Array.isArray(raw)) {
+    return raw.map((part) => String(part).trim()).filter(Boolean);
+  }
+  if (typeof raw !== "string") return [];
+  const text = raw.trim();
+  if (!text) return [];
+  if (text.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) {
+        return parsed.map((part) => String(part).trim()).filter(Boolean);
+      }
+    } catch {
+      // 当普通标题
+    }
+  }
+  return text
+    .split(/\s*\/\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+/**
+ * @param {string} content
+ * @param {unknown} [headingPath]
+ */
+export function contextualizeChunkText(content, headingPath) {
+  const body = String(content ?? "").trim();
+  const parts = normalizeHeadingPath(headingPath);
+  const heading = parts.join(" / ");
+  if (!heading) return body;
+  if (!body) return heading;
+  const last = parts.at(-1);
+  if (last && (body.startsWith(`# ${last}`) || body.startsWith(heading))) {
+    return body;
+  }
+  return `${heading}\n\n${body}`;
+}
+
+/**
+ * 原始 content 保留在业务表；search_text = 处境化正文 + 中文 bigram + 技术词扩展
+ * @param {string} content
+ * @param {unknown} [headingPath]
+ */
+export function buildSearchText(content, headingPath) {
+  const normalized = contextualizeChunkText(content, headingPath)
     .toLocaleLowerCase()
     .replace(/\s+/g, " ")
     .trim();
@@ -222,6 +274,18 @@ export function buildSearchText(content) {
  */
 export function escapeFtsToken(term) {
   return `"${String(term).replace(/"/g, '""')}"`;
+}
+
+/**
+ * FTS5 unicode61 不把 3 字以上汉字当成一个 token；索引靠 bigram 扩展。
+ * MATCH 只用拉丁词与 2 字汉字，3+ 字短语留给 JS coverage / phrase 阶梯。
+ * @param {string[]} terms
+ * @returns {string[]}
+ */
+export function termsForFts5Match(terms) {
+  return (Array.isArray(terms) ? terms : [])
+    .map((term) => String(term ?? "").trim())
+    .filter((term) => term && !/^[\p{Script=Han}]{3,}$/u.test(term));
 }
 
 /**

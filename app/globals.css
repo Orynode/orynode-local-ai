@@ -16,6 +16,8 @@
   --z-popover: 40;
   --z-drawer: 80;
   --z-modal: 100;
+  /* 从 modal 内触发的下拉（处理中心）需盖过 modal，仍低于确认框 */
+  --z-flyout: 110;
   --z-alert: 120;
   --z-toast: 140;
 }
@@ -699,7 +701,9 @@ button {
 
 .knowledge-jobs-panel {
   margin: 0;
-  padding: 14px 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--panel);
@@ -707,14 +711,12 @@ button {
 }
 
 .knowledge-jobs-popover {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: var(--z-popover);
+  position: fixed;
+  z-index: var(--z-flyout);
   width: min(420px, calc(100vw - 48px));
   max-height: min(70vh, 520px);
-  overflow: auto;
-  /* 不透明底，避免透出下方检索栏 */
+  overflow: hidden;
+  /* 不透明底，避免透出下方检索栏 / 大纲 modal */
   background: #fcfbf7;
 }
 
@@ -723,7 +725,8 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 10px;
+  flex: 0 0 auto;
+  padding: 14px 16px 8px;
 }
 
 .knowledge-jobs-panel-head strong {
@@ -731,43 +734,71 @@ button {
 }
 
 .knowledge-jobs-error,
-.knowledge-jobs-empty,
-.knowledge-jobs-idle,
-.knowledge-jobs-busy {
-  margin: 0 0 10px;
+.knowledge-jobs-empty {
+  margin: 0;
   font-size: 13px;
   color: var(--muted);
 }
 
-.knowledge-jobs-idle {
-  color: var(--text);
-}
-
-.knowledge-jobs-busy {
-  color: var(--text);
-}
-
 .knowledge-jobs-error {
+  margin: 0 16px 8px;
   color: #a33;
 }
 
-.knowledge-jobs-section {
-  margin-top: 4px;
+.knowledge-jobs-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  margin: 0 16px 10px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #f3f0e6;
 }
 
-.knowledge-jobs-section + .knowledge-jobs-section {
-  margin-top: 14px;
-}
-
-.knowledge-jobs-section-title {
-  margin: 0 0 8px;
+.knowledge-jobs-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
   font-size: 12px;
   font-weight: 600;
-  color: var(--muted);
   letter-spacing: 0.02em;
+  line-height: 1.2;
 }
 
-.knowledge-jobs-section-recent .knowledge-jobs-item {
+.knowledge-jobs-tab:hover {
+  color: var(--text);
+  background: rgb(255 255 255 / 45%);
+}
+
+.knowledge-jobs-tab-active {
+  background: var(--panel);
+  color: var(--text);
+}
+
+.knowledge-jobs-tab-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  opacity: 0.72;
+}
+
+.knowledge-jobs-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 16px 14px;
+}
+
+.knowledge-jobs-body-recent .knowledge-jobs-item {
   opacity: 0.88;
 }
 
@@ -778,8 +809,6 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 240px;
-  overflow: auto;
 }
 
 .knowledge-jobs-item {
@@ -1309,6 +1338,266 @@ button {
 .knowledge-import-dialog h2 {
   margin: 0 0 8px;
   font-size: 1.05rem;
+}
+
+.knowledge-wiki-dialog {
+  width: min(100%, 640px);
+  max-height: min(86vh, 760px);
+  overflow: auto;
+  padding: 20px 22px;
+  border-radius: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+
+.knowledge-wiki-dialog h2 {
+  margin: 0 0 8px;
+  font-size: 1.05rem;
+}
+
+.knowledge-wiki-back {
+  margin: 0 0 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.knowledge-wiki-back:hover:not(:disabled) {
+  color: inherit;
+}
+
+.knowledge-wiki-back:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.knowledge-wiki-note {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.knowledge-wiki-sections {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.knowledge-wiki-section {
+  display: grid;
+  gap: 6px;
+  width: 100%;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.knowledge-wiki-section strong {
+  font-size: 13px;
+}
+
+.knowledge-wiki-section p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.knowledge-wiki-section small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.knowledge-wiki-markdown {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.knowledge-wiki-synthesis {
+  margin: 0 0 16px;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.knowledge-wiki-synthesis h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.knowledge-wiki-stale {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--warn, #c48a2a) 12%, var(--bg));
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.knowledge-wiki-edit {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 14px;
+}
+
+.knowledge-wiki-edit label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.knowledge-wiki-edit textarea {
+  width: 100%;
+  min-height: 160px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.knowledge-wiki-links {
+  margin: 0 0 14px;
+}
+
+.knowledge-wiki-links h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.knowledge-wiki-links ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.knowledge-wiki-link {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.knowledge-wiki-link small {
+  color: var(--muted);
+}
+
+.knowledge-wiki-concepts {
+  margin: 0 0 16px;
+}
+
+.knowledge-wiki-concepts h2 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.knowledge-wiki-concepts ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.knowledge-wiki-concept {
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.knowledge-wiki-concepts li {
+  display: inline-flex;
+}
+
+.knowledge-wiki-history {
+  margin: 0 0 14px;
+}
+
+.knowledge-wiki-history h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.knowledge-wiki-history ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.knowledge-wiki-history li {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.knowledge-wiki-history strong {
+  display: block;
+  font-size: 12px;
+}
+
+.knowledge-wiki-history small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.knowledge-wiki-sources {
+  margin: 0 0 16px;
+}
+
+.knowledge-wiki-sources h3 {
+  margin: 0 0 8px;
+  font-size: 0.92rem;
 }
 
 .knowledge-import-file {
@@ -2738,6 +3027,24 @@ button {
   margin-bottom: 8px;
 }
 
+.composer-grounding {
+  display: inline-flex;
+  max-width: min(320px, 100%);
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border: 1px dashed #b8c6bb;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--green);
+  cursor: pointer;
+  font: inherit;
+}
+
+.composer-grounding:hover {
+  background: #edf3ed;
+}
+
 .composer-attachment {
   display: inline-flex;
   max-width: min(280px, 100%);
@@ -2772,7 +3079,22 @@ button {
   white-space: nowrap;
 }
 
-.composer-attachment > button {
+.composer-attachment-wiki {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.composer-attachment-wiki:hover {
+  text-decoration: underline;
+}
+
+.composer-attachment-remove {
   display: grid;
   flex: 0 0 auto;
   width: 22px;
@@ -2786,11 +3108,11 @@ button {
   cursor: pointer;
 }
 
-.composer-attachment > button:hover {
+.composer-attachment-remove:hover {
   background: rgb(36 74 54 / 9%);
 }
 
-.composer-attachment > button .icon {
+.composer-attachment-remove .icon {
   width: 13px;
   height: 13px;
 }
@@ -2890,6 +3212,48 @@ button {
   border-radius: 18px;
   background: var(--panel);
   box-shadow: 0 14px 40px rgb(37 42 34 / 10%);
+}
+
+.composer-offline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.composer-offline button {
+  border: 0;
+  background: transparent;
+  color: var(--signal);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+}
+
+.knowledge-wiki-review {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid rgb(194 137 48 / 35%);
+  border-radius: 10px;
+}
+
+.knowledge-wiki-review h3,
+.knowledge-wiki-review ul {
+  margin: 0;
+}
+
+.knowledge-wiki-review ul {
+  display: grid;
+  gap: 8px;
+  padding: 8px 0 0 18px;
+}
+
+.knowledge-wiki-review li span {
+  display: block;
+  color: var(--text-secondary);
 }
 
 .composer textarea {
@@ -3820,15 +4184,40 @@ button {
   font-size: 0.9rem;
 }
 
+.mobile-menu-toggle {
+  display: none;
+}
+
 @media (max-width: 760px) {
   .app-shell {
     display: block;
   }
 
   .sidebar {
+    position: relative;
     height: 66px;
     min-height: auto;
     padding: 14px 18px;
+  }
+
+  .mobile-menu-toggle {
+    position: absolute;
+    z-index: 2;
+    top: 17px;
+    right: 18px;
+    display: grid;
+    width: 32px;
+    height: 32px;
+    place-items: center;
+    border: 0;
+    border-radius: 9px;
+    background: rgb(255 255 255 / 8%);
+    color: inherit;
+  }
+
+  .mobile-menu-toggle .icon {
+    width: 19px;
+    height: 19px;
   }
 
   .brand {
@@ -3840,6 +4229,27 @@ button {
   .history-section,
   .sidebar-account {
     display: none;
+  }
+
+  .sidebar.mobile-open {
+    position: fixed;
+    z-index: 80;
+    inset: 0 auto 0 0;
+    width: min(88vw, 340px);
+    height: 100dvh;
+    padding: 18px;
+    box-shadow: 24px 0 60px rgb(0 0 0 / 42%);
+  }
+
+  .sidebar.mobile-open .new-chat,
+  .sidebar.mobile-open nav,
+  .sidebar.mobile-open .history-section,
+  .sidebar.mobile-open .sidebar-account {
+    display: flex;
+  }
+
+  .sidebar.mobile-open .new-chat {
+    margin-top: 28px;
   }
 
   .workspace {

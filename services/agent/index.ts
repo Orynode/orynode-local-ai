@@ -1,7 +1,8 @@
 /**
  * Agent 工具面（Phase 4）
  *
- * 规划器 / Runtime 尚未落地；知识工具先稳定契约，供后续 Agent 循环调用。
+ * Wiki 读工具已由 Next `/api/knowledge/wiki/pages` 调用（openPage / links / follow）。
+ * 规划器仍未落地；Chat 检索走 Engine.retrieve，不经工具循环。
  */
 
 export {
@@ -10,6 +11,10 @@ export {
   knowledgeCitation,
   knowledgeListSources,
   knowledgeRetrieve,
+  knowledgeOpenPage,
+  knowledgeListBacklinks,
+  knowledgeFollowLink,
+  knowledgeSearchPages,
   createAgentSpace,
   ensureAgentSpace,
   getAgentSpace,

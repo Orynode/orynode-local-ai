@@ -213,7 +213,12 @@ async function probeResourcePressure(): Promise<"normal" | "high"> {
     }
     // 兼容旧字段
     if (body.chatActive) return "high";
-    if (body.heavyKind === "embedding" || body.heavyKind === "ocr") {
+    if (
+      body.heavyKind === "embedding" ||
+      body.heavyKind === "ocr" ||
+      body.heavyKind === "office_convert" ||
+      body.heavyKind === "wiki_compile"
+    ) {
       return "high";
     }
     if (
@@ -264,7 +269,7 @@ export async function probeCapabilitySnapshot(): Promise<CapabilitySnapshot> {
     rerankerType: "lexical",
     ftsTokenizer,
     memoryTier: memoryTierFromHost(embedding, hostCeiling),
-    externalConnectors: { web: true, github: true },
+    externalConnectors: { web: false, github: false },
     resourcePressure,
     embeddingArtifactId: EMBEDDING_CONFIG.artifactId,
     embeddingArtifactRole: role,

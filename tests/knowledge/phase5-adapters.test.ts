@@ -49,9 +49,9 @@ test("resolveIndexBackend: 用户环境变量不能开启预留后端", async ()
   }
 });
 
-test("ConnectorRegistry: 内置类型清单 + 可注册插件", () => {
-  assert.ok(listConnectorTypes().includes("web"));
-  assert.ok(listConnectorTypes().includes("github"));
+test("ConnectorRegistry: 网页 / GitHub 不再作为内置入库类型", () => {
+  assert.equal(listConnectorTypes().includes("web"), false);
+  assert.equal(listConnectorTypes().includes("github"), false);
   registerConnector("markdown_folder_test", () => ({
     type: "file",
     async test() {

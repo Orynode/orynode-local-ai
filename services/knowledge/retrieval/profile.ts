@@ -199,6 +199,14 @@ export function normalizeDiagnosticStrategies(
       out.add("rrf");
     } else if (raw === "lexical_rerank") {
       out.add("lexical_rerank");
+    } else if (raw === "wiki_document_mirror") {
+      out.add("wiki_document_mirror");
+    } else if (raw === "wiki_rrf") {
+      out.add("wiki_rrf");
+    } else if (raw === "wiki_graph") {
+      out.add("wiki_graph");
+    } else if (raw === "wiki_follow_link") {
+      out.add("wiki_follow_link");
     } else if (
       raw === "keyword" ||
       raw === "fts5" ||

@@ -394,6 +394,47 @@ test("FTS v2: languagePrimary=en 偏向英文列", () => {
   });
 });
 
+test("FTS: 正文无词、标题栈有词时仍能召回", () => {
+  withTempDb((dbPath) => {
+    const database = new DatabaseSync(dbPath);
+    migrateDatabase(database);
+    const now = new Date().toISOString();
+    database.prepare(
+      `INSERT INTO knowledge_documents
+        (id, name, stored_path, size, page_count, chunk_count, created_at, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run("d-head", "指南.md", "/tmp/guide.md", 10, 1, 1, now, "ready");
+    database.prepare(
+      `INSERT INTO knowledge_chunks
+        (id, document_id, page_number, position, content, heading_path)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run(
+      "c-head",
+      "d-head",
+      1,
+      0,
+      "先连接电源再打开开关。",
+      JSON.stringify(["部署", "安装"]),
+    );
+    upsertFtsChunks(database, "library", "d-head", [
+      {
+        id: "c-head",
+        content: "先连接电源再打开开关。",
+        headingPath: ["部署", "安装"],
+      },
+    ]);
+
+    const hit = searchKeywordIndex(database, {
+      query: "安装",
+      library: { mode: "all" },
+      topK: 3,
+    }).chunks.find((chunk) => chunk.id === "c-head");
+    assert.ok(hit);
+    assert.equal(hit.content, "先连接电源再打开开关。");
+    database.close();
+  });
+});
+
 test("FTS: TXT 行号与 Markdown 标题路径随命中返回", () => {
   withTempDb((dbPath) => {
     const database = new DatabaseSync(dbPath);

@@ -184,6 +184,7 @@ test("convert_office: 写入 IndexedText 后再 chunk", async () => {
       },
       setDocumentStatus: async () => undefined,
       commitChunks: async () => undefined,
+      compileMirror: async () => null,
     });
     assert.ok((result.chunkCount ?? 0) >= 1);
     assert.match(written, /Sheet:/);

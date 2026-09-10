@@ -5,7 +5,7 @@
  */
 
 import { z } from "zod";
-import { EMBEDDING_CONFIG, type KnowledgeTier } from "../../../config/defaults";
+import { EMBEDDING_CONFIG, SEARCH_CONFIG, type KnowledgeTier } from "../../../config/defaults";
 import { KnowledgeError } from "../core/errors";
 import type {
   ContextPackage,
@@ -43,6 +43,7 @@ import { planQuery } from "../query/planner";
 import { applyRewriteExcludes } from "../query/query-rewrite";
 import type { StructuredQueryRewrite } from "../query/query-rewrite";
 import { resolveQueryRewrite } from "../query/resolve-rewrite";
+import { contextualizeChunkText } from "../retrieval/search-text";
 import {
   applyLexicalBoost,
   LexicalReranker,
@@ -51,9 +52,26 @@ import { weightedRrfFusion } from "../retrieval/keyword";
 import { buildHighlightTerms } from "../retrieval/highlight-terms";
 import type { RetrievalHit, Retriever } from "../types";
 import {
+  isCasualChatQuery,
+  isSingleSourceScope,
   resolveKnowledgeAccessMode,
   scopeSummary,
 } from "./access-mode";
+import { loadWikiHitsForQuery, loadWikiHitsForScope, mergeWikiRagHits } from "../wiki/load-wiki-hits";
+import {
+  fetchWikiLinks,
+  fetchWikiPageById,
+  searchWikiPages,
+} from "../wiki/persist";
+import { canReadWikiPage } from "../wiki/wiki-access";
+import {
+  followWikiPages,
+  type WikiLink,
+  type WikiLinkRel,
+  WIKI_FOLLOW_MAX_HOPS,
+  WIKI_FOLLOW_MAX_PAGES,
+} from "../wiki/wiki-graph";
+import type { CompiledWikiPage } from "../wiki/compile-document-mirror";
 
 const retrievalRequestSchema = z.object({
   query: z.string(),
@@ -64,6 +82,7 @@ const retrievalRequestSchema = z.object({
   knowledgeScope: z.unknown().optional(),
   knowledgeDocumentId: z.string().optional(),
   knowledgeTier: z.enum(["auto", "lite", "balanced", "quality"]).optional(),
+  surface: z.enum(["search", "chat"]).optional(),
 });
 
 export type CreateKnowledgeEngineOptions = {
@@ -76,6 +95,11 @@ export type CreateKnowledgeEngineOptions = {
    * 缺省走 resolveQueryRewrite（术语库 → LLM → 晋升）。
    */
   resolveRewrite?: (query: string) => Promise<StructuredQueryRewrite>;
+  /** 测试注入 Wiki 命中；缺省走 persist */
+  wikiHits?: {
+    loadForScope?: typeof loadWikiHitsForScope;
+    loadForQuery?: typeof loadWikiHitsForQuery;
+  };
 };
 
 export function createKnowledgeEngine(
@@ -87,6 +111,7 @@ export function createKnowledgeEngine(
     options.knowledgeTier,
     options.capabilities,
     options.resolveRewrite,
+    options.wikiHits,
   );
 }
 
@@ -98,6 +123,7 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
     private readonly resolveRewriteFn?: (
       query: string,
     ) => Promise<StructuredQueryRewrite>,
+    private readonly wikiHits?: CreateKnowledgeEngineOptions["wikiHits"],
   ) {}
 
   async ingest(command: IngestCommand): Promise<IngestReceipt> {
@@ -154,14 +180,21 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
     }
   }
 
-  async search(request: SearchRequest): Promise<SearchResponse> {
-    const retrieved = await this.retrieve({
-      query: request.query,
-      scope: request.scope,
-      topK: request.topK,
-      conversationId: request.conversationId,
-      knowledgeTier: (request as { knowledgeTier?: KnowledgeTier }).knowledgeTier,
-    });
+  async search(
+    request: SearchRequest,
+    access?: KnowledgeAccessContext,
+  ): Promise<SearchResponse> {
+    const retrieved = await this.retrieve(
+      {
+        query: request.query,
+        scope: request.scope,
+        topK: request.topK,
+        conversationId: request.conversationId,
+        knowledgeTier: (request as { knowledgeTier?: KnowledgeTier }).knowledgeTier,
+        surface: "search",
+      },
+      access,
+    );
     return {
       query: retrieved.query,
       hits: retrieved.hits,
@@ -176,7 +209,10 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
     };
   }
 
-  async retrieve(request: RetrievalRequest & { knowledgeTier?: KnowledgeTier }): Promise<RetrievalResponse> {
+  async retrieve(
+    request: RetrievalRequest & { knowledgeTier?: KnowledgeTier },
+    access?: KnowledgeAccessContext,
+  ): Promise<RetrievalResponse> {
     const started = Date.now();
     const parsed = retrievalRequestSchema.safeParse(request);
     if (!parsed.success) {
@@ -200,6 +236,7 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
     const profile = resolveRetrievalProfile(requestedTier, caps, {
       topK: request.topK,
     });
+    const recallK = Math.max(profile.topK, SEARCH_CONFIG.recallK);
 
     const rewrite = this.resolveRewriteFn
       ? await this.resolveRewriteFn(request.query)
@@ -231,11 +268,64 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
       multilingualDegraded.push("LANGUAGE_UNDETERMINED");
     }
 
-    try {
+    const chatAccessMode = resolveKnowledgeAccessMode(scope, request.query);
+    const searchSurface = parsed.data.surface === "search";
+    const accessMode = searchSurface ? "library_search" : chatAccessMode;
+    const wikiAccess: KnowledgeAccessContext = access ?? {
+      actor: { kind: "local-user", id: "local" },
+      conversationId: request.conversationId,
+    };
+    const loadWikiForScope =
+      this.wikiHits?.loadForScope ?? loadWikiHitsForScope;
+    const loadWikiForQuery =
+      this.wikiHits?.loadForQuery ?? loadWikiHitsForQuery;
+    let wikiUsed = false;
+    let wikiFollowed = false;
+    let skipRetriever = false;
+
+    if (!searchSurface && chatAccessMode === "document_read") {
+      if (isSingleSourceScope(scope)) {
+        const wikiHits = await loadWikiForScope(scope, profile.topK);
+        if (wikiHits && wikiHits.length > 0) {
+          hits = wikiHits;
+          wikiUsed = true;
+          skipRetriever = true;
+          strategies.add("wiki_document_mirror");
+          pipeline.push("wiki_document_mirror");
+        }
+      } else {
+        const wikiQuery = await loadWikiForQuery(
+          request.query,
+          scope,
+          profile.topK,
+          wikiAccess,
+          {
+            synonyms: rewrite.synonyms,
+            searchTerms: plan.searchTerms,
+            mode: "overview",
+          },
+        );
+        if (wikiQuery && wikiQuery.hits.length > 0) {
+          hits = wikiQuery.hits;
+          wikiUsed = true;
+          skipRetriever = true;
+          strategies.add("wiki_document_mirror");
+          pipeline.push("wiki_document_mirror");
+          if (wikiQuery.followed) {
+            wikiFollowed = true;
+            strategies.add("wiki_follow_link");
+            pipeline.push("wiki_follow_link");
+          }
+        }
+      }
+    }
+
+    if (!skipRetriever) {
+      try {
       pipeline.push(profile.embedding ? "keyword_vector_recall" : "keyword_recall");
       if (queries.length <= 1) {
         const result = await this.retriever.retrieve(request.query, scope, {
-          topK: profile.topK,
+          topK: recallK,
           preferKeyword: !profile.embedding,
           keywordQuery: {
             text: request.query,
@@ -259,7 +349,7 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
         const byId = new Map<string, RetrievalHit>();
         for (const variant of plan.variants) {
           const result = await this.retriever.retrieve(variant.text, scope, {
-            topK: Math.max(profile.topK * 2, 16),
+            topK: Math.max(recallK, profile.topK * 2, 16),
             // 只有用户原始查询可以做向量召回。normalized/term_expansion
             // 都是词项派生查询；将它们再次向量化会放大宽泛语义候选。
             preferKeyword:
@@ -305,7 +395,7 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
           const fused = weightedRrfFusion(rankedLists, weights);
           hits = [...fused.entries()]
             .sort((a, b) => b[1] - a[1])
-            .slice(0, profile.topK)
+            .slice(0, recallK)
             .map(([id, score]) => {
               const hit = byId.get(id)!;
               return { ...hit, score };
@@ -315,7 +405,7 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
         } else if (rankedLists.length === 1) {
           // 只有一条召回列表时没有“融合”可做；保留该索引的真实分数与顺序。
           hits = rankedLists[0]!
-            .slice(0, profile.topK)
+            .slice(0, recallK)
             .map((id) => byId.get(id))
             .filter((hit): hit is RetrievalHit => Boolean(hit));
         }
@@ -336,17 +426,55 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
 
       pipeline.push("dedupe");
 
-      if (profile.rerank && hits.length > 1) {
+      if (searchSurface || chatAccessMode === "multi_document") {
+        const wikiQuery = await loadWikiForQuery(
+          request.query,
+          scope,
+          recallK,
+          wikiAccess,
+          { synonyms: rewrite.synonyms, searchTerms: plan.searchTerms },
+        );
+        if (wikiQuery && wikiQuery.hits.length > 0) {
+          hits = mergeWikiRagHits(wikiQuery.hits, hits, recallK);
+          wikiUsed = true;
+          strategies.add("wiki_rrf");
+          pipeline.push("wiki_rrf");
+          if (wikiQuery.followed) {
+            wikiFollowed = true;
+            strategies.add("wiki_graph");
+            strategies.add("wiki_follow_link");
+            pipeline.push("wiki_graph");
+            pipeline.push("wiki_follow_link");
+          }
+        }
+      }
+
+      const shouldRerank =
+        hits.length > 1 && (hits.length > profile.topK || profile.rerank);
+      if (shouldRerank) {
         pipeline.push("rerank");
         const reranker = new LexicalReranker();
         const ranked = reranker.rerankWithMeta(
           request.query,
-          hits.map((h) => ({ id: h.id, text: h.content })),
+          hits.map((h) => ({
+            id: h.id,
+            text: contextualizeChunkText(h.content, h.headingPath),
+          })),
           profile.topK,
         );
         // ADR-ML-005：全零 lexical 不得覆盖融合顺序与分数
         if (ranked.preservedOrder) {
+          hits = hits.slice(0, profile.topK);
           strategies.add("lexical_rerank_preserved");
+        } else if (hits.length > profile.topK) {
+          const map = new Map(hits.map((h) => [h.id, h]));
+          hits = ranked.items
+            .map((row) => {
+              const hit = map.get(row.id);
+              return hit ?? null;
+            })
+            .filter((h): h is RetrievalHit => Boolean(h));
+          strategies.add("lexical_rerank");
         } else {
           const boosted = applyLexicalBoost(
             hits.map((h) => ({ id: h.id, score: h.score })),
@@ -361,11 +489,14 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
             .filter((h): h is RetrievalHit => Boolean(h));
           strategies.add("lexical_rerank");
         }
+      } else if (hits.length > profile.topK) {
+        hits = hits.slice(0, profile.topK);
       }
 
       pipeline.push("threshold", "context_packing");
     } catch (error) {
       throw new KnowledgeError("retrieval_failed", "检索失败", { cause: error });
+    }
     }
 
     const highlightTerms = buildHighlightTerms({
@@ -403,6 +534,14 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
         (strategy) => strategy !== "rrf" && strategy !== "lexical_rerank",
       );
     }
+    if (skipRetriever) {
+      diagnosticStrategies = diagnosticStrategies.filter(
+        (strategy) =>
+          strategy === "wiki_document_mirror" ||
+          strategy === "wiki_graph" ||
+          strategy === "wiki_follow_link",
+      );
+    }
 
     return {
       query: request.query,
@@ -426,7 +565,7 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
           weight: v.weight,
         })),
         fusion:
-          hits.length === 0
+          hits.length === 0 || skipRetriever
             ? "none"
             : multiQueryFusionApplied
               ? "weighted_rrf"
@@ -436,7 +575,9 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
         embeddingModel: EMBEDDING_CONFIG.artifactId,
         embeddingArtifactRole: EMBEDDING_CONFIG.role,
         rewriteSource: rewrite.source,
-        accessMode: resolveKnowledgeAccessMode(scope, request.query),
+        accessMode,
+        wikiUsed,
+        wikiFollowed,
         fallbackUsed,
         // retrieve 只负责召回；Chat 装箱成功后由 buildChatKnowledgeContext 改写为 context_packed
         contextProvided: false,
@@ -465,6 +606,126 @@ class DefaultKnowledgeEngine implements KnowledgeEngine {
   ): Promise<ResolvedCitation> {
     return resolveCitationInScope(params, access, defaultScopePolicy);
   }
+
+  async searchPages(
+    params: { query: string; scope: unknown; topK?: number },
+    access: KnowledgeAccessContext,
+  ): Promise<CompiledWikiPage[]> {
+    const scope = await defaultScopePolicy.resolve(params.scope, access);
+    if (scope.mode === "none") return [];
+    const topK = Math.min(Math.max(params.topK ?? 8, 1), 16);
+    const namespaces: Array<"library" | "conversation"> = [];
+    if (scope.library) namespaces.push("library");
+    if (scope.conversationFiles) namespaces.push("conversation");
+    const pages: CompiledWikiPage[] = [];
+    const seen = new Set<string>();
+    for (const namespace of namespaces) {
+      const found = await searchWikiPages({
+        query: params.query,
+        namespace,
+        limit: topK,
+        conversationId:
+          namespace === "conversation"
+            ? scope.conversationFiles?.conversationId
+            : undefined,
+      });
+      for (const page of found) {
+        if (seen.has(page.id)) continue;
+        if (!(await canReadWikiPage(page, scope, defaultScopePolicy, access))) {
+          continue;
+        }
+        seen.add(page.id);
+        pages.push(page);
+        if (pages.length >= topK) return pages;
+      }
+    }
+    return pages;
+  }
+
+  async openPage(
+    params: { pageId: string; scope: unknown },
+    access: KnowledgeAccessContext,
+  ) {
+    const page = await requireReadableWikiPage(params.pageId, params.scope, access);
+    const links = await fetchWikiLinks(page.id);
+    return {
+      page,
+      outgoing: links.outgoing,
+      incoming: links.incoming,
+    };
+  }
+
+  async listBacklinks(
+    params: { pageId: string; scope: unknown },
+    access: KnowledgeAccessContext,
+  ): Promise<CompiledWikiPage[]> {
+    const page = await requireReadableWikiPage(params.pageId, params.scope, access);
+    const links = await fetchWikiLinks(page.id);
+    return loadReadableNeighbors(
+      links.incoming.map((link) => link.fromId),
+      params.scope,
+      access,
+    );
+  }
+
+  async followLink(
+    params: { pageId: string; scope: unknown; rel?: WikiLinkRel },
+    access: KnowledgeAccessContext,
+  ): Promise<CompiledWikiPage[]> {
+    const page = await requireReadableWikiPage(params.pageId, params.scope, access);
+    const listed = await fetchWikiLinks(page.id);
+    const bag: WikiLink[] = [...listed.outgoing, ...listed.incoming];
+    const ids = followWikiPages(page.id, bag, {
+      rel: params.rel,
+      maxHops: WIKI_FOLLOW_MAX_HOPS,
+      maxPages: WIKI_FOLLOW_MAX_PAGES,
+    });
+    return loadReadableNeighbors(ids, params.scope, access);
+  }
+}
+
+async function requireReadableWikiPage(
+  pageId: string,
+  requestedScope: unknown,
+  access: KnowledgeAccessContext,
+): Promise<CompiledWikiPage> {
+  const id = String(pageId || "").trim();
+  if (!id) {
+    throw new KnowledgeError("page_not_found", "PAGE_NOT_FOUND");
+  }
+  const scope = await defaultScopePolicy.resolve(requestedScope, access);
+  if (scope.mode === "none") {
+    throw new KnowledgeError("page_not_in_scope", "PAGE_NOT_IN_SCOPE");
+  }
+  const page = await fetchWikiPageById(id);
+  if (!page) {
+    throw new KnowledgeError("page_not_found", "PAGE_NOT_FOUND");
+  }
+  if (!(await canReadWikiPage(page, scope, defaultScopePolicy, access))) {
+    throw new KnowledgeError("page_not_in_scope", "PAGE_NOT_IN_SCOPE");
+  }
+  return page;
+}
+
+async function loadReadableNeighbors(
+  ids: string[],
+  requestedScope: unknown,
+  access: KnowledgeAccessContext,
+): Promise<CompiledWikiPage[]> {
+  const scope = await defaultScopePolicy.resolve(requestedScope, access);
+  const pages: CompiledWikiPage[] = [];
+  const seen = new Set<string>();
+  for (const pageId of ids) {
+    if (seen.has(pageId)) continue;
+    const page = await fetchWikiPageById(pageId);
+    if (!page) continue;
+    if (!(await canReadWikiPage(page, scope, defaultScopePolicy, access))) {
+      continue;
+    }
+    seen.add(page.id);
+    pages.push(page);
+  }
+  return pages;
 }
 
 /** Chat 检索失败时注入的诚实降级文案（行为保持与历史一致） */
@@ -514,15 +775,24 @@ export async function buildChatKnowledgeContext(
   if (!query) {
     return { knowledgePrompt: "", retrieval: null, context: null };
   }
+  if (isCasualChatQuery(query)) {
+    return { knowledgePrompt: "", retrieval: null, context: null };
+  }
 
   try {
-    const retrieval = await engine.retrieve({
-      query,
-      scope,
-      topK: input.topK,
-      conversationId: input.conversationId,
-      knowledgeTier: input.knowledgeTier,
-    } as RetrievalRequest & { knowledgeTier?: KnowledgeTier });
+    const retrieval = await engine.retrieve(
+      {
+        query,
+        scope,
+        topK: input.topK,
+        conversationId: input.conversationId,
+        knowledgeTier: input.knowledgeTier,
+      } as RetrievalRequest & { knowledgeTier?: KnowledgeTier },
+      {
+        actor: { kind: "local-user", id: "local" },
+        conversationId: input.conversationId,
+      },
+    );
     if (retrieval.hits.length === 0) {
       retrieval.diagnostics.contextProvided = true;
       retrieval.diagnostics.outcome = "empty_hits";

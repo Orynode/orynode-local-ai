@@ -2,7 +2,10 @@
  * 多语言关键词字段构造（与 services/knowledge/indexing/multilingual-normalizer.ts 对齐）
  */
 
-import { extractTechnicalTerms } from "./search-text.mjs";
+import {
+  contextualizeChunkText,
+  extractTechnicalTerms,
+} from "./search-text.mjs";
 
 export const NORMALIZER_VERSION = "ml-normalizer-v2";
 export const ANALYZER_VERSION = "fts5-multilingual-v1";
@@ -181,8 +184,8 @@ function buildExactText(normalized, original) {
 /**
  * @param {string} content
  */
-export function buildMultilingualFields(content) {
-  const original = String(content ?? "");
+export function buildMultilingualFields(content, headingPath) {
+  const original = contextualizeChunkText(content, headingPath);
   const normalized = nfcLower(original);
   if (!normalized) {
     return {

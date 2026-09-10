@@ -87,8 +87,12 @@ export interface RetrievalDiagnostics {
     | "document_qa"
     | "document_read"
     | "multi_document";
-  fallbackUsed?: "scoped_read" | null;
-  contextProvided?: boolean;
+    fallbackUsed?: "scoped_read" | null;
+    /** 本轮 document_read 使用了编译 Wiki 页 */
+    wikiUsed?: boolean;
+    /** 本轮 Wiki 图跟随了邻居页 */
+    wikiFollowed?: boolean;
+    contextProvided?: boolean;
   outcome?:
     | "search_only"
     | "no_scope"
@@ -110,6 +114,8 @@ export interface RetrievalRequest {
   conversationId?: string | null;
   /** 检索档位；缺省读 runtime-settings */
   knowledgeTier?: "auto" | "lite" | "balanced" | "quality";
+  /** search 工作台：不走 Chat 的 document_read 短路 */
+  surface?: "search" | "chat";
 }
 
 export interface RetrievalResponse {

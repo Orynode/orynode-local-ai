@@ -1,7 +1,13 @@
 /**
- * 拉丁功能词：仅作查询形态信号与 general 阶梯匹配词清洗（query 层）。
- * 不进入 retrieval/extractSearchTerms——词抽取保持诚实，与中文「低信息只降权不硬删」对称。
+ * MATCH 内容词清洗（query 层）：拉丁功能词 + 中文低信息/助词。
+ * 不进入 retrieval/extractSearchTerms——词抽取保持诚实，低信息只降权不硬删。
  */
+
+import {
+  hanTermHasFunctionChar,
+  isZhLowInfoMatchTerm,
+  peelZhFunctionAffixes,
+} from "./zh-function-words";
 
 const LATIN_STOPWORDS = new Set([
   "what",
@@ -92,9 +98,13 @@ export function containsLatinStopword(query: string): boolean {
   return words.some((word) => isLatinStopword(word));
 }
 
+function isHanOnlyTerm(term: string): boolean {
+  return /^[\p{Script=Han}]+$/u.test(term);
+}
+
 /**
- * general 阶梯用内容词：去掉功能词，避免 AND / minimum_match 被稀释。
- * 若过滤后为空（整句皆功能词），回退原词表防空转。
+ * general 阶梯用内容词：去掉拉丁功能词与中文问句/低信息形态，避免 AND 被「什么」稀释或误命中。
+ * 整句皆拉丁功能词时回退原词表防空转；中文问句剥空则保持空，禁止退回 OR。
  * 短实体 / 引号 / technical 等 strict 类不得调用此清洗。
  */
 export function contentTermsForLexicalMatch(terms: string[]): string[] {
@@ -102,6 +112,22 @@ export function contentTermsForLexicalMatch(terms: string[]): string[] {
     ? terms.map((t) => String(t ?? "").trim()).filter(Boolean)
     : [];
   if (raw.length === 0) return [];
-  const content = raw.filter((t) => !isLatinStopword(t));
-  return content.length > 0 ? content : raw;
+  const content: string[] = [];
+  const seen = new Set<string>();
+  for (const term of raw) {
+    if (isLatinStopword(term) || isZhLowInfoMatchTerm(term)) continue;
+    if (isHanOnlyTerm(term) && term.length === 2 && hanTermHasFunctionChar(term)) {
+      continue;
+    }
+    const next = isHanOnlyTerm(term) ? peelZhFunctionAffixes(term) : term;
+    if (!next || next.length < 2) continue;
+    if (isLatinStopword(next) || isZhLowInfoMatchTerm(next)) continue;
+    const key = next.toLocaleLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    content.push(next);
+  }
+  if (content.length > 0) return content;
+  if (raw.every((term) => isLatinStopword(term))) return raw;
+  return [];
 }

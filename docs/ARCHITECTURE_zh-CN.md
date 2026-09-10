@@ -4,7 +4,7 @@
 
 本文档详细描述 Orynode Local AI 的**服务架构、数据流、模块分层、扩展接口**以及**知识库/RAG 系统**设计。
 
-本文以**当前实现**为准，面向想要理解内部实现、复用模块或扩展功能的开发者。发布变更见根目录 [CHANGELOG](../CHANGELOG.md)。
+本文以**当前实现**为准（含 Wiki 编译层），面向想要理解内部实现、复用模块或扩展功能的开发者。已发布变更见根目录 [CHANGELOG 1.4.0](../CHANGELOG.md#140--2026-09-10)。
 
 ---
 
@@ -21,6 +21,7 @@
   - [向量化 (Embedder)](#3-向量化-embedder)
   - [向量存储 (VectorStore)](#4-向量存储-vectorstore)
   - [检索 (Retriever)](#5-检索-retriever)
+  - [LLM Wiki 编译层](#llm-wiki-编译层)
 - [扩展接口](#扩展接口)
   - [替换 Embedder](#替换-embedder)
   - [替换 VectorStore](#替换-vectorstore)
@@ -100,7 +101,7 @@ API 网关层 (Gateway)
   services/
   ├── chat/        - Prompt、SSE、上下文预算
   ├── platform/   - Host / ModelRuntime / LAN 认证 / composition root
-  ├── knowledge/   - 解析、分块、向量化、检索（唯一智能）
+  ├── knowledge/   - 解析、分块、向量化、检索、Wiki 编译（唯一智能）
   ├── agent/       - 受控知识工具与 Agent space
   └── settings/    - 运行时设置读写
      ↓
@@ -127,10 +128,10 @@ API 网关层 (Gateway)
 ### 对话流程
 
 ```
-Composer 草稿 draftAttachments（仅下一轮；发送后清空）
-  → page.tsx 交给 useChat.sendMessage(attachments)
-      → 写入本条 message.attachments（落库，气泡展示）
-      → scopeFromAttachments → RetrievalScope（sources: library + conversationFiles）
+Composer：工作区 grounding（默认整库）+ 可选收窄钉住 + 会话附件
+  → page.tsx 交给 useChat.sendMessage(displayAttachments, retrievalScope)
+      → 气泡只记录会话文件 / 收窄篇（不写 library_all）
+      → resolveRetrievalScope（workspace → library:all）
       → POST /api/chat
           → normalizeRetrievalScope（兼容旧 knowledgeScope）
           → KnowledgeEngine.retrieve（rewrite → plan → HybridRetriever）
@@ -139,9 +140,9 @@ Composer 草稿 draftAttachments（仅下一轮；发送后清空）
 
 **产品语义**：
 
-- **资料库**是持久仓库；`useKnowledge` 只做 CRUD / 上传 / 索引
+- **资料库**是持久仓库，也是对话工作区记忆；有可检索文档时默认 `library:all`（Wiki + 原文），不必每条消息再选
 - **会话附件**绑 `conversationId`（`.orynode/attachments/`）；删会话级联清理
-- `draftAttachments` 只表示**本条消息**检索范围；发送后清空选中；打开历史会加载该会话的文件列表供再选，但不会自动恢复上次草稿
+- 选单篇是 **NotebookLM 式收窄**；「仅用模型，不查资料库」关掉工作区记忆；寒暄不检索
 - 对话拖拽 /「附到本对话」→ 会话附件；需要持久保存时由用户显式「导入资料库」（不提供会话附件一键提升）
 
 ### 摄取流程（共享管线，双目标）
@@ -213,6 +214,7 @@ orynode-local-ai/
 │   │   ├── useConversationFiles.ts   #   会话附件 CRUD
 │   │   ├── useKnowledge.ts           #   资料仓库 CRUD（无跨轮选中）
 │   │   ├── useKnowledgeJobs.ts       #   处理队列轮询
+│   │   ├── useWikiPageSession.ts     #   资料库 / 会话 / settle 共用 Wiki 页
 │   │   └── useSettings.ts            #   设置读写
 │   └── api/                          # API 路由 (Next.js 约定)
 │       ├── chat/route.ts             #   POST 对话代理
@@ -224,9 +226,11 @@ orynode-local-ai/
 │       │       └── files/            #   会话附件
 │       ├── knowledge/
 │       │   ├── route.ts              #   文档列表/上传
+│       │   ├── wiki/                 #   Wiki 列表 / 页 / settle；decisions 等为实验接口
 │       │   ├── reindex/route.ts      #   批量重建向量
 │       │   └── [id]/
 │       │       ├── route.ts          #   文档删除
+│       │       ├── wiki/route.ts     #   单篇大纲 / 综述
 │       │       └── reindex/route.ts  #   单文档重建向量
 │       └── settings/route.ts         #   设置读写
 │
@@ -237,7 +241,8 @@ orynode-local-ai/
 │   ├── agent/                        #   受控知识工具与 Agent space
 │   ├── knowledge/                    #   知识库（唯一智能层）
 │   │   ├── application/engine.ts     #     KnowledgeEngine 入口
-│   │   ├── query/                    #     planner / rewrite / lexical-coverage / latin-stopwords
+│   │   ├── query/                    #     planner / rewrite / lexical-coverage / latin-stopwords / zh-function-words
+│   │   ├── wiki/                     #     大纲 / 综述 / 概念 / settle
 │   │   ├── retrieval/                #     profile / highlight / keyword 抽取（诚实词表）
 │   │   ├── retriever.ts              #     HybridRetriever（执行，不发明阶梯）
 │   │   └── index.ts                  #     对外导出（仅接线符号）
@@ -295,9 +300,11 @@ orynode-local-ai/
 > **1.2.1**：在 1.2.0 上修 Chat 引用可用性（单文件确定性读取、阶段化资源调度、TXT 行号预览、PDF 目录降权等）。见 [CHANGELOG 1.2.1](../CHANGELOG.md#121--2026-08-09)。
 >
 > **1.3.0**：本地 Office 摄取（`convert_office` + 本机 `@firecrawl/anydoc`）；IndexedText 预览与引用行号同源；不索引嵌入图。见 [CHANGELOG 1.3.0](../CHANGELOG.md#130--2026-08-09)。
+>
+> **1.4.0**：LLM Wiki 编译层（大纲 / 综述 / 概念页 / 写入百科）；对话默认整库；网页 / GitHub 入库停用。见 [CHANGELOG 1.4.0](../CHANGELOG.md#140--2026-09-10)。
 
 ```
-上传 PDF / TXT / MD / Office（或 Web/GitHub Connector）
+上传 PDF / TXT / MD / Office（仅本地文件；网页 / GitHub Connector 已停用）
   → ingest（detect → PDF 可选 OCR process_revision / Office 走 convert_office → parse → chunk）
   → ProcessingBuild activate → data-service 存原件 / chunks / blocks
   →（可选）embed Job → vector_entries
@@ -311,13 +318,62 @@ orynode-local-ai/
 |------|------|
 | `application/engine` | KnowledgeEngine：search / retrieve / buildContext |
 | `query/resolve-rewrite` | 术语库 → LLM 晋升；唯一开放世界同义入口 |
-| `query/planner` + `lexical-coverage` + `latin-stopwords` | 只消费注入 rewrite；形态分类 + 阶梯；功能词不作抽取硬删 |
+| `query/planner` + `lexical-coverage` + `latin-stopwords` + `zh-function-words` | 只消费注入 rewrite；形态分类 + 阶梯；功能词不作抽取硬删；MATCH 内容词中英共用 |
 | `ingest` / `processing/*` | 摄取；PDF OCR 路由；ProcessingBuild |
 | `formats` / `parser` / `chunker` | 种类识别、解析、标题感知分块 |
 | `retrieval/*` + `retriever` | 诚实词抽取 / FTS·hybrid 执行 / tier / highlight / diagnostics |
 | `embedder` + `vector-store` | 可选语义；BLOB / vector_entries |
-| `connectors/*` | Web / GitHub + SSRF |
+| `connectors/*` | 网页 / GitHub 实现保留供单测；**不再注册**为入库类型 |
 | `context/*` | token packing、citation 定位 |
+| `wiki/*` | 叠在 Engine 上的编译层：大纲 / 综述 / 概念页 / 图；不另起检索栈 |
+
+### LLM Wiki 编译层
+
+Wiki **不是**第二套 RAG。L0 仍是 chunk + FTS/向量；Wiki 是编译层，给浏览和「概述」类问题一个可回源的目录页。
+
+```
+原件入库 → L0 chunks / FTS / 向量
+         → W0 document_mirror（切片提交后抽 headingPath，零 LLM）
+用户点击 → W1 文档/概念知识编译（compile_wiki，本机 Gemma）
+         → article + aliases + 带 chunk 回源的 claims + semantic relations
+         → W1 概念身份归并（compile_wiki_concepts，复用术语库别名，不跑 Gemma）
+W2       → wiki_links / 语义边 / 反链 / 2 跳硬顶
+W3       → 人手改页，或 Chat「写入百科」（单页 notes + 可撤销）
+```
+
+| 层 | Job / 入口 | 是否占用 Gemma | 说明 |
+|----|------------|----------------|------|
+| W0 | 摄取热路径 `compileAndUpsertDocumentMirror`；`compile_wiki_outlines` 可全库重抽 | 否 | 每篇最多 48 节；全库扫描硬顶 500 篇 |
+| W1 知识编译 | 资料卡 / 会话附件「用模型生成综述」→ `compile_wiki` | 是 | **P0**：token 装箱 + JSON schema + 一次 repair + 分批 map-reduce；claim 绑定 `[S#]` 和源 chunk；失败不写半成品并记 `wiki_compile_runs`；用户点击才跑，Chat 占用时 defer |
+| W1 概念页 | 「整理概念」→ `compile_wiki_concepts` | 身份归并不跑；知识编译可另点「写这一页」 | 标题路径候选 + 统一术语库身份；同义名并入 canonical 概念页 |
+| W2 | `wiki_links`；Engine `openPage` / `followLink` | 否 | 2 跳硬顶；无 Scope 不可乱读 pageId |
+| W3 | PATCH 正文；Chat「写入百科」 | 否 | 人手改正文才 `userEdited`；写入对准的一篇百科页、可撤销。合并/拆分/pending 为编译内部，不作为日常 UI |
+
+Chat 分流（意图优先于范围；工作区默认 `library:all`）：
+
+- `document_read`（总结/概括/讲了什么）：单源则整页 mirror 短路；整库/多源则 Wiki **编译页预算**（综述 + 对话笔记，按 query 过滤，禁止倾倒 TOC）
+- `document_qa`（翻译/全文/分析/对比）：只走 L0 chunk，即使是 `library:all`
+- `multi_document`（其余事实问答 + 多源/整库）：Wiki 与 L0 **加权 RRF**（编译层权重更低）；按节打分
+- **工作区记忆**：有可检索文档时 Chat 默认 `library:all`，不把「全部资料」写成附件；选单篇是收窄；「仅用模型」可关；寒暄不检索
+
+约束：
+
+- 智能在 `services/knowledge/wiki/`；`wiki-store.mjs` 只 CRUD / FTS / 边
+- Gemma 不进摄取；`wiki_compile` 是 `heavyKind`，编译期间**不**伪装 `chatActive`（否则检索会误判对话繁忙）
+- Chat 占用 Gemma 时仍可跑 `compile_wiki_outlines` / `compile_wiki_concepts`（不占模型）；`compile_wiki` / embed / OCR 继续 defer
+- 模型必须输出 `articleMarkdown + aliases + claims + relations`；文章和每条 claim 都必须有合法 `[S#]`，claim 持久化源 chunk；非法 JSON 最多 repair 一次，仍失败则保留上一成功版本并写 `wiki_compile_runs(status=failed)`；人手改优先（`user_edited`，默认不覆盖）
+- 长文档按 token 分批（默认单批 2200、最多 3 批），`[S#]` 用原章节全局编号；reduce 去重主张后再发布
+- 语义关系仅在目标能按概念标题/别名解析时写边；无法解析的 target 记为 `wiki_pending_edges`，禁止凭空造页
+- 源更新：有综述的 mirror 标 `stale`；引用该文档的概念页（节或 claim 证据）也标过时；**检索丢掉过时综述 hit**，节与对话笔记仍可回源
+- 删除资料会从概念节摘掉该文档、撤回失去证据的 claim，并删除对应 `document_mirror`（`POST /wiki/source-changed` `action=deleted`）
+- Chat「写入百科」只写入**一篇**对准页（命中概念则写概念页，否则第一篇 mirror）；多源引用记 `pending_merge` 候选但不进日常 UI；可用 `action=undo` + `settleId` 回滚
+- 术语 canonical ID / 别名 / 消歧与人工 `wiki_decisions`（merge/split）在 `compile_wiki_concepts` 时应用；用户编辑页默认不被自动编译覆盖
+- 发布前绑定 chunk 证据并做 claim diff：消失的主张标 `withdrawn`，同证据不同文标 `conflicted`；检索只消费 `active` claim
+- Next Wiki 读 API 走 `knowledgeOpenPage` / `followLink`，会话页不可靠 `library:all` 乱读
+- 写入走 `HTTP_TIMEOUT.knowledge`（15s），失败抛错；列表读取仍 2.5s
+- 综述 / 笔记 / 知识 IR 变更写入 `wiki_page_revisions`（每页最多 20 条），可回滚；大纲热路径不写历史
+- `/wiki/*` 默认不强制 HMAC（vinext Worker 读不到 token 文件；data-service 已 bind `127.0.0.1`）。`ORYNODE_DATA_INTERNAL_AUTH=1` 时：无头回环仍放行，带了 `x-orynode-ts` / `x-orynode-mac` 则校验。失败 run 可在页上查看 `wiki_compile_runs`
+- 旧 `kind=synthesis` 对话沉淀页保持不可读
 
 ### Embedder（诚实模型）
 
@@ -339,14 +395,19 @@ type RetrievalScope =
 
 type MessageAttachment =
   | { kind: "library"; id: string; name: string }
-  | { kind: "library_all"; id: "all"; name: string }
+  | { kind: "library_all"; id: "all"; name: string } // 仅兼容旧气泡
   | { kind: "conversation_file"; id: string; name: string };
+
+type LibraryGrounding =
+  | { mode: "workspace" }          // 默认：有资料则 library:all
+  | { mode: "off" }
+  | { mode: "pins"; documentIds: string[] };
 ```
 
 兼容：旧 `knowledgeScope` / `knowledgeDocumentId`；旧附件 kind `document`→`library`、`all`→`library_all`。
 
-前端来源：`scopeFromAttachments(draftAttachments)` → `retrievalScope`；附件快照写入 `message.attachments`。  
-未附带资料时为 `none`；**不会**从历史气泡自动拼出下轮 scope。
+前端：`resolveRetrievalScope({ grounding, attachments, hasSearchableLibrary })` → `retrievalScope`。  
+气泡只写入会话文件和收窄钉住的篇；**新消息不写 `library_all`**。旧气泡仍可显示。
 
 ### 向量存储
 
@@ -429,7 +490,7 @@ const chunks = chunker.chunkDocument(doc.pages);
 - 生产编排入口：`KnowledgeEngine.retrieve`（先 `resolveQueryRewrite` 再 `planQuery`）
 - `HybridRetriever.retrieve(query, scope, options)` 执行 FTS / hybrid；**词法阶梯由 `keywordQuery.lexicalLadder` 下发**，Index 不得自行改写策略
 - `keywordQuery.terms`（`plan.searchTerms`）是诚实抽取结果，供诊断 / 高亮；**MATCH 以 ladder 各步的 `terms` 为准**
-- scope：`RetrievalScope`；前端由本轮附件推导，**不会**从历史消息自动拼 scope
+- scope：`RetrievalScope`；前端由工作区 grounding + 本轮会话附件推导，**不会**从历史消息自动拼 scope
 - keyword 始终可用；向量索引就绪且档位允许时走 hybrid + RRF；**phrase 已命中可短路向量**
 - 降级原因只来自 capabilities/profile；phrase 短路不得误标 `VECTOR_INDEX_NOT_READY`
 - `error` 文档会清空向量 BLOB，仅 keyword；`awaiting_chunks` 不参与检索
@@ -469,7 +530,7 @@ const response = await engine.retrieve({
 
 分层约束（贡献者勿再偏移）：
 
-- **拉丁功能词**（`query/latin-stopwords.ts`）只做两件事：① 形态信号（自然语言不进 `short_entity` / strict `technical`）；② `general` 阶梯的 MATCH 词清洗。  
+- **拉丁功能词**（`query/latin-stopwords.ts`）与 **中文低信息/助词**（`query/zh-function-words.ts`）只做两件事：① 形态信号（自然语言不进 `short_entity` / strict `technical`）；② `general` 阶梯的 MATCH 词清洗（`contentTermsForLexicalMatch`）。Wiki 检索必须消费这层内容词，禁止再写问句尾巴正则。  
 - **禁止**在 `extractSearchTerms` / `scripts/data-service/search-text.mjs` 硬删功能词（与中文「低信息 bigram 只降权不硬删」对称）。  
 - data-service 的 `lexical-coverage.mjs` 是 **parity 镜像**，不是第二套 SoT；改策略先改 TS，再对齐 JS。  
 - 文件名判定（`detectQueryKind`）须像路径/单名（无空白或含 `/` `\\`）；**禁止**因句尾 `.js` 把 `how to install node.js` 整句当成 filename。  
@@ -639,7 +700,7 @@ Chat 检索始终 `skipLlm`：对话路径不触发可学习 Rewrite；术语晋
 |------|------|
 | **零额外开销（默认）** | 无 Embedder，仅 FTS5；`knowledgeTier=auto` 常落在 lite |
 | **按需加载** | `ORYNODE_SEMANTIC_SEARCH=1` 后才加载 e5；status **不**预热加载 |
-| **Chat / 重活 defer embed** | `chatActive` → `EMBED_DEFERRED_CHAT`；`heavyKind=ocr|embedding` → `EMBED_DEFERRED_HEAVY` |
+| **Chat / 重活 defer embed** | `chatActive` → `EMBED_DEFERRED_CHAT`；`heavyKind=ocr|embedding|wiki_compile` → `EMBED_DEFERRED_HEAVY`。`compile_wiki` **不**再 `markChatActive` |
 | **e5 生命周期** | 空闲卸载（默认 90s，`ORYNODE_EMBED_IDLE_UNLOAD_MS`）；low 主机对话开始卸载 |
 | **blob_scan 收窄** | hybrid 的 FTS 命中足够强（≥ `vectorScanNarrowMinDocs` 文档；minimum_match 弱命中翻倍）才只扫命中文档；弱命中保持原 scope，成本由 `maxVectorScanChunks` 软顶兜底 |
 | **OCR 超页截断** | 前 `maxOcrPagesPerDocument` 页入检索（`OCR_PAGE_TRUNCATED`），不再整本失败 |
@@ -695,15 +756,23 @@ Chat 检索始终 `skipLlm`：对话路径不触发可学习 Rewrite；术语晋
 | GET | `/knowledge/vector-coverage` | 向量索引覆盖率（indexed/total） |
 | GET/POST | `/terminology/entries` | 可学习术语表 list / upsert |
 | POST | `/terminology/entries/hit` | 术语命中计数 |
-| GET | `/jobs`（及摘要） | 处理队列（embed / process_revision 等） |
+| GET/PUT/PATCH/DELETE | `/wiki/pages`（及 `/:id`、`/:id/links`） | Wiki 页 CRUD / 边；编译策略不在此进程 |
+| PUT | `/wiki/pages/publish` | 页 + 边同一事务（W1 知识编译） |
+| POST | `/wiki/builds` | 记录一次大纲/概念编译批次 |
+| POST | `/wiki/compile-runs` | 知识编译诊断（成功/失败、repair、token、耗时） |
+| GET/POST | `/wiki/decisions` | 人工合并/拆分等决策；概念编译读取后确定性应用 |
+| PUT | `/wiki/pending-edges` | 无法解析的语义边；禁止凭空造页 |
+| POST | `/wiki/candidates` | 沉淀待合并/待审核候选 |
+| POST | `/wiki/source-changed` | 源更新：概念页标 stale；源删除：撤回证据、摘概念节、删 mirror |
+| GET | `/jobs`（及摘要） | 处理队列（embed / process_revision / compile_wiki* 等） |
 | DELETE | `/knowledge/:id` | 删除文档 |
 
 检索业务**不在**数据服务；应用层另有 `POST /api/conversations/:id/files/:fileId/reindex` 重建会话附件向量。
 
 ### 数据库 Schema（对话消息附件）
 
-消息表含可选 `attachments TEXT`（JSON），记录**该条用户消息**附带的资料展示信息（`kind: library | library_all | conversation_file`；兼容旧 `document | all`）。  
-仅用于历史气泡与落库真相；下一轮检索仍以当次请求的 `retrievalScope` + `conversationId` 为准。
+消息表含可选 `attachments TEXT`（JSON），记录本条用户消息的**可见附件**（会话文件、收窄钉住的资料库篇；兼容旧 `library_all` / `document` / `all`）。
+仅用于历史气泡与落库真相；下一轮检索以当次 `retrievalScope`（工作区 grounding）+ `conversationId` 为准。
 
 ### 数据库 Schema（双命名空间）
 
@@ -761,6 +830,32 @@ CREATE TABLE conversation_file_chunks (
   embedding BLOB,
   FOREIGN KEY (file_id)
     REFERENCES conversation_files(id) ON DELETE CASCADE
+);
+
+-- Wiki 编译层（018–026）。W0 走 PUT /wiki/pages；W1 走 PUT /wiki/pages/publish。
+-- UNIQUE(namespace, source_document_id) 由 026 加上。
+CREATE TABLE wiki_pages (
+  id TEXT PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
+  namespace TEXT NOT NULL,
+  source_document_id TEXT NOT NULL,
+  markdown TEXT NOT NULL,
+  sections_json TEXT NOT NULL,
+  synthesis_markdown TEXT,
+  knowledge_json TEXT,
+  notes_markdown TEXT
+);
+CREATE TABLE wiki_links (
+  from_id TEXT NOT NULL,
+  to_id TEXT NOT NULL,
+  rel TEXT NOT NULL
+);
+CREATE TABLE wiki_page_revisions (
+  id TEXT PRIMARY KEY,
+  page_id TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL
 );
 
 -- 1.2.0：可学习术语库（LLM Rewrite 晋升缓存）

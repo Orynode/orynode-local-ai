@@ -20,6 +20,7 @@ interface DocumentCardProps {
   onReprocess?: (id: string) => void;
   onRename: (id: string, name: string) => void | Promise<unknown>;
   onPreview?: (document: KnowledgeDocument) => void;
+  onOpenWiki?: (document: KnowledgeDocument) => void;
 }
 
 export function DocumentCard({
@@ -34,6 +35,7 @@ export function DocumentCard({
   onReprocess,
   onRename,
   onPreview,
+  onOpenWiki,
 }: DocumentCardProps) {
   const status = document.status ?? "ready";
   const viewStatus =
@@ -80,7 +82,7 @@ export function DocumentCard({
         aria-disabled={!viewStatus.canAttach}
         title={
           viewStatus.canAttach
-            ? "选择用于对话"
+            ? "选择后去对话，只问这些篇"
             : "该文件尚无可检索文本，只能预览原件"
         }
         onClick={() => {
@@ -169,6 +171,17 @@ export function DocumentCard({
             onClick={() => onPreview(document)}
           >
             预览
+          </button>
+        ) : null}
+        {onOpenWiki && viewStatus.content === "usable" ? (
+          <button
+            className="knowledge-reindex"
+            type="button"
+            aria-label={`大纲：${document.name}`}
+            title="打开大纲页；综述需要你点一下才会用模型生成"
+            onClick={() => onOpenWiki(document)}
+          >
+            大纲
           </button>
         ) : null}
         {canReindex && (

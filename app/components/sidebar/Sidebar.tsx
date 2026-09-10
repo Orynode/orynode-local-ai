@@ -34,6 +34,7 @@ export function Sidebar({
   onOpenSettings,
 }: SidebarProps) {
   const [accountOpen, setAccountOpen] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
   const accountRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -55,7 +56,16 @@ export function Sidebar({
   }, [accountOpen]);
 
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
+      <button
+        type="button"
+        className="mobile-menu-toggle"
+        aria-label={mobileOpen ? "关闭导航" : "打开导航"}
+        aria-expanded={mobileOpen}
+        onClick={() => setMobileOpen((open) => !open)}
+      >
+        <Icon name={mobileOpen ? "close" : "menu"} />
+      </button>
       <div className="brand">
         <div className="brand-mark">
           <BrandLogo />
@@ -66,20 +76,32 @@ export function Sidebar({
         </div>
       </div>
 
-      <button className="new-chat" onClick={onNewChat}>
+      <button
+        className="new-chat"
+        onClick={() => {
+          setMobileOpen(false);
+          onNewChat();
+        }}
+      >
         <Icon name="plus" /> 新对话
       </button>
 
       <nav aria-label="主要功能">
         <button
           className={`nav-item ${viewMode === "assistant" ? "active" : ""}`}
-          onClick={() => onViewModeChange("assistant")}
+          onClick={() => {
+            setMobileOpen(false);
+            onViewModeChange("assistant");
+          }}
         >
           <Icon name="assistant" /> 助手
         </button>
         <button
           className={`nav-item ${viewMode === "knowledge" ? "active" : ""}`}
-          onClick={() => onViewModeChange("knowledge")}
+          onClick={() => {
+            setMobileOpen(false);
+            onViewModeChange("knowledge");
+          }}
         >
           <Icon name="database" /> 本地资料库
           <small>{knowledgeCount} 篇</small>
@@ -90,7 +112,10 @@ export function Sidebar({
         history={history}
         currentId={currentConversationId}
         available={historyAvailable}
-        onOpen={onOpenConversation}
+        onOpen={(id) => {
+          setMobileOpen(false);
+          onOpenConversation(id);
+        }}
         onDelete={onDeleteConversation}
       />
 

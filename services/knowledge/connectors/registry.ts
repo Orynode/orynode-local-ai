@@ -11,8 +11,16 @@ type Factory = () => SourceConnector;
 
 const registry = new Map<string, Factory>();
 
-/** 内置类型清单（不加载实现，可在 Workers 列举） */
-export const BUILTIN_CONNECTOR_TYPES = ["web", "github"] as const;
+/** 资料库入库仅接受本地文件；网页 / GitHub 同步已停用。 */
+export const EXTERNAL_CONNECTOR_DISABLED_MESSAGE =
+  "资料库仅支持导入本地文件";
+
+export function isRetiredExternalConnector(type: unknown): boolean {
+  return type === "web" || type === "github";
+}
+
+/** 内置类型清单（不加载实现，可在 Workers 列举）。网页 / GitHub 已停用。 */
+export const BUILTIN_CONNECTOR_TYPES = [] as const;
 
 export function registerConnector(type: string, factory: Factory): void {
   registry.set(type, factory);

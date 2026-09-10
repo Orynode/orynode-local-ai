@@ -26,7 +26,10 @@ export async function loadTsModule(projectRoot, relativePath) {
   const abs = resolve(projectRoot, relativePath);
   let pending = cache.get(abs);
   if (!pending) {
-    pending = import(pathToFileURL(abs).href);
+    pending = import(pathToFileURL(abs).href).catch((error) => {
+      cache.delete(abs);
+      throw error;
+    });
     cache.set(abs, pending);
   }
   return pending;

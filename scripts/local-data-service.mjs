@@ -17,6 +17,11 @@ import { createRequire } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { migrateDatabase } from "./data-service/migrations/index.mjs";
+import {
+  internalAuthDisabled,
+  loadOrCreateInternalToken,
+  wikiInternalAuthOk,
+} from "./data-service/internal-auth.mjs";
 import { loadTsModule, loadTsModules } from "./data-service/load-ts-module.mjs";
 import {
   OFFICE_EXTS,
@@ -32,8 +37,10 @@ import {
   searchKeywordIndex,
   upsertFtsChunks,
 } from "./data-service/fts-index.mjs";
-import { createJobRepository } from "./data-service/jobs.mjs";
+import { contextualizeChunkText } from "./data-service/search-text.mjs";
+import { createJobRepository, isWikiJobType, resolveWikiJobEnqueue } from "./data-service/jobs.mjs";
 import { createTerminologyRepository } from "./data-service/terminology.mjs";
+import { createWikiStore } from "./data-service/wiki-store.mjs";
 import {
   CHUNK_STRATEGY_VERSION,
   createIndexBuildStore,
@@ -62,9 +69,12 @@ import { exportKnowledgePackage } from "./data-service/export-package.mjs";
 // This process stores files/SQLite/BLOBs. Optional ONNX embedding also runs here
 // (real Node), because vinext API Workers cannot load @xenova/transformers.
 // Dual namespace: knowledge_documents (library) + conversation_files (chat attachments).
-// Web/GitHub connectors (jsdom/octokit) also run here — Workers cannot require() CJS.
 
 const projectRoot = resolve(new URL("..", import.meta.url).pathname);
+const dataInternalToken = loadOrCreateInternalToken(projectRoot);
+if (dataInternalToken) {
+  process.env.ORYNODE_DATA_INTERNAL_TOKEN = dataInternalToken;
+}
 const requireFromProject = createRequire(resolve(projectRoot, "package.json"));
 
 /** @returns {{ available: boolean, engine: "anydoc" | null, error?: string }} */
@@ -194,6 +204,7 @@ migrateDatabase(database);
 
 const jobRepository = createJobRepository(database);
 const terminologyRepository = createTerminologyRepository(database);
+const wikiStore = createWikiStore(database);
 const indexBuildStore = createIndexBuildStore(database);
 const vectorEntryStore = createVectorEntryStore(database);
 const resourceCoordinator = createResourceCoordinator();
@@ -227,14 +238,21 @@ async function loadSyncModule() {
 }
 
 async function runSyncSourceJob(payload) {
-  const sync = await loadSyncModule();
-  if (payload?.create?.type === "web") {
-    return sync.createAndSyncWebSource(payload.create);
-  }
-  if (payload?.create?.type === "github") {
-    return sync.createAndSyncGitHubSource(payload.create);
+  if (
+    payload?.create?.type === "web" ||
+    payload?.create?.type === "github"
+  ) {
+    throw new Error("资料库仅支持导入本地文件");
   }
   if (typeof payload?.sourceId === "string") {
+    const existing = sourcesRepository.get(payload.sourceId);
+    if (
+      existing &&
+      (existing.type === "web" || existing.type === "github")
+    ) {
+      throw new Error("资料库仅支持导入本地文件");
+    }
+    const sync = await loadSyncModule();
     return sync.syncSource(payload.sourceId, payload.config);
   }
   throw new Error("sync_source payload 无效");
@@ -611,6 +629,152 @@ async function runConvertOfficeJob(payload, hooks = {}) {
       }
     }
   }
+}
+
+let compileWikiModulePromise = null;
+async function loadCompileWikiModule() {
+  if (!compileWikiModulePromise) {
+    compileWikiModulePromise = loadTsModule(
+      projectRoot,
+      "services/knowledge/wiki/run-compile-wiki.ts",
+    );
+  }
+  return compileWikiModulePromise;
+}
+
+function mapRowsToWikiChunks(rows) {
+  return (rows ?? [])
+    .filter((row) => row?.id && row?.content)
+    .map((row) => ({
+      id: row.id,
+      content: row.content,
+      pageNumber: Number(row.pageNumber) || 1,
+      position: Number(row.position) || 0,
+      headingPath: parseJsonField(row.headingPath) ?? row.headingPath,
+      startLine: row.startLine ?? undefined,
+      endLine: row.endLine ?? undefined,
+    }));
+}
+
+async function runCompileWikiJob(payload, hooks = {}) {
+  const runMod = await loadCompileWikiModule();
+  let wikiLeaseId = null;
+  try {
+    return await runMod.runCompileWikiJob({
+      payload,
+      onProgress: hooks.onProgress,
+      deferIfBusy: hooks.deferIfBusy !== false,
+      jobId: hooks.jobId,
+      isChatActive: () => resourceCoordinator.snapshot().chatActive === true,
+      tryAcquireWiki: ({ owner, attemptId }) => {
+        const acquire = resourceCoordinator.tryAcquire({
+          kind: "wiki_compile",
+          owner,
+          attemptId,
+        });
+        if (acquire.ok) wikiLeaseId = acquire.leaseId;
+        return acquire;
+      },
+      releaseWiki: (leaseId) => {
+        resourceCoordinator.release(leaseId || wikiLeaseId);
+        wikiLeaseId = null;
+      },
+      unloadEmbedding: () => {
+        embedLifecycle.unload("wiki_compile");
+      },
+      fetchDocument: async ({ namespace, documentId }) => {
+        if (namespace === "conversation") {
+          const file = getConversationFile.get(documentId);
+          return file ? { name: file.name } : null;
+        }
+        const document = getKnowledgeDocument.get(documentId);
+        return document ? { name: document.name } : null;
+      },
+      fetchChunks: async ({ namespace, documentId }) => {
+        if (namespace === "conversation") {
+          return mapRowsToWikiChunks(getConversationFileChunks.all(documentId));
+        }
+        return mapRowsToWikiChunks(getKnowledgeChunks.all(documentId));
+      },
+    });
+  } catch (error) {
+    if (String(error?.message || "").startsWith("WIKI_LEASE_BUSY")) {
+      return { deferred: true, reason: "wiki_busy" };
+    }
+    throw error;
+  } finally {
+    if (wikiLeaseId) {
+      try {
+        resourceCoordinator.release(wikiLeaseId);
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+let compileOutlinesModulePromise = null;
+async function loadCompileOutlinesModule() {
+  if (!compileOutlinesModulePromise) {
+    compileOutlinesModulePromise = loadTsModule(
+      projectRoot,
+      "services/knowledge/wiki/run-compile-outlines.ts",
+    ).catch((error) => {
+      compileOutlinesModulePromise = null;
+      throw error;
+    });
+  }
+  return compileOutlinesModulePromise;
+}
+
+function wikiLibraryDocuments() {
+  return listKnowledgeDocuments.all().map((row) => ({
+    id: row.id,
+    name: row.name,
+  }));
+}
+
+async function wikiFetchChunks({ namespace, documentId }) {
+  if (namespace === "conversation") {
+    return mapRowsToWikiChunks(getConversationFileChunks.all(documentId));
+  }
+  return mapRowsToWikiChunks(getKnowledgeChunks.all(documentId));
+}
+
+async function runCompileOutlinesJob(payload, hooks = {}) {
+  const runMod = await loadCompileOutlinesModule();
+  return runMod.runCompileOutlinesJob({
+    payload,
+    jobId: hooks.jobId,
+    onProgress: hooks.onProgress,
+    fetchLibraryDocuments: async () => wikiLibraryDocuments(),
+    fetchChunks: wikiFetchChunks,
+  });
+}
+
+let compileConceptsModulePromise = null;
+async function loadCompileConceptsModule() {
+  if (!compileConceptsModulePromise) {
+    compileConceptsModulePromise = loadTsModule(
+      projectRoot,
+      "services/knowledge/wiki/run-compile-concepts.ts",
+    ).catch((error) => {
+      compileConceptsModulePromise = null;
+      throw error;
+    });
+  }
+  return compileConceptsModulePromise;
+}
+
+async function runCompileConceptsJob(payload, hooks = {}) {
+  const runMod = await loadCompileConceptsModule();
+  return runMod.runCompileConceptsJob({
+    payload,
+    jobId: hooks.jobId,
+    onProgress: hooks.onProgress,
+    fetchLibraryDocuments: async () => wikiLibraryDocuments(),
+    fetchChunks: wikiFetchChunks,
+  });
 }
 
 async function waitForJob(jobId, timeoutMs = 120_000) {
@@ -1301,6 +1465,8 @@ function backfillKnowledgeContentHashes() {
       try {
         database.exec("BEGIN IMMEDIATE");
         deleteFtsForDocument(database, "library", row.id);
+        wikiStore.deleteBySource("library", row.id);
+        wikiStore.dropDocumentFromConcepts(row.id);
         deleteKnowledgeDocument.run(row.id);
         database.exec("COMMIT");
         try {
@@ -1378,6 +1544,10 @@ function removeConversationAttachmentDir(conversationId) {
 
 function deleteConversationWithFiles(conversationId) {
   const files = listConversationFilesByConversation.all(conversationId);
+  for (const file of files) {
+    wikiStore.deleteBySource("conversation", file.id);
+  }
+  wikiStore.deleteBySource("conversation", conversationId);
   const result = deleteConversation.run(conversationId);
   removeConversationAttachmentDir(conversationId);
   for (const file of files) {
@@ -1395,6 +1565,7 @@ function deleteConversationWithFiles(conversationId) {
 
 function clearAllConversations() {
   const conversations = listConversations.all();
+  wikiStore.deleteByNamespace("conversation");
   clearConversations.run();
   for (const conversation of conversations) {
     removeConversationAttachmentDir(conversation.id);
@@ -2922,6 +3093,7 @@ async function embedTexts(texts, mode = "passage", options = {}) {
   }
   if (
     resources.heavyKind === "ocr" ||
+    resources.heavyKind === "wiki_compile" ||
     (resources.heavyKind === "embedding" && !options.allowEmbeddingLease)
   ) {
     const error = new Error("EMBED_DEFERRED_HEAVY");
@@ -3000,7 +3172,9 @@ async function writeVectorsForDocument({
   const entries = [];
   for (let offset = 0; offset < rows.length; offset += batchSize) {
     const slice = rows.slice(offset, offset + batchSize);
-    const embedded = await embedFn(slice.map((row) => row.content));
+    const embedded = await embedFn(
+      slice.map((row) => contextualizeChunkText(row.content, row.headingPath)),
+    );
     for (let i = 0; i < slice.length; i += 1) {
       const vector = embedded[i];
       if (!Array.isArray(vector) && !(vector instanceof Float32Array)) {
@@ -3080,6 +3254,9 @@ const indexWorker = startIndexWorker({
   runSyncSource: runSyncSourceJob,
   runProcessRevision: runProcessRevisionJob,
   runConvertOffice: runConvertOfficeJob,
+  runCompileWiki: runCompileWikiJob,
+  runCompileOutlines: runCompileOutlinesJob,
+  runCompileConcepts: runCompileConceptsJob,
   runGarbageCollect: (payload) => {
     const targets = Array.isArray(payload?.targets)
       ? payload.targets
@@ -3147,6 +3324,25 @@ const server = createServer(async (request, response) => {
 
   const url = new URL(request.url ?? "/", `http://${host}:${port}`);
   const parts = url.pathname.split("/").filter(Boolean);
+
+  if (url.pathname === "/wiki" || url.pathname.startsWith("/wiki/")) {
+    const ok = wikiInternalAuthOk({
+      disabled: internalAuthDisabled(),
+      secret: dataInternalToken,
+      method: request.method || "GET",
+      pathname: url.pathname,
+      timestamp: String(request.headers["x-orynode-ts"] || ""),
+      mac: String(request.headers["x-orynode-mac"] || ""),
+      remoteAddress: request.socket?.remoteAddress,
+    });
+    if (!ok) {
+      json(response, 401, {
+        error: "wiki 内部认证失败",
+        code: "wiki_internal_auth",
+      });
+      return;
+    }
+  }
 
   try {
     if (request.method === "GET" && url.pathname === "/health") {
@@ -3335,6 +3531,9 @@ const server = createServer(async (request, response) => {
         "embed_document",
         "process_revision",
         "convert_office",
+        "compile_wiki",
+        "compile_wiki_outlines",
+        "compile_wiki_concepts",
       ]);
       if (!ENQUEUEABLE_JOB_TYPES.has(String(body.type))) {
         json(response, 400, {
@@ -3346,6 +3545,30 @@ const server = createServer(async (request, response) => {
       const idempotencyKey = String(body.idempotencyKey);
       const existingJob = jobRepository.getByIdempotencyKey(idempotencyKey);
       if (existingJob) {
+        if (isWikiJobType(body.type)) {
+          const decision = resolveWikiJobEnqueue(existingJob, body.payload);
+          if (decision.action === "cooldown") {
+            json(response, 429, {
+              error: "综述任务刚结束，请稍后再试",
+              job: existingJob,
+            });
+            return;
+          }
+          if (decision.action === "requeue") {
+            jobRepository.mergePayload(existingJob.id, decision.payload);
+            const retried = jobRepository.requeueFromTerminal(existingJob.id);
+            json(response, 201, {
+              job: retried ?? jobRepository.get(existingJob.id),
+              retried: true,
+            });
+            return;
+          }
+          if (decision.action === "inflight") {
+            jobRepository.mergePayload(existingJob.id, decision.payload);
+            json(response, 200, { job: jobRepository.get(existingJob.id) });
+            return;
+          }
+        }
         // 旧 Job 缺 V1 字段时补齐（不新建 build）
         if (
           String(body.type) === "process_revision" &&
@@ -3447,7 +3670,13 @@ const server = createServer(async (request, response) => {
         const namespace =
           payload.namespace === "conversation" ? "conversation" : "library";
         let documentName = null;
-        if (documentId) {
+        if (job.type === "compile_wiki_outlines") {
+          documentName = "资料大纲";
+        } else if (job.type === "compile_wiki_concepts") {
+          documentName = "概念百科";
+        } else if (typeof payload.title === "string" && payload.title.trim()) {
+          documentName = payload.title.trim();
+        } else if (documentId) {
           if (namespace === "conversation") {
             const file = getConversationFile.get(documentId);
             documentName = file?.name ?? null;
@@ -3478,6 +3707,20 @@ const server = createServer(async (request, response) => {
         return;
       }
       json(response, 200, { job });
+      return;
+    }
+
+    if (
+      request.method === "POST" &&
+      parts[0] === "jobs" &&
+      parts.length === 3 &&
+      parts[2] === "retry"
+    ) {
+      const job = jobRepository.requeueFromTerminal(parts[1]);
+      json(response, job ? 200 : 409, {
+        job,
+        ...(job ? {} : { error: "任务不在可重试状态" }),
+      });
       return;
     }
 
@@ -3856,6 +4099,309 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/wiki/source-changed") {
+      const body = await readJson(request);
+      const sourceDocumentId = String(body.sourceDocumentId || "").trim();
+      if (!sourceDocumentId) {
+        json(response, 400, { error: "缺少 sourceDocumentId" });
+        return;
+      }
+      if (body.action === "deleted") {
+        json(response, 200, wikiStore.withdrawLibrarySource(sourceDocumentId));
+        return;
+      }
+      json(response, 200, {
+        stale: wikiStore.markConceptsStaleForSource(sourceDocumentId),
+      });
+      return;
+    }
+    if (request.method === "PUT" && url.pathname === "/wiki/pages/publish") {
+      const body = await readJson(request);
+      try {
+        json(response, 200, { page: wikiStore.publish(body) });
+      } catch (error) {
+        json(
+          response,
+          400,
+          { error: error instanceof Error ? error.message : "发布 wiki 页失败" },
+        );
+      }
+      return;
+    }
+    if (request.method === "PUT" && url.pathname === "/wiki/pages") {
+      const body = await readJson(request);
+      try {
+        json(response, 200, { page: wikiStore.upsert(body) });
+      } catch (error) {
+        json(
+          response,
+          400,
+          { error: error instanceof Error ? error.message : "写入 wiki 页失败" },
+        );
+      }
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/wiki/pages") {
+      const sourceDocumentId = String(
+        url.searchParams.get("sourceDocumentId") || "",
+      ).trim();
+      const namespace =
+        url.searchParams.get("namespace") === "conversation"
+          ? "conversation"
+          : "library";
+      const kind = String(url.searchParams.get("kind") || "").trim() || null;
+      const query = String(url.searchParams.get("q") || "").trim();
+      const limit = Number(url.searchParams.get("limit") || 40);
+      if (sourceDocumentId) {
+        const page = wikiStore.getBySource(namespace, sourceDocumentId);
+        if (!page) {
+          json(response, 404, { error: "wiki 页不存在" });
+          return;
+        }
+        json(response, 200, { page });
+        return;
+      }
+      if (namespace === "conversation") {
+        const conversationId = String(
+          url.searchParams.get("conversationId") || "",
+        ).trim();
+        if (!conversationId) {
+          json(response, 400, { error: "会话百科列表必须带 conversationId" });
+          return;
+        }
+        const fileIds = listConversationFilesByConversation
+          .all(conversationId)
+          .map((row) => String(row.id || "").trim())
+          .filter(Boolean);
+        const pages = query
+          ? wikiStore.search({ query, namespace, kind, limit })
+          : wikiStore.list({ namespace, kind, limit, sourceDocumentIds: fileIds });
+        json(response, 200, {
+          pages: pages.filter((page) => fileIds.includes(page.sourceDocumentId)),
+        });
+        return;
+      }
+      const pages = query
+        ? wikiStore.search({ query, namespace, kind, limit })
+        : wikiStore.list({ namespace, kind, limit });
+      json(response, 200, { pages });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/wiki/builds") {
+      const body = await readJson(request);
+      const build = wikiStore.recordBuild(body);
+      json(response, build ? 201 : 400, { build });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/wiki/compile-runs") {
+      const pageId = String(url.searchParams.get("pageId") || "").trim();
+      if (!pageId) {
+        json(response, 400, { error: "缺少 pageId" });
+        return;
+      }
+      json(response, 200, { runs: wikiStore.listCompileRuns(pageId) });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/wiki/compile-runs") {
+      const body = await readJson(request);
+      const run = wikiStore.recordCompileRun(body);
+      json(response, run ? 201 : 400, { run });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/wiki/decisions") {
+      json(response, 200, { decisions: wikiStore.listDecisions() });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/wiki/decisions") {
+      const body = await readJson(request);
+      const decision = wikiStore.saveDecision(body);
+      json(response, decision ? 201 : 400, { decision });
+      return;
+    }
+    if (request.method === "PUT" && url.pathname === "/wiki/pending-edges") {
+      const body = await readJson(request);
+      const fromId = String(body.fromId || "").trim();
+      if (!fromId) {
+        json(response, 400, { error: "缺少 fromId" });
+        return;
+      }
+      json(response, 200, {
+        edges: wikiStore.replacePendingEdges(fromId, body.edges),
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/wiki/candidates") {
+      const body = await readJson(request);
+      const candidate = wikiStore.saveCandidate(body);
+      json(response, candidate ? 201 : 400, { candidate });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/wiki/candidates") {
+      const id = String(url.searchParams.get("id") || "").trim();
+      const pageId = String(url.searchParams.get("pageId") || "").trim();
+      const status = String(url.searchParams.get("status") || "").trim();
+      if (id) {
+        const candidate = wikiStore.getCandidate(id);
+        if (!candidate) {
+          json(response, 404, { error: "候选不存在" });
+          return;
+        }
+        json(response, 200, { candidate });
+        return;
+      }
+      if (!pageId) {
+        json(response, 400, { error: "缺少 pageId" });
+        return;
+      }
+      json(response, 200, {
+        candidates: wikiStore.listCandidates({
+          pageId,
+          status: status || undefined,
+        }),
+      });
+      return;
+    }
+    if (request.method === "PATCH" && url.pathname === "/wiki/candidates") {
+      const body = await readJson(request);
+      const candidate = wikiStore.updateCandidateStatus(body.id, body.status);
+      json(response, candidate ? 200 : 404, { candidate });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/wiki/pending-edges") {
+      const fromId = String(url.searchParams.get("fromId") || "").trim();
+      if (!fromId) {
+        json(response, 200, { edges: wikiStore.listAllPendingEdges() });
+        return;
+      }
+      json(response, 200, { edges: wikiStore.listPendingEdges(fromId) });
+      return;
+    }
+    if (parts[0] === "wiki" && parts[1] === "pages" && parts.length >= 3) {
+      const pageId = decodeURIComponent(parts[2]);
+      if (parts.length === 3 && request.method === "GET") {
+        const page = wikiStore.getById(pageId);
+        if (!page) {
+          json(response, 404, { error: "wiki 页不存在" });
+          return;
+        }
+        json(response, 200, { page });
+        return;
+      }
+      if (parts.length === 4 && parts[3] === "revisions" && request.method === "GET") {
+        const page = wikiStore.getById(pageId);
+        if (!page) {
+          json(response, 404, { error: "wiki 页不存在" });
+          return;
+        }
+        json(response, 200, {
+          revisions: wikiStore.listRevisions(pageId).map((row) => ({
+            id: row.id,
+            pageId: row.pageId,
+            revision: row.revision,
+            reason: row.reason,
+            createdAt: row.createdAt,
+            userEdited: row.userEdited,
+            excerpt: row.excerpt,
+          })),
+        });
+        return;
+      }
+      if (parts.length === 4 && parts[3] === "restore" && request.method === "POST") {
+        const existing = wikiStore.getById(pageId);
+        if (!existing) {
+          json(response, 404, { error: "wiki 页不存在" });
+          return;
+        }
+        const body = await readJson(request);
+        if (
+          typeof body.ifUpdatedAt === "string" &&
+          body.ifUpdatedAt &&
+          existing.updatedAt !== body.ifUpdatedAt
+        ) {
+          json(response, 409, { error: "百科页已更新，请重试" });
+          return;
+        }
+        const restored = wikiStore.restoreRevision(pageId, body.revision);
+        if (!restored) {
+          json(response, 404, { error: "版本不存在" });
+          return;
+        }
+        json(response, 200, { page: restored });
+        return;
+      }
+      if (parts.length === 3 && request.method === "PATCH") {
+        const existing = wikiStore.getById(pageId);
+        if (!existing) {
+          json(response, 404, { error: "wiki 页不存在" });
+          return;
+        }
+        const body = await readJson(request);
+        if (
+          typeof body.ifUpdatedAt === "string" &&
+          body.ifUpdatedAt &&
+          existing.updatedAt !== body.ifUpdatedAt
+        ) {
+          json(response, 409, { error: "百科页已更新，请重试" });
+          return;
+        }
+        const next = {
+          ...existing,
+        };
+        if (typeof body.userEdited === "boolean") {
+          next.userEdited = body.userEdited;
+        } else if (typeof body.synthesisMarkdown === "string") {
+          next.userEdited = true;
+        }
+        if (typeof body.markdown === "string") {
+          next.markdown = body.markdown;
+        }
+        if (typeof body.synthesisMarkdown === "string") {
+          next.synthesisMarkdown = body.synthesisMarkdown;
+          next.status = "ready";
+        }
+        if (typeof body.notesMarkdown === "string") {
+          next.notesMarkdown = body.notesMarkdown;
+        }
+        try {
+          const revisionReason =
+            typeof body.notesMarkdown === "string" &&
+            typeof body.synthesisMarkdown !== "string"
+              ? "settle"
+              : typeof body.synthesisMarkdown === "string"
+                ? "edit"
+                : undefined;
+          json(response, 200, {
+            page: wikiStore.upsert(
+              next,
+              revisionReason ? { revisionReason } : {},
+            ),
+          });
+        } catch (error) {
+          json(
+            response,
+            400,
+            { error: error instanceof Error ? error.message : "无法保存百科修改" },
+          );
+        }
+        return;
+      }
+      if (parts.length === 3 && request.method === "DELETE") {
+        wikiStore.deleteById(pageId);
+        json(response, 200, { deleted: true });
+        return;
+      }
+      if (parts.length === 4 && parts[3] === "links" && request.method === "GET") {
+        json(response, 200, wikiStore.listLinks(pageId));
+        return;
+      }
+      if (parts.length === 4 && parts[3] === "links" && request.method === "PUT") {
+        const body = await readJson(request);
+        const links = wikiStore.replaceLinks(pageId, body.links ?? []);
+        json(response, 200, { links });
+        return;
+      }
+    }
+
     // FTS5 keyword search — returns top candidates only (Phase 1)
     if (request.method === "POST" && url.pathname === "/retrieval/keyword/search") {
       const body = await readJson(request);
@@ -4184,6 +4730,7 @@ const server = createServer(async (request, response) => {
         database.exec("BEGIN IMMEDIATE");
         try {
           deleteFtsForDocument(database, "conversation", fileId);
+          wikiStore.deleteBySource("conversation", fileId);
           deleteConversationFile.run(fileId);
           database.exec("COMMIT");
           try {
@@ -4578,6 +5125,8 @@ const server = createServer(async (request, response) => {
         database.exec("BEGIN IMMEDIATE");
         try {
           deleteFtsForDocument(database, "library", id);
+          wikiStore.deleteBySource("library", id);
+          wikiStore.dropDocumentFromConcepts(id);
           deleteKnowledgeDocument.run(id);
           database.exec("COMMIT");
           try {
@@ -4695,11 +5244,20 @@ const server = createServer(async (request, response) => {
       try {
         let payload;
         if (body.type === "web" || body.type === "github") {
-          payload = { create: body };
+          json(response, 400, { error: "资料库仅支持导入本地文件" });
+          return;
         } else if (body.type === "sync" && typeof body.sourceId === "string") {
+          const existing = sourcesRepository.get(body.sourceId);
+          if (
+            existing &&
+            (existing.type === "web" || existing.type === "github")
+          ) {
+            json(response, 400, { error: "资料库仅支持导入本地文件" });
+            return;
+          }
           payload = { sourceId: body.sourceId, config: body.config };
         } else {
-          json(response, 400, { error: "type 必须是 web / github / sync" });
+          json(response, 400, { error: "type 必须是 sync" });
           return;
         }
 
@@ -4729,8 +5287,12 @@ const server = createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/sources") {
       const body = await readJson(request);
       const type = body.type;
-      if (type !== "web" && type !== "github" && type !== "file") {
-        json(response, 400, { error: "type 必须是 web / github / file" });
+      if (type === "web" || type === "github") {
+        json(response, 400, { error: "资料库仅支持导入本地文件" });
+        return;
+      }
+      if (type !== "file") {
+        json(response, 400, { error: "type 必须是 file" });
         return;
       }
       const name = String(body.name || type).slice(0, 180);

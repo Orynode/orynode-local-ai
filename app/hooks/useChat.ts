@@ -7,7 +7,7 @@ import type {
   MessageCitation,
 } from "../../services/types";
 import { groundUncitedAssistantAnswer } from "../../services/chat/prompt";
-import { scopeFromAttachments } from "../lib/attachments";
+import type { RetrievalScope } from "../../services/knowledge/types";
 
 export type { Message };
 
@@ -59,6 +59,7 @@ export function useChat() {
       conversationId: string | null,
       conversationTitle: string,
       attachments: MessageAttachment[] | undefined,
+      retrievalScope: RetrievalScope,
       temperature: number,
       topP: number,
       topK: number,
@@ -86,7 +87,6 @@ export function useChat() {
 
       // 推理成功/停止后再持久化用户消息，避免失败留下幽灵气泡
       let activeId = conversationId;
-      const retrievalScope = scopeFromAttachments(attachments, activeId);
       cancelledRef.current = false;
       const controller = new AbortController();
       abortController.current = controller;

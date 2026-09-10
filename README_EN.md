@@ -8,6 +8,10 @@ can work with a local model without using the original command-line chat.
 
 ## Screenshots
 
+Screenshots are from a running Mac. If optional semantic search is enabled on that
+host, the library header may show “keyword + semantic”. **A default install is
+keyword-only.**
+
 ### Home
 
 ![Home](docs/images/home.png)
@@ -38,13 +42,15 @@ layout introduced in V1. See the [roadmap](docs/ROADMAP.md).
 
 - Local web chat (streaming, stop, Orynode SSE v1 + structured citations)
 - **RAG / Knowledge Engine** (1.1.0 + **1.2.x** retrieval/citation + **1.3.0** local Office ingest): Scope auth, hybrid retrieval, citations, ProcessingBuild, workspace Search preview; Office via on-device anydoc → Markdown
+- **LLM Wiki (1.4.0)**: library outlines and concept pages; Gemma writes a cited synthesis only after “Write this page”; chat can settle an answer onto one aligned wiki page (undoable). Wiki is not a second retriever
 - TurboFieldfare status via ModelRuntime (not direct coupling)
 - OpenAI-compatible chat proxy; resumable Gemma 4 install; one-command local start
 - SQLite history; conversation attachments vs durable library namespaces
-- PDF / TXT / Markdown; scanned PDFs via **Apple Vision OCR**
+- PDF / TXT / Markdown / common Office (docx/pptx/xlsx, …); scanned PDFs via **Apple Vision OCR**
 - Settings: sampling, knowledge tier (auto / lite / quality), OCR mode, Trusted-LAN pairing
 - Keyword retrieval by default; optional semantic vectors (`multilingual-e5-small`, opt-in)
 - No account, analytics, or cloud conversation storage
+- Desktop and mobile browsers; Trusted-LAN requires a pairing session (`UNSAFE` is preview-only)
 - **Windows**: architecture stubs only; full experience targets Apple Silicon Mac
 
 ## Models and technology
@@ -59,9 +65,10 @@ layout introduced in V1. See the [roadmap](docs/ROADMAP.md).
 | Compat embedding | bge-small-zh-v1.5 | Legacy / Chinese baseline; do not mix with E5 |
 | OCR | Apple Vision (`orynode-ocr`) | macOS; Windows PP-OCR/ONNX stub reserved |
 | Office conversion | `@firecrawl/anydoc` | Via `npm install`; **on-device only**; Firecrawl hosted Parse is **forbidden** |
+| Wiki compile | Local Gemma + SQLite `wiki_*` | Layered on the Engine; not a second retriever |
 | App stack | Next.js · React · vinext · TypeScript · SQLite | Web + Data Service `:4318` |
 
-Full inventory: [CHANGELOG 1.3.0](CHANGELOG.md#130--2026-08-09) (citation fixes: [1.2.1](CHANGELOG.md#121--2026-08-09); retrieval loop: [1.2.0](CHANGELOG.md#120--2026-08-05); KE launch: [1.1.0](CHANGELOG.md#110--2026-08-03)).
+Full inventory: [CHANGELOG 1.4.0](CHANGELOG.md#140--2026-09-10) (Office: [1.3.0](CHANGELOG.md#130--2026-08-09); citation fixes: [1.2.1](CHANGELOG.md#121--2026-08-09); retrieval loop: [1.2.0](CHANGELOG.md#120--2026-08-05); KE launch: [1.1.0](CHANGELOG.md#110--2026-08-03)).
 
 ## Local documents and retrieval
 
@@ -76,8 +83,9 @@ Shared pipeline (**Knowledge Engine**):
 
 1. **Parse** — PDF / TXT / Markdown via native parsers (scanned/hybrid PDFs may use Apple Vision OCR, `process_revision`); common Office (docx/pptx/xlsx, …) via on-device `@firecrawl/anydoc` (`convert_office`; **no** Firecrawl cloud Parse)
 2. **Chunk / index** — passages in SQLite; library content-hash dedupe
-3. **Retrieve** — per-message scope → `HybridRetriever` (FTS default; optional vectors + RRF) → context + structured citations
-4. Draft selection clears after send; history does not restore the previous draft, but conversation files stay selectable
+3. **Retrieve** — if searchable documents exist, default to the **whole library** (may include compiled Wiki outlines/syntheses at lower weight) → `HybridRetriever` (FTS default; optional vectors + RRF) → context + structured citations. Narrow to one document or turn the library off
+4. Conversation files stay selectable; history does not restore the previous draft selection
+5. **Wiki (optional)** — outlines are extracted after ingest without Gemma; “Write this page” compiles a cited synthesis; “Organize concepts” only merges entries and does not occupy Gemma
 
 **Keyword (FTS5) is default.** If sources are selected but nothing hits, an honest system note is injected instead of stuffing unrelated chunks.
 
@@ -124,8 +132,15 @@ npm run model:progress
 
 This observes the current progress without restarting or interrupting it.
 
-`npm run setup` installs TurboFieldfare first and then downloads the model. You
-can also run `npm run turbo:install` and `npm run model:install` separately.
+`npm run setup` installs TurboFieldfare (if needed), downloads the model, then
+builds the on-device OCR helper (Apple Vision → `.orynode/bin/orynode-ocr`).
+You can also run:
+
+```bash
+npm run turbo:install   # TurboFieldfare
+npm run model:install    # Gemma 4
+npm run ocr:install      # OCR helper (Swift; skipped on non-macOS)
+```
 
 `npm install` also installs `@firecrawl/anydoc` (with a platform-native
 binding) for local Office→Markdown conversion. LibreOffice is **not** required.
@@ -133,6 +148,8 @@ Sending files to Firecrawl’s hosted Parse API (or any third-party cloud parse
 endpoint) is **forbidden**. This release does **not** index embedded Office
 images; preview shows converted searchable text (same coordinate system as
 citation line numbers). Download the original to view images.
+
+`npm run doctor` checks the OCR helper and on-device Office conversion.
 
 ## Daily use
 
@@ -152,6 +169,12 @@ Trusted-LAN uses a one-time pairing code and revocable sessions.
 secure sharing mode. Do not expose port 3000 to the public internet. Press
 `Control+C` to stop the services.
 
+Production runbooks (backup, upgrade, failure handling) are in
+[PRODUCTION_READINESS](docs/PRODUCTION_READINESS.md). Public internet, multi-tenant,
+and full Windows runtime are out of scope. Web / GitHub ingest is retired;
+`sources`, Wiki merge/split decisions, and pending-edges remain **experimental /
+internal HTTP APIs without a product UI**.
+
 If TurboFieldfare is managed separately, run `npm run dev` to start only the
 web interface. Copy `.env.example` to `.env.local` to use a different local API
 address.
@@ -162,28 +185,29 @@ address.
 orynode-local-ai/
 ├── app/                          # Next.js frontend (pages, components, API routes)
 │   ├── page.tsx                  #   Entry page (component orchestration)
-│   ├── components/               #   UI components (chat/knowledge/sidebar/settings/ui)
-│   ├── hooks/                    #   Custom hooks (useChat/useKnowledge/useConversations/useSettings)
+│   ├── components/               #   UI (chat/knowledge/sidebar/settings/ui)
+│   ├── hooks/                    #   useChat / useKnowledge / useWikiPageSession / …
 │   └── api/                      #   API routes (chat/status/conversations/knowledge/settings)
-├── services/                     # Core business logic (pure TypeScript)
-│   ├── chat/                     #   System prompt management
-│   ├── inference/                #   Inference backend adapter (TurboFieldfare, swappable)
-│   ├── knowledge/                #   Knowledge (parse/chunk/optional embed/retrieve — only smart layer)
-│   └── settings/                 #   Runtime settings
-├── config/                       # Centralized configuration
-│   └── defaults.ts               #   All default values
-├── scripts/                      # Operational scripts
-│   ├── start-local.mjs           #   One-command startup
-│   ├── local-data-service.mjs    #   Thin storage (:4318, SQLite/files/BLOBs, no retrieval logic)
-│   └── ...
-├── worker/                       # vinext local runtime entry (not cloud business logic)
-├── db/                           # Note only: business data is NOT here
-├── .orynode/                     # Runtime data (gitignored)
-│   ├── data/orynode.db           #   SQLite database
-│   ├── knowledge/files/          #   Uploaded docs (PDF / TXT / MD)
-│   └── models/                   #   Gemma 4 model
-└── docs/                         # Documentation
-    ├── ARCHITECTURE.md           #   Current architecture
+├── services/                     # Core TypeScript services
+│   ├── chat/                     #   Prompt / SSE v1 / context budget
+│   ├── platform/                 #   Host / ModelRuntime / LAN / OCR (incl. Windows stubs)
+│   ├── knowledge/                #   Knowledge Engine + wiki/ compile layer
+│   ├── agent/                    #   Guarded knowledge tools + Agent space (no product UI)
+│   └── settings/                #   Runtime settings
+├── native/macos/orynode-ocr/     # Apple Vision OCR helper source
+├── config/                       # defaults + embedding-artifacts
+├── scripts/                      # ops + data-service modules
+│   ├── start-local.mjs
+│   ├── local-data-service.mjs
+│   └── data-service/             #   FTS / jobs / worker / wiki-store / LAN…
+├── worker/                       # vinext local runtime entry
+├── .orynode/                     # runtime data (gitignored)
+│   ├── data/orynode.db
+│   ├── bin/orynode-ocr
+│   ├── knowledge/files/
+│   └── models/                   #   Gemma 4
+└── docs/
+    ├── ARCHITECTURE.md
     └── …
 ```
 
@@ -230,7 +254,9 @@ Before distributing a build, read:
 
 ## Contributing
 
-We are **not accepting external pull requests** at this stage. Please use Issues for bugs and suggestions. See [CONTRIBUTING.md](CONTRIBUTING.md).
+The MIT license still allows forks. We are **not merging external pull requests**
+into this upstream at this stage. Please use Issues for bugs and suggestions. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Douyin
 
@@ -243,5 +269,7 @@ Follow **@Orynode** on Douyin (ID: `orynode`) for AI app development and hands-o
 ## License
 
 Orynode Local AI is available under the [MIT License](LICENSE).
+`"private": true` in `package.json` only prevents accidental npm publishes; it is
+not a closed-source flag.
 
 Copyright (c) 2026 Orynode.

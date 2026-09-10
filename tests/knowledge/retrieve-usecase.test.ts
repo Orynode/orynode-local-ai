@@ -10,6 +10,7 @@ import { EMPTY_REWRITE, rewriteFromEntries } from "../../services/knowledge/quer
 import { BUILTIN_TERMINOLOGY } from "../../services/knowledge/query/terminology";
 import type { StructuredQueryRewrite } from "../../services/knowledge/query/query-rewrite";
 import type { Retriever, RetrievalResult } from "../../services/knowledge/types";
+import { SEARCH_CONFIG } from "../../config/defaults";
 
 /** 单元测试默认不打真实 LLM / 术语 API */
 async function noRewrite(): Promise<StructuredQueryRewrite> {
@@ -26,9 +27,16 @@ function mockRetriever(
   };
 }
 
+/** 单元测试不打本机 data-service 的 Wiki 页 */
+const NO_WIKI = {
+  loadForScope: async () => null,
+  loadForQuery: async () => null,
+};
+
 test("buildChatKnowledgeContext: scope none 不检索", async () => {
   let called = 0;
   const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
     knowledgeTier: "lite",
     resolveRewrite: noRewrite,
     retriever: mockRetriever(() => {
@@ -45,8 +53,29 @@ test("buildChatKnowledgeContext: scope none 不检索", async () => {
   assert.equal(called, 0);
 });
 
+test("buildChatKnowledgeContext: 寒暄即使有资料库也不检索", async () => {
+  let called = 0;
+  const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
+    knowledgeTier: "lite",
+    resolveRewrite: noRewrite,
+    retriever: mockRetriever(() => {
+      called += 1;
+      return { chunks: [], strategy: "keyword" };
+    }),
+  });
+  const result = await buildChatKnowledgeContext(engine, {
+    messages: [{ role: "user", content: "你好" }],
+    retrievalScope: { mode: "sources", library: "all" },
+  });
+  assert.equal(result.knowledgePrompt, "");
+  assert.equal(result.retrieval, null);
+  assert.equal(called, 0);
+});
+
 test("buildChatKnowledgeContext: 有命中时组装 context", async () => {
   const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
     knowledgeTier: "lite",
     resolveRewrite: noRewrite,
     retriever: mockRetriever(() => ({
@@ -82,6 +111,7 @@ test("buildChatKnowledgeContext: 有命中时组装 context", async () => {
 
 test("buildChatKnowledgeContext: 检索失败降级文案", async () => {
   const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
     knowledgeTier: "lite",
     resolveRewrite: noRewrite,
     retriever: mockRetriever(() => {
@@ -98,6 +128,7 @@ test("buildChatKnowledgeContext: 检索失败降级文案", async () => {
 
 test("buildChatKnowledgeContext: 0 命中注入诚实文案并保留 diagnostics", async () => {
   const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
     knowledgeTier: "lite",
     resolveRewrite: noRewrite,
     retriever: mockRetriever(() => ({
@@ -117,6 +148,7 @@ test("buildChatKnowledgeContext: 0 命中注入诚实文案并保留 diagnostics
 
 test("retrieve: hybrid diagnostics 不含 vector 降级", async () => {
   const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
     knowledgeTier: "balanced",
     resolveRewrite: noRewrite,
     capabilities: {
@@ -155,6 +187,7 @@ test("retrieve: hybrid diagnostics 不含 vector 降级", async () => {
 
 test("retrieve: phrase 短路仅关键词时不误报向量索引未就绪", async () => {
   const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
     knowledgeTier: "balanced",
     resolveRewrite: noRewrite,
     capabilities: {
@@ -201,6 +234,7 @@ test("retrieve: 术语 rewrite 经 term_expansion 召回英文 access token", as
   const calls: string[] = [];
   const preferKeywordByQuery = new Map<string, boolean | undefined>();
   const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
     knowledgeTier: "balanced",
     resolveRewrite: async (query) =>
       rewriteFromEntries(query, BUILTIN_TERMINOLOGY, "terminology"),
@@ -259,6 +293,7 @@ test("retrieve: 术语 rewrite 经 term_expansion 召回英文 access token", as
 test("retrieve: normalized 词项变体只走 FTS，不放大向量噪声", async () => {
   const modes = new Map<string, boolean | undefined>();
   const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
     knowledgeTier: "quality",
     resolveRewrite: noRewrite,
     capabilities: {
@@ -293,6 +328,7 @@ test("retrieve: term_expansion 将结构化词项原样传给 FTS", async () => 
   const termsByQuery = new Map<string, string[] | undefined>();
   const languageByQuery = new Map<string, string | undefined>();
   const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
     knowledgeTier: "balanced",
     resolveRewrite: async () => ({
       source: "terminology",
@@ -330,6 +366,7 @@ test("retrieve: term_expansion 将结构化词项原样传给 FTS", async () => 
 test("retrieve: 原始短语意图原样传给 FTS", async () => {
   let receivedPhrase: string | undefined;
   const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
     knowledgeTier: "balanced",
     resolveRewrite: noRewrite,
     capabilities: {
@@ -629,4 +666,381 @@ test("keyword retriever 路径：整库不读取全量，单文件问答有范�
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("retrieve: document_read 有 Wiki 页时不跑 Retriever", async () => {
+  let retrieveCalls = 0;
+  const engine = createKnowledgeEngine({
+    knowledgeTier: "lite",
+    resolveRewrite: noRewrite,
+    retriever: mockRetriever(() => {
+      retrieveCalls += 1;
+      return {
+        strategy: "keyword",
+        chunks: [
+          {
+            id: "rag-only",
+            documentId: "d1",
+            documentName: "手册.md",
+            pageNumber: 1,
+            position: 0,
+            content: "RAG 碎片",
+            score: 1,
+            source: "library",
+          },
+        ],
+      };
+    }),
+    wikiHits: {
+      loadForScope: async () => [
+        {
+          id: "mirror:library:d1::synthesis",
+          documentId: "d1",
+          documentName: "手册.md",
+          pageNumber: 1,
+          position: 0,
+          content: "综述正文",
+          score: 3,
+          source: "library",
+          sourceChunkId: "c1",
+        },
+        {
+          id: "c1",
+          documentId: "d1",
+          documentName: "手册.md",
+          pageNumber: 1,
+          position: 1,
+          content: "## 安装\n步骤",
+          score: 2,
+          source: "library",
+        },
+      ],
+    },
+  });
+  const response = await engine.retrieve({
+    query: "这篇讲了什么",
+    scope: { mode: "sources", library: { documentIds: ["d1"] } },
+    knowledgeTier: "lite",
+  });
+  assert.equal(retrieveCalls, 0);
+  assert.equal(response.diagnostics.accessMode, "document_read");
+  assert.equal(response.diagnostics.wikiUsed, true);
+  assert.equal(response.diagnostics.fusion, "none");
+  assert.ok(response.diagnostics.pipeline?.includes("wiki_document_mirror"));
+  assert.deepEqual(response.diagnostics.strategy, ["wiki_document_mirror"]);
+  assert.equal(response.hits[0]?.id, "mirror:library:d1::synthesis");
+  assert.equal(response.citations[0]?.chunkId, "c1");
+  assert.equal(response.hits[1]?.id, "c1");
+});
+
+test("search: 概述问句仍跑 Retriever，不走 document_read 短路", async () => {
+  let retrieveCalls = 0;
+  let queryMode: string | undefined;
+  const engine = createKnowledgeEngine({
+    knowledgeTier: "lite",
+    resolveRewrite: noRewrite,
+    retriever: mockRetriever(() => {
+      retrieveCalls += 1;
+      return {
+        strategy: "keyword",
+        chunks: [
+          {
+            id: "rag-only",
+            documentId: "d1",
+            documentName: "手册.md",
+            pageNumber: 1,
+            position: 0,
+            content: "RAG 碎片",
+            score: 1,
+            source: "library",
+          },
+        ],
+      };
+    }),
+    wikiHits: {
+      loadForScope: async () => [
+        {
+          id: "mirror:library:d1::synthesis",
+          documentId: "d1",
+          documentName: "手册.md",
+          pageNumber: 1,
+          position: 0,
+          content: "综述正文",
+          score: 3,
+          source: "library",
+        },
+      ],
+      loadForQuery: async (_query, _scope, _topK, _access, options) => {
+        queryMode = options?.mode;
+        return null;
+      },
+    },
+  });
+  const response = await engine.search({
+    query: "这篇讲了什么",
+    scope: { mode: "sources", library: { documentIds: ["d1"] } },
+    knowledgeTier: "lite",
+  });
+  assert.equal(retrieveCalls, 1);
+  assert.notEqual(queryMode, "overview");
+  assert.equal(response.diagnostics.accessMode, "library_search");
+  assert.equal(response.hits[0]?.id, "rag-only");
+});
+
+test("retrieve: 翻译意图即使有 Wiki 仍走 L0", async () => {
+  let retrieveCalls = 0;
+  const engine = createKnowledgeEngine({
+    knowledgeTier: "lite",
+    resolveRewrite: noRewrite,
+    retriever: mockRetriever(() => {
+      retrieveCalls += 1;
+      return {
+        strategy: "keyword",
+        chunks: [
+          {
+            id: "c1",
+            documentId: "d1",
+            documentName: "手册.md",
+            pageNumber: 1,
+            position: 0,
+            content: "原文切片要够长才能翻译",
+            score: 1,
+            source: "library",
+          },
+        ],
+      };
+    }),
+    wikiHits: {
+      loadForScope: async () => {
+        throw new Error("翻译不应读取 Wiki 页");
+      },
+    },
+  });
+  const response = await engine.retrieve({
+    query: "翻译这篇",
+    scope: { mode: "sources", library: { documentIds: ["d1"] } },
+    knowledgeTier: "lite",
+  });
+  assert.equal(retrieveCalls, 1);
+  assert.equal(response.diagnostics.accessMode, "document_qa");
+  assert.equal(response.diagnostics.wikiUsed, false);
+  assert.equal(response.hits[0]?.id, "c1");
+});
+
+test("retrieve: multi_document 融合 Wiki 图并标记 follow", async () => {
+  let retrieveCalls = 0;
+  const engine = createKnowledgeEngine({
+    knowledgeTier: "lite",
+    resolveRewrite: noRewrite,
+    retriever: mockRetriever(() => {
+      retrieveCalls += 1;
+      return {
+        strategy: "keyword",
+        chunks: [
+          {
+            id: "rag-1",
+            documentId: "d2",
+            documentName: "手册 B.md",
+            pageNumber: 1,
+            position: 0,
+            content: "RAG 切片",
+            score: 1,
+            source: "library",
+          },
+        ],
+      };
+    }),
+    wikiHits: {
+      loadForQuery: async () => ({
+        hits: [
+          {
+            id: "wiki-1",
+            documentId: "d1",
+            documentName: "手册 A.md",
+            pageNumber: 1,
+            position: 0,
+            content: "Wiki 综述",
+            score: 4,
+            source: "library",
+          },
+        ],
+        followed: true,
+      }),
+    },
+  });
+  const response = await engine.retrieve({
+    query: "安装步骤怎么做",
+    scope: { mode: "sources", library: { documentIds: ["d1", "d2"] } },
+    knowledgeTier: "lite",
+  });
+  assert.equal(retrieveCalls, 1);
+  assert.equal(response.diagnostics.accessMode, "multi_document");
+  assert.equal(response.diagnostics.wikiUsed, true);
+  assert.equal(response.diagnostics.wikiFollowed, true);
+  assert.ok(response.diagnostics.pipeline?.includes("wiki_follow_link"));
+  assert.ok(response.diagnostics.pipeline?.includes("wiki_rrf"));
+  assert.ok(response.diagnostics.pipeline?.includes("wiki_graph"));
+  assert.ok(response.hits.some((hit) => hit.id === "wiki-1"));
+  assert.ok(response.hits.some((hit) => hit.id === "rag-1"));
+  assert.equal(response.hits[0]?.id, "rag-1");
+});
+
+test("retrieve: 工作区概述走编译页预算，不跑 Retriever，也不 dump scope", async () => {
+  let retrieveCalls = 0;
+  let queryMode: string | undefined;
+  const engine = createKnowledgeEngine({
+    knowledgeTier: "lite",
+    resolveRewrite: noRewrite,
+    retriever: mockRetriever(() => {
+      retrieveCalls += 1;
+      return {
+        strategy: "keyword",
+        chunks: [
+          {
+            id: "rag-only",
+            documentId: "d1",
+            documentName: "手册.md",
+            pageNumber: 1,
+            position: 0,
+            content: "RAG 碎片",
+            score: 1,
+            source: "library",
+          },
+        ],
+      };
+    }),
+    wikiHits: {
+      loadForScope: async () => {
+        throw new Error("整库概述不得 dump loadForScope");
+      },
+      loadForQuery: async (_query, _scope, _topK, _access, options) => {
+        queryMode = options?.mode;
+        return {
+          hits: [
+            {
+              id: "wiki-syn",
+              documentId: "d1",
+              documentName: "手册.md",
+              pageNumber: 1,
+              position: 0,
+              content: "编译综述",
+              score: 4,
+              source: "library",
+              headingPath: ["综述"],
+            },
+          ],
+          followed: false,
+        };
+      },
+    },
+  });
+  const response = await engine.retrieve({
+    query: "总结资料库",
+    scope: { mode: "sources", library: "all" },
+    knowledgeTier: "lite",
+  });
+  assert.equal(retrieveCalls, 0);
+  assert.equal(queryMode, "overview");
+  assert.equal(response.diagnostics.accessMode, "document_read");
+  assert.equal(response.diagnostics.wikiUsed, true);
+  assert.ok(response.diagnostics.pipeline?.includes("wiki_document_mirror"));
+  assert.equal(response.hits[0]?.id, "wiki-syn");
+});
+
+test("retrieve: 工作区「zend内存池是什么」原文不被小说 Wiki 挤掉", async () => {
+  const engine = createKnowledgeEngine({
+    knowledgeTier: "lite",
+    resolveRewrite: noRewrite,
+    retriever: mockRetriever(() => ({
+      strategy: "keyword",
+      chunks: [
+        {
+          id: "php-chunk",
+          documentId: "php",
+          documentName: "PHP7内核剖析",
+          pageNumber: 40,
+          position: 0,
+          content: "Zend 内存管理器把请求内存交给内存池分配。",
+          score: 8,
+          source: "library",
+        },
+      ],
+    })),
+    wikiHits: {
+      loadForQuery: async () => ({
+        hits: Array.from({ length: 8 }, (_, index) => ({
+          id: `novel-${index}`,
+          documentId: "novel",
+          documentName: "孤独小说",
+          pageNumber: index + 1,
+          position: index,
+          content: `## 第 ${index + 1} 章目录`,
+          score: 9 - index,
+          source: "library" as const,
+        })),
+        followed: false,
+      }),
+    },
+  });
+  const response = await engine.retrieve({
+    query: "zend内存池是什么",
+    scope: { mode: "sources", library: "all" },
+    knowledgeTier: "lite",
+  });
+  assert.equal(response.diagnostics.accessMode, "multi_document");
+  assert.equal(response.diagnostics.wikiUsed, true);
+  assert.equal(response.hits[0]?.id, "php-chunk");
+  assert.ok(response.hits.some((hit) => hit.id === "php-chunk"));
+});
+
+test("retrieve: 宽召回后词法 rerank 压到 topK", async () => {
+  let requestedTopK: number | undefined;
+  const filler = Array.from({ length: 11 }, (_, index) => ({
+    id: `noise-${index}`,
+    documentId: "d1",
+    documentName: "手册.md",
+    pageNumber: 1,
+    position: index,
+    content: "无关段落无关键词",
+    score: 10 - index * 0.01,
+    source: "library" as const,
+  }));
+  const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
+    knowledgeTier: "lite",
+    resolveRewrite: noRewrite,
+    retriever: {
+      async retrieve(_query, _scope, options) {
+        requestedTopK = options?.topK;
+        return {
+          strategy: "keyword",
+          chunks: [
+            ...filler,
+            {
+              id: "match",
+              documentId: "d1",
+              documentName: "手册.md",
+              pageNumber: 2,
+              position: 99,
+              content: "先连接电源再打开开关。",
+              headingPath: ["部署", "安装步骤"],
+              score: 0.1,
+              source: "library",
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  const response = await engine.retrieve({
+    query: "安装步骤",
+    scope: { mode: "sources", library: "all" },
+    knowledgeTier: "lite",
+  });
+
+  assert.equal(requestedTopK, SEARCH_CONFIG.recallK);
+  assert.equal(response.hits.length, SEARCH_CONFIG.topK);
+  assert.equal(response.hits[0]?.id, "match");
+  assert.ok(response.diagnostics.pipeline?.includes("rerank"));
 });

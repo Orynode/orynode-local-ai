@@ -23,4 +23,4 @@ export {
 
 export { assertSafeHttpUrl, isPrivateIp } from "./ssrf";
 
-// 注意：registerBuiltinConnectors 在 ./builtins，含 jsdom；勿从 Workers 入口再导出
+// 注意：registerBuiltinConnectors 在 ./builtins；勿从 Workers 入口再导出

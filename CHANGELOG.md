@@ -4,6 +4,40 @@
 `0.x` 期间破坏性或用户可见行为变化可递增次版本（`0.Y.0`）。  
 产品线「V1 源码安装版 / V2 签名安装包」见 README，与 npm `version` 不是同一套编号。
 
+## 1.4.0 — 2026-09-10
+
+**本版核心：LLM Wiki 编译层**（相对 `1.3.0`）。在既有 RAG / Knowledge Engine 之上增加可回源的百科页：入库后抽大纲、用户点击后用本机 Gemma 写综述、概念归并、对话「写入百科」。Wiki **不是**第二套检索器；原文仍是证据层。
+
+> **范围**  
+> 有可检索资料时对话默认整库（`library:all`，可含 Wiki，权重低于原文）。网页 / GitHub 入库已停用。merge/split decisions、pending-edges、sources 代理仍是**无 UI** 的实验/内部接口，不作为稳定产品能力。
+
+### Added / 新增
+
+#### LLM Wiki
+
+- 文档镜像大纲（`document_mirror` / `compile_wiki_outlines`）：切片提交后抽章节，**不跑** Gemma
+- 用户点击「写这一页」才 `compile_wiki`：本机 Gemma 输出带 `[S#]` 的综述与可回源 claims；失败保留上一成功版本并记 `wiki_compile_runs`
+- 「整理概念」（`compile_wiki_concepts`）：按标题/别名归并概念页，不占用 Gemma；真正写概念综述仍要点「写这一页」
+- 资料库与会话附件可打开大纲/综述；Chat「写入百科」只写入对准的一篇页，可撤销
+- 源更新将已有综述标 stale，**不会**自动调用 Gemma 覆盖正文；人手编辑默认不被自动覆盖
+- 检索丢掉过时综述 hit；重要结论仍应回到原文引用
+
+#### 工作区记忆
+
+- 有可检索文档时 Chat 默认使用整库，不必每条消息再选「全部资料」；可收窄到单篇或关掉
+
+### Changed / 变更
+
+- 引用协议：不再按词项重叠给未写 `[S#]` 的回答补引用（相对 [1.2.1](#121--2026-08-09) 的启发式）
+- 网页 / GitHub Connector **不再注册**为入库类型；资料库只接受本地文件
+- 界面不再把检索范围写成「已学习」；欢迎页不再把「不经过云端」说成绝对（安装模型与可选组件仍需联网）
+
+### Docs / 工程
+
+- README / README_EN / 架构 / 生产运行说明 / THIRD_PARTY_NOTICES / CONTRIBUTING 与 1.4.0 对齐
+- 迁移 `018`–`026`（wiki pages / synthesis / graph / notes / knowledge / compile runs / maturity / revisions / source unique）
+- 单测：wiki compile / graph / maturity / session / trail / store / internal-auth
+
 ## 1.3.0 — 2026-08-09
 
 **本版核心：本地 Office 摄取**（相对 `1.2.1`）。资料库与会话附件支持常见 Word / PowerPoint / Excel 等，经本机 `@firecrawl/anydoc` 转为 Markdown 再进入既有 chunk / 检索管线；**禁止** Firecrawl 云端 Parse 或任何第三方托管文档解析。

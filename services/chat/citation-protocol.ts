@@ -21,69 +21,16 @@ export const CITATION_PROMPT_RULES = `引用资料时只能使用提供的编号
 禁止写成 [S1, S2] 或 [S1、S2]。不要编造未提供的编号或文件路径。
 若某行需要标注依据，把该行用到的引用标记放在该行末尾（紧跟该行文字之后）；不要插在句中，也不要把全文所有引用都堆到整段回答最后一行。`;
 
-function groundingTerms(text: string): Set<string> {
-  const normalized = text.toLocaleLowerCase();
-  const terms = new Set(
-    normalized.match(/[a-z0-9][a-z0-9._+-]{1,}/g) ?? [],
-  );
-  for (const run of normalized.match(/[\p{Script=Han}]{2,}/gu) ?? []) {
-    for (let i = 0; i < run.length - 1; i += 1) {
-      terms.add(run.slice(i, i + 2));
-    }
-  }
-  return terms;
-}
-
-function overlapScore(left: string, rightTerms: Set<string>): number {
-  let score = 0;
-  for (const term of groundingTerms(left)) {
-    if (rightTerms.has(term)) score += 1;
-  }
-  return score;
-}
-
 /**
- * 小模型偶尔会漏写引用标记。仅当回答与某条来源存在至少两个独立词项
- * 的可证明重叠时，才把该来源补到最相关行；无可靠证据时保持不引用。
+ * 只规范化模型明确给出的合法引用。
+ * 词项重叠不能证明某个来源支持回答，因此不得据此自动补写引用。
  */
 export function groundUncitedAssistantAnswer(
   text: string,
   citations: Array<{ id: string; excerpt: string }>,
 ): { content: string; referencedIds: string[] } {
-  const canonical = canonicalizeAssistantCitations(
-    text,
-    citations.map((citation) => citation.id),
-  );
-  if (canonical.referencedIds.length > 0 || citations.length === 0) {
-    return canonical;
-  }
-
-  let bestCitation: (typeof citations)[number] | null = null;
-  let bestScore = 0;
-  for (const citation of citations) {
-    const score = overlapScore(text, groundingTerms(citation.excerpt));
-    if (score > bestScore) {
-      bestCitation = citation;
-      bestScore = score;
-    }
-  }
-  if (!bestCitation || bestScore < 2) return canonical;
-
-  const excerptTerms = groundingTerms(bestCitation.excerpt);
-  const lines = canonical.content.split("\n");
-  let bestLine = -1;
-  let bestLineScore = 0;
-  for (let index = 0; index < lines.length; index += 1) {
-    const score = overlapScore(lines[index] ?? "", excerptTerms);
-    if (score > bestLineScore) {
-      bestLine = index;
-      bestLineScore = score;
-    }
-  }
-  if (bestLine < 0 || bestLineScore < 2) return canonical;
-  lines[bestLine] = `${lines[bestLine]?.trimEnd()}[${bestCitation.id}]`;
   return canonicalizeAssistantCitations(
-    lines.join("\n"),
+    text,
     citations.map((citation) => citation.id),
   );
 }

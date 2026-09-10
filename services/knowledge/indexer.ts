@@ -22,6 +22,8 @@ import {
 } from "../../config/defaults";
 import type { ConversationFile, KnowledgeDocument } from "../types";
 import { isUsableLibraryDocument } from "./status";
+import { compileAndUpsertDocumentMirror } from "./wiki/compile-and-upsert";
+import { contextualizeChunkText } from "./retrieval/search-text";
 
 export type IndexStatus =
   | "indexed"
@@ -80,11 +82,13 @@ async function fetchDocumentChunks(
       pageNumber: number;
       position: number;
       content: string;
+      headingPath?: string[];
     }) => ({
       id: chunk.id,
       pageNumber: chunk.pageNumber,
       position: chunk.position,
       content: chunk.content,
+      headingPath: chunk.headingPath,
     }),
   );
 }
@@ -119,7 +123,9 @@ export async function indexDocumentEmbeddings(
   try {
     await setStatus(documentId, "embedding", {}, namespace);
     const vectors = await embedder.embedBatch(
-      targetChunks.map((chunk) => chunk.content),
+      targetChunks.map((chunk) =>
+        contextualizeChunkText(chunk.content, chunk.headingPath),
+      ),
     );
     const store = new SQLiteVectorStore();
     await store.insert(
@@ -448,8 +454,15 @@ export async function commitDocumentChunks(
   if (!response.ok) {
     throw new Error(result.error || "写入文档分块失败");
   }
-  if (namespace === "conversation") {
-    return result.file as ConversationFile;
-  }
-  return result.document as KnowledgeDocument;
+  const stored =
+    namespace === "conversation"
+      ? (result.file as ConversationFile)
+      : (result.document as KnowledgeDocument);
+  await compileAndUpsertDocumentMirror({
+    namespace,
+    documentId,
+    title: stored.name,
+    chunks,
+  });
+  return stored;
 }

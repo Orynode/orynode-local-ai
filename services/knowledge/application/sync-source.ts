@@ -10,10 +10,12 @@
 import { z } from "zod";
 import { ingestDocument } from "../ingest";
 import type { SourceConnector, SourcePayload } from "../ports/connectors";
-import { getConnector } from "../connectors/registry";
+import {
+  EXTERNAL_CONNECTOR_DISABLED_MESSAGE,
+  getConnector,
+  isRetiredExternalConnector,
+} from "../connectors/registry";
 import { registerBuiltinConnectors } from "../connectors/builtins";
-import { webConnectorConfigSchema } from "../connectors/web";
-import { githubConnectorConfigSchema } from "../connectors/github";
 import {
   ORYNODE_DATA_URL,
   HTTP_TIMEOUT,
@@ -34,23 +36,22 @@ export type SyncSourceResult = {
   errors: Array<{ externalId: string; error: string }>;
 };
 
-function stripSecrets(
-  type: string,
-  config: Record<string, unknown>,
-): Record<string, unknown> {
-  const copy = { ...config };
-  delete copy.token;
-  delete copy.password;
-  delete copy.secret;
-  if (type === "web") {
-    return webConnectorConfigSchema.parse(copy);
-  }
-  if (type === "github") {
-    const parsed = githubConnectorConfigSchema.parse(copy);
-    const { token: _t, ...rest } = parsed;
-    return rest;
-  }
-  return copy;
+export async function createAndSyncWebSource(_input: {
+  url: string;
+  name?: string;
+}): Promise<SyncSourceResult> {
+  throw new Error(EXTERNAL_CONNECTOR_DISABLED_MESSAGE);
+}
+
+export async function createAndSyncGitHubSource(_input: {
+  owner: string;
+  repo: string;
+  ref?: string;
+  pathPrefix?: string;
+  token?: string;
+  name?: string;
+}): Promise<SyncSourceResult> {
+  throw new Error(EXTERNAL_CONNECTOR_DISABLED_MESSAGE);
 }
 
 function connectorFor(type: string): SourceConnector {
@@ -92,44 +93,6 @@ async function ingestPayload(payload: SourcePayload) {
   });
 }
 
-export async function createAndSyncWebSource(input: {
-  url: string;
-  name?: string;
-}): Promise<SyncSourceResult> {
-  const config = webConnectorConfigSchema.parse({ url: input.url });
-  const created = await api<{ source: { id: string } }>("/sources", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      type: "web",
-      name: input.name || config.url,
-      config: stripSecrets("web", config),
-    }),
-  });
-  return syncSource(created.source.id, config);
-}
-
-export async function createAndSyncGitHubSource(input: {
-  owner: string;
-  repo: string;
-  ref?: string;
-  pathPrefix?: string;
-  token?: string;
-  name?: string;
-}): Promise<SyncSourceResult> {
-  const config = githubConnectorConfigSchema.parse(input);
-  const created = await api<{ source: { id: string } }>("/sources", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      type: "github",
-      name: input.name || `${config.owner}/${config.repo}`,
-      config: stripSecrets("github", config as unknown as Record<string, unknown>),
-    }),
-  });
-  return syncSource(created.source.id, config);
-}
-
 export async function syncSource(
   sourceId: string,
   runtimeConfig?: unknown,
@@ -142,6 +105,10 @@ export async function syncSource(
       checkpoint?: string | null;
     };
   }>(`/sources/${encodeURIComponent(sourceId)}`);
+
+  if (isRetiredExternalConnector(source.type)) {
+    throw new Error(EXTERNAL_CONNECTOR_DISABLED_MESSAGE);
+  }
 
   const connector = connectorFor(source.type);
   const config = runtimeConfig

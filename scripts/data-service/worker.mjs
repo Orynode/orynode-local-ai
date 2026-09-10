@@ -20,7 +20,20 @@ const JOB_TYPES = [
   "garbage_collect",
   "process_revision",
   "convert_office",
+  "compile_wiki",
+  "compile_wiki_outlines",
+  "compile_wiki_concepts",
 ];
+
+/** Chat 占用 Gemma 时仍可跑：大纲/概念归并不调用模型 */
+export const CHAT_SAFE_JOB_TYPES = [
+  "compile_wiki_outlines",
+  "compile_wiki_concepts",
+];
+
+export function jobTypesToClaim(deferHeavy) {
+  return deferHeavy ? CHAT_SAFE_JOB_TYPES : JOB_TYPES;
+}
 
 /**
  * @param {object} deps
@@ -40,6 +53,9 @@ export function startIndexWorker(deps) {
     runGarbageCollect = null,
     runProcessRevision = null,
     runConvertOffice = null,
+    runCompileWiki = null,
+    runCompileOutlines = null,
+    runCompileConcepts = null,
     log = console,
   } = deps;
 
@@ -271,14 +287,104 @@ export function startIndexWorker(deps) {
     }
   }
 
+  async function processCompileWikiJob(job) {
+    if (typeof runCompileWiki !== "function") {
+      throw new Error("compile_wiki handler 未注入");
+    }
+    jobs.setProgress(job.id, WORKER_ID, { phase: "loading" });
+    const heartbeat = setInterval(() => {
+      try {
+        jobs.heartbeat(job.id, WORKER_ID, LEASE_MS);
+      } catch {
+        // ignore
+      }
+    }, Math.floor(LEASE_MS / 3));
+    if (typeof heartbeat.unref === "function") heartbeat.unref();
+
+    try {
+      const result = await runCompileWiki(job.payload ?? {}, {
+        jobId: job.id,
+        onProgress: (progress) => {
+          jobs.setProgress(job.id, WORKER_ID, progress);
+          jobs.heartbeat(job.id, WORKER_ID, LEASE_MS);
+        },
+        deferIfBusy: true,
+      });
+      if (result?.deferred) {
+        jobs.defer(job.id, WORKER_ID, 3000);
+        return { deferred: true, reason: result.reason };
+      }
+      return { compileWiki: result };
+    } finally {
+      clearInterval(heartbeat);
+    }
+  }
+
+  async function processCompileWikiOutlinesJob(job) {
+    if (typeof runCompileOutlines !== "function") {
+      throw new Error("compile_wiki_outlines handler 未注入");
+    }
+    jobs.setProgress(job.id, WORKER_ID, { phase: "extracting" });
+    const heartbeat = setInterval(() => {
+      try {
+        jobs.heartbeat(job.id, WORKER_ID, LEASE_MS);
+      } catch {
+        // ignore
+      }
+    }, Math.floor(LEASE_MS / 3));
+    if (typeof heartbeat.unref === "function") heartbeat.unref();
+
+    try {
+      const result = await runCompileOutlines(job.payload ?? {}, {
+        jobId: job.id,
+        onProgress: (progress) => {
+          jobs.setProgress(job.id, WORKER_ID, progress);
+          jobs.heartbeat(job.id, WORKER_ID, LEASE_MS);
+        },
+      });
+      return { compileOutlines: result };
+    } finally {
+      clearInterval(heartbeat);
+    }
+  }
+
+  async function processCompileWikiConceptsJob(job) {
+    if (typeof runCompileConcepts !== "function") {
+      throw new Error("compile_wiki_concepts handler 未注入");
+    }
+    jobs.setProgress(job.id, WORKER_ID, { phase: "clustering" });
+    const heartbeat = setInterval(() => {
+      try {
+        jobs.heartbeat(job.id, WORKER_ID, LEASE_MS);
+      } catch {
+        // ignore
+      }
+    }, Math.floor(LEASE_MS / 3));
+    if (typeof heartbeat.unref === "function") heartbeat.unref();
+
+    try {
+      const result = await runCompileConcepts(job.payload ?? {}, {
+        jobId: job.id,
+        onProgress: (progress) => {
+          jobs.setProgress(job.id, WORKER_ID, progress);
+          jobs.heartbeat(job.id, WORKER_ID, LEASE_MS);
+        },
+      });
+      return { compileConcepts: result };
+    } finally {
+      clearInterval(heartbeat);
+    }
+  }
+
   async function tick() {
     if (stopped || tickRunning) return;
     tickRunning = true;
     try {
-      if (resources.shouldDeferHeavyWork()) {
-        return;
-      }
-      const job = jobs.claim(WORKER_ID, JOB_TYPES, LEASE_MS);
+      const job = jobs.claim(
+        WORKER_ID,
+        jobTypesToClaim(resources.shouldDeferHeavyWork()),
+        LEASE_MS,
+      );
       if (!job) return;
 
       try {
@@ -291,6 +397,12 @@ export function startIndexWorker(deps) {
           progress = await processRevisionJob(job);
         } else if (job.type === "convert_office") {
           progress = await processConvertOfficeJob(job);
+        } else if (job.type === "compile_wiki") {
+          progress = await processCompileWikiJob(job);
+        } else if (job.type === "compile_wiki_outlines") {
+          progress = await processCompileWikiOutlinesJob(job);
+        } else if (job.type === "compile_wiki_concepts") {
+          progress = await processCompileWikiConceptsJob(job);
         } else {
           progress = await processEmbedJob(job);
         }
@@ -301,7 +413,8 @@ export function startIndexWorker(deps) {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (String(message).startsWith("OCR_LEASE_BUSY") ||
-            String(message).startsWith("OFFICE_LEASE_BUSY")) {
+            String(message).startsWith("OFFICE_LEASE_BUSY") ||
+            String(message).startsWith("WIKI_LEASE_BUSY")) {
           jobs.defer(job.id, WORKER_ID, 3000);
           return;
         }

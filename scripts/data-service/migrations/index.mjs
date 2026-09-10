@@ -60,6 +60,33 @@ import {
   id as previewPathId,
   up as previewPathUp,
 } from "./017_preview_path.mjs";
+import { id as wikiPagesId, up as wikiPagesUp } from "./018_wiki_pages.mjs";
+import {
+  id as wikiSynthesisId,
+  up as wikiSynthesisUp,
+} from "./019_wiki_synthesis.mjs";
+import { id as wikiGraphId, up as wikiGraphUp } from "./020_wiki_graph.mjs";
+import { id as wikiNotesId, up as wikiNotesUp } from "./021_wiki_notes.mjs";
+import {
+  id as wikiKnowledgeId,
+  up as wikiKnowledgeUp,
+} from "./022_wiki_knowledge.mjs";
+import {
+  id as wikiCompileRunsId,
+  up as wikiCompileRunsUp,
+} from "./023_wiki_compile_runs.mjs";
+import {
+  id as wikiMaturityId,
+  up as wikiMaturityUp,
+} from "./024_wiki_maturity.mjs";
+import {
+  id as wikiRevisionsId,
+  up as wikiRevisionsUp,
+} from "./025_wiki_revisions.mjs";
+import {
+  id as wikiSourceUniqueId,
+  up as wikiSourceUniqueUp,
+} from "./026_wiki_source_unique.mjs";
 import { runMigrations } from "./runner.mjs";
 
 /** @type {import("./runner.mjs").Migration[]} */
@@ -81,6 +108,15 @@ export const MIGRATIONS = [
   { id: chunkTextLocatorsId, up: chunkTextLocatorsUp },
   { id: documentFileKindId, up: documentFileKindUp },
   { id: previewPathId, up: previewPathUp },
+  { id: wikiPagesId, up: wikiPagesUp },
+  { id: wikiSynthesisId, up: wikiSynthesisUp },
+  { id: wikiGraphId, up: wikiGraphUp },
+  { id: wikiNotesId, up: wikiNotesUp },
+  { id: wikiKnowledgeId, up: wikiKnowledgeUp },
+  { id: wikiCompileRunsId, up: wikiCompileRunsUp },
+  { id: wikiMaturityId, up: wikiMaturityUp },
+  { id: wikiRevisionsId, up: wikiRevisionsUp },
+  { id: wikiSourceUniqueId, up: wikiSourceUniqueUp },
 ];
 
 /**

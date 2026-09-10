@@ -33,6 +33,7 @@ import {
   resetAgentSpaceMemoryForTests,
   type AgentSpaceState,
 } from "./agent-space";
+import type { WikiLinkRel } from "../knowledge/wiki/wiki-graph";
 
 export type { AgentSpaceState };
 export {
@@ -203,6 +204,61 @@ export async function knowledgeRetrieve(
       conversationId: ctx.conversationId,
       knowledgeTier: tier,
     },
+    accessFrom(ctx),
+  );
+}
+
+/** knowledge.openPage — 必须在 ctx.scope 内 */
+export async function knowledgeOpenPage(
+  pageId: string,
+  ctx: KnowledgeToolContext,
+) {
+  if (!ctx?.scope || ctx.scope.mode === "none") {
+    throw new KnowledgeError("page_not_in_scope", "PAGE_NOT_IN_SCOPE");
+  }
+  const engine = createKnowledgeEngine({ knowledgeTier: "lite" });
+  return engine.openPage({ pageId, scope: ctx.scope }, accessFrom(ctx));
+}
+
+/** knowledge.listBacklinks — 必须在 ctx.scope 内 */
+export async function knowledgeListBacklinks(
+  pageId: string,
+  ctx: KnowledgeToolContext,
+) {
+  if (!ctx?.scope || ctx.scope.mode === "none") {
+    throw new KnowledgeError("page_not_in_scope", "PAGE_NOT_IN_SCOPE");
+  }
+  const engine = createKnowledgeEngine({ knowledgeTier: "lite" });
+  return engine.listBacklinks({ pageId, scope: ctx.scope }, accessFrom(ctx));
+}
+
+/** knowledge.followLink — 必须在 ctx.scope 内；最多 2 跳 */
+export async function knowledgeFollowLink(
+  pageId: string,
+  ctx: KnowledgeToolContext,
+  rel?: WikiLinkRel,
+) {
+  if (!ctx?.scope || ctx.scope.mode === "none") {
+    throw new KnowledgeError("page_not_in_scope", "PAGE_NOT_IN_SCOPE");
+  }
+  const engine = createKnowledgeEngine({ knowledgeTier: "lite" });
+  return engine.followLink(
+    { pageId, scope: ctx.scope, rel },
+    accessFrom(ctx),
+  );
+}
+
+/** knowledge.searchPages — Wiki 页搜索，仍受 Scope 约束 */
+export async function knowledgeSearchPages(
+  query: string,
+  ctx: KnowledgeToolContext,
+) {
+  if (!ctx?.scope || ctx.scope.mode === "none") {
+    return [];
+  }
+  const engine = createKnowledgeEngine({ knowledgeTier: "lite" });
+  return engine.searchPages(
+    { query, scope: ctx.scope, topK: ctx.topK },
     accessFrom(ctx),
   );
 }

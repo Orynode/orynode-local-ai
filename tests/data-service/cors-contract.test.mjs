@@ -38,3 +38,18 @@ test("CORS 契约：写方法 Origin 门禁保留（originAllowed）", () => {
   assert.ok(fn, "未找到 originAllowed 函数");
   assert.match(fn, /isAllowedOrigin/);
 });
+
+test("data-service /wiki 内部认证走 wikiInternalAuthOk（默认不强制 HMAC）", () => {
+  const src = source();
+  assert.match(src, /wikiInternalAuthOk/);
+  assert.match(src, /wiki_internal_auth/);
+});
+
+test("start-local 会换掉仍对 /wiki 强制 HMAC 的旧 data-service", () => {
+  const src = readFileSync(
+    join(process.cwd(), "scripts/start-local.mjs"),
+    "utf8",
+  );
+  assert.match(src, /wikiBlockedByHmac/);
+  assert.match(src, /wiki HMAC blocked the Web worker/);
+});

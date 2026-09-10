@@ -4,6 +4,7 @@
  */
 
 import { extractTechnicalTerms } from "../retrieval/keyword";
+import { contextualizeChunkText } from "../retrieval/search-text";
 
 export const NORMALIZER_VERSION = "ml-normalizer-v2";
 export const ANALYZER_VERSION = "fts5-multilingual-v1";
@@ -192,8 +193,11 @@ function buildExactText(normalized: string, original: string): string {
 /**
  * 从原文构造 FTS v2 多字段；不改写 content。
  */
-export function buildMultilingualFields(content: string): MultilingualFields {
-  const original = String(content ?? "");
+export function buildMultilingualFields(
+  content: string,
+  headingPath?: unknown,
+): MultilingualFields {
+  const original = contextualizeChunkText(content, headingPath);
   const normalized = nfcLower(original);
   if (!normalized) {
     return {

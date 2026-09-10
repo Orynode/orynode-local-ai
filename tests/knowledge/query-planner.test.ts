@@ -160,6 +160,12 @@ test("planQuery: 中文短复合进入 phrase，且阶梯不含任意词放宽",
   );
 });
 
+test("buildMultilingualFields: 标题栈写入派生字段", () => {
+  const fields = buildMultilingualFields("先连接电源。", ["安装"]);
+  assert.match(fields.zhText, /安装/);
+  assert.match(fields.mixedText, /安装/);
+});
+
 test("buildMultilingualFields: 简繁扩展与技术词", () => {
   const fields = buildMultilingualFields("知识引擎与 Node.js 配置");
   assert.match(fields.zhText, /知识|識/);

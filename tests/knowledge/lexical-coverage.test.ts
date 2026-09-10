@@ -73,13 +73,15 @@ test("countTermCoverage: 汉字整段与其 bigram 不双重计分", () => {
 });
 
 test("buildLexicalLadder: 被 bigram 覆盖的整段不计入 minimum 基数", () => {
-  // terms = 整段 4 字 + 3 bigram：有效基数 3 → minimum 3，等于基数 → 不生成 minimum_match
   const ladder = buildLexicalLadder({
     queryClass: "general",
     terms: ["反向代理的", "反向", "向代", "代理"],
   });
-  // 「反向代理的」bigram 为 反向/向代/代理/理的…其中「理的」不在词表 → 不被覆盖，基数 4
-  assert.ok(ladder.some((s) => s.mode === "minimum_match"));
+  // MATCH 清洗会剥掉句尾「的」，整段变为「反向代理」并被 bigram 覆盖
+  assert.equal(
+    ladder.find((s) => s.mode === "minimum_match"),
+    undefined,
+  );
 
   const ladder2 = buildLexicalLadder({
     queryClass: "general",

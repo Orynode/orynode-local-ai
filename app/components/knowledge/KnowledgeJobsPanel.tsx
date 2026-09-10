@@ -1,15 +1,38 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties,
+  type Ref,
+} from "react";
+import { createPortal } from "react-dom";
 import type { KnowledgeJob } from "../../hooks/useKnowledgeJobs";
 import {
   formatJobProgress,
   isActiveJobStatus,
   jobStatusLabel,
   jobTypeLabel,
+  wikiCompileErrorLabel,
   partitionKnowledgeJobs,
+  type KnowledgeJobsPanelTab,
 } from "../../hooks/useKnowledgeJobs";
 import { Icon } from "../ui/Icon";
+
+function subscribeClient() {
+  return () => undefined;
+}
+
+function isClientSnapshot() {
+  return true;
+}
+
+function isServerSnapshot() {
+  return false;
+}
 
 type KnowledgeJobsToggleProps = {
   open: boolean;
@@ -56,7 +79,12 @@ type KnowledgeJobsPanelProps = {
   activeCount: number;
   loading: boolean;
   error: string;
+  tab: KnowledgeJobsPanelTab;
+  onTabChange: (tab: KnowledgeJobsPanelTab) => void;
   onRefresh: () => void;
+  onRetry?: (jobId: string) => void;
+  panelRef?: Ref<HTMLDivElement>;
+  style?: CSSProperties;
 };
 
 function formatTime(iso: string): string {
@@ -78,9 +106,11 @@ function formatTime(iso: string): string {
 function JobListItems({
   jobs,
   showLiveClock,
+  onRetry,
 }: {
   jobs: KnowledgeJob[];
   showLiveClock: boolean;
+  onRetry?: (jobId: string) => void;
 }) {
   return (
     <ul className="knowledge-jobs-list">
@@ -107,14 +137,33 @@ function JobListItems({
               ) : null}
             </div>
             {job.error ? (
-              <p className="knowledge-jobs-item-error">{job.error}</p>
+              <p className="knowledge-jobs-item-error">
+                {wikiCompileErrorLabel(job.error)}
+              </p>
             ) : null}
-            <div className="knowledge-jobs-item-time">
-              {live ? "进行中" : `完成于 ${formatTime(job.updatedAt)}`}
-              {job.attempts > 1
-                ? ` · 尝试 ${job.attempts}/${job.maxAttempts}`
-                : null}
-            </div>
+            {job.status === "failed" && onRetry ? (
+              <button
+                type="button"
+                className="knowledge-scope-btn"
+                onClick={() => onRetry(job.id)}
+              >
+                重新排队
+              </button>
+            ) : null}
+            {live ? (
+              job.attempts > 1 ? (
+                <div className="knowledge-jobs-item-time">
+                  尝试 {job.attempts}/{job.maxAttempts}
+                </div>
+              ) : null
+            ) : (
+              <div className="knowledge-jobs-item-time">
+                {`完成于 ${formatTime(job.updatedAt)}`}
+                {job.attempts > 1
+                  ? ` · 尝试 ${job.attempts}/${job.maxAttempts}`
+                  : null}
+              </div>
+            )}
           </li>
         );
       })}
@@ -122,25 +171,33 @@ function JobListItems({
   );
 }
 
-/** 顶栏下拉：处理队列详情 */
 export function KnowledgeJobsPanel({
   open,
   jobs,
   activeCount,
   loading,
   error,
+  tab,
+  onTabChange,
   onRefresh,
+  onRetry,
+  panelRef,
+  style,
 }: KnowledgeJobsPanelProps) {
-  if (!open) return null;
-
   const { activeJobs, recentJobs } = partitionKnowledgeJobs(jobs);
-  const idle = activeCount <= 0 && activeJobs.length === 0;
+  const visibleJobs = tab === "active" ? activeJobs : recentJobs;
+  const activeLabelCount = Math.max(activeCount, activeJobs.length);
+
+  if (!open) return null;
 
   return (
     <div
+      ref={panelRef}
       className="knowledge-jobs-panel knowledge-jobs-popover"
+      style={style}
       aria-label="处理队列详情"
       role="dialog"
+      aria-modal="false"
     >
       <div className="knowledge-jobs-panel-head">
         <strong>处理队列</strong>
@@ -156,37 +213,71 @@ export function KnowledgeJobsPanel({
 
       {error ? <p className="knowledge-jobs-error">{error}</p> : null}
 
-      {idle ? (
-        <p className="knowledge-jobs-idle" role="status">
-          没有进行中的任务
-          {recentJobs.length > 0 ? " · 下方为最近完成记录" : ""}
-        </p>
-      ) : (
-        <p className="knowledge-jobs-busy" role="status">
-          进行中 {Math.max(activeCount, activeJobs.length)} 项
-        </p>
-      )}
-
-      {activeJobs.length > 0 ? (
-        <section className="knowledge-jobs-section" aria-label="进行中">
-          <h3 className="knowledge-jobs-section-title">进行中</h3>
-          <JobListItems jobs={activeJobs} showLiveClock />
-        </section>
-      ) : null}
-
-      {recentJobs.length > 0 ? (
-        <section
-          className="knowledge-jobs-section knowledge-jobs-section-recent"
-          aria-label="最近完成"
+      <div className="knowledge-jobs-tabs" role="tablist" aria-label="任务分组">
+        <button
+          type="button"
+          role="tab"
+          id="knowledge-jobs-tab-active"
+          aria-selected={tab === "active"}
+          aria-controls="knowledge-jobs-panel-body"
+          className={
+            tab === "active"
+              ? "knowledge-jobs-tab knowledge-jobs-tab-active"
+              : "knowledge-jobs-tab"
+          }
+          onClick={() => onTabChange("active")}
         >
-          <h3 className="knowledge-jobs-section-title">最近完成</h3>
-          <JobListItems jobs={recentJobs} showLiveClock={false} />
-        </section>
-      ) : null}
+          进行中
+          <span className="knowledge-jobs-tab-count">{activeLabelCount}</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          id="knowledge-jobs-tab-recent"
+          aria-selected={tab === "recent"}
+          aria-controls="knowledge-jobs-panel-body"
+          className={
+            tab === "recent"
+              ? "knowledge-jobs-tab knowledge-jobs-tab-active"
+              : "knowledge-jobs-tab"
+          }
+          onClick={() => onTabChange("recent")}
+        >
+          最近完成
+          <span className="knowledge-jobs-tab-count">{recentJobs.length}</span>
+        </button>
+      </div>
 
-      {jobs.length === 0 && !error ? (
-        <p className="knowledge-jobs-empty">暂无任务记录</p>
-      ) : null}
+      <div
+        className={
+          tab === "recent"
+            ? "knowledge-jobs-body knowledge-jobs-body-recent"
+            : "knowledge-jobs-body"
+        }
+        id="knowledge-jobs-panel-body"
+        role="tabpanel"
+        aria-labelledby={
+          tab === "active"
+            ? "knowledge-jobs-tab-active"
+            : "knowledge-jobs-tab-recent"
+        }
+      >
+        {visibleJobs.length > 0 ? (
+          <JobListItems
+            jobs={visibleJobs}
+            showLiveClock={tab === "active"}
+            onRetry={onRetry}
+          />
+        ) : error ? null : (
+          <p className="knowledge-jobs-empty">
+            {jobs.length === 0
+              ? "暂无任务记录"
+              : tab === "active"
+                ? "没有进行中的任务"
+                : "暂无完成记录"}
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -197,41 +288,99 @@ type KnowledgeJobsMenuProps = {
   activeCount: number;
   loading: boolean;
   error: string;
+  tab: KnowledgeJobsPanelTab;
+  onTabChange: (tab: KnowledgeJobsPanelTab) => void;
   onToggle: () => void;
   onClose: () => void;
   onRefresh: () => void;
+  onRetry?: (jobId: string) => void;
 };
 
-/** 顶栏菜单：点击外侧 / Esc 关闭 */
+/** 顶栏菜单：Portal 到 overlay-root，避免被大纲等 modal 挡住 */
 export function KnowledgeJobsMenu({
   open,
   jobs,
   activeCount,
   loading,
   error,
+  tab,
+  onTabChange,
   onToggle,
   onClose,
   onRefresh,
+  onRetry,
 }: KnowledgeJobsMenuProps) {
   const rootRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [panelPos, setPanelPos] = useState<{ top: number; right: number } | null>(
+    null,
+  );
+  const isClient = useSyncExternalStore(
+    subscribeClient,
+    isClientSnapshot,
+    isServerSnapshot,
+  );
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPanelPos(null);
+      return;
+    }
+    function place() {
+      const anchor = rootRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      setPanelPos({
+        top: Math.round(rect.bottom + 8),
+        right: Math.round(window.innerWidth - rect.right),
+      });
+    }
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
     function onPointerDown(event: MouseEvent) {
-      if (!rootRef.current?.contains(event.target as Node)) {
-        onClose();
-      }
+      const target = event.target as Node;
+      if (rootRef.current?.contains(target)) return;
+      if (panelRef.current?.contains(target)) return;
+      onClose();
     }
     function onKey(event: KeyboardEvent) {
-      if (event.key === "Escape") onClose();
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
     }
     document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey, true);
     return () => {
       document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("keydown", onKey, true);
     };
   }, [open, onClose]);
+
+  const panel =
+    open && isClient && panelPos
+      ? createPortal(
+          <KnowledgeJobsPanel
+            open
+            jobs={jobs}
+            activeCount={activeCount}
+            loading={loading}
+            error={error}
+            tab={tab}
+            onTabChange={onTabChange}
+            onRefresh={onRefresh}
+            onRetry={onRetry}
+            panelRef={panelRef}
+            style={{ top: panelPos.top, right: panelPos.right }}
+          />,
+          document.getElementById("overlay-root") ?? document.body,
+        )
+      : null;
 
   return (
     <div className="knowledge-jobs-topbar" ref={rootRef}>
@@ -240,14 +389,7 @@ export function KnowledgeJobsMenu({
         activeCount={activeCount}
         onToggle={onToggle}
       />
-      <KnowledgeJobsPanel
-        open={open}
-        jobs={jobs}
-        activeCount={activeCount}
-        loading={loading}
-        error={error}
-        onRefresh={onRefresh}
-      />
+      {panel}
     </div>
   );
 }

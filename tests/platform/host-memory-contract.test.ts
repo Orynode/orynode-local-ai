@@ -86,6 +86,20 @@ test("host-memory: pressure 合成", () => {
     "critical",
   );
   assert.equal(
+    resolveMemoryPressure({
+      hostClass: "low",
+      heavyKind: "wiki_compile",
+    }),
+    "critical",
+  );
+  assert.equal(
+    fromScripts.resolveMemoryPressure({
+      hostClass: "medium",
+      heavyKind: "wiki_compile",
+    }),
+    "critical",
+  );
+  assert.equal(
     fromScripts.resolveMemoryPressure({
       hostClass: "medium",
       heavyKind: "office_convert",

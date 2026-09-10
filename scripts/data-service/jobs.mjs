@@ -4,6 +4,60 @@
 
 import { randomUUID } from "node:crypto";
 
+export const WIKI_JOB_TYPES = [
+  "compile_wiki",
+  "compile_wiki_outlines",
+  "compile_wiki_concepts",
+];
+
+export const WIKI_JOB_COOLDOWN_MS = 12_000;
+
+export function isWikiJobType(type) {
+  return WIKI_JOB_TYPES.includes(String(type || ""));
+}
+
+/**
+ * force 只升不降：重新生成不得被旧的 force:false payload 吃掉。
+ * @param {Record<string, unknown> | null | undefined} current
+ * @param {Record<string, unknown> | null | undefined} incoming
+ */
+export function mergeWikiJobPayload(current, incoming) {
+  const cur = current && typeof current === "object" ? current : {};
+  const next = incoming && typeof incoming === "object" ? incoming : {};
+  return {
+    ...cur,
+    ...next,
+    force: Boolean(cur.force) || Boolean(next.force),
+  };
+}
+
+/**
+ * @param {{ status?: string, payload?: unknown, updatedAt?: string } | null | undefined} existingJob
+ * @param {Record<string, unknown> | null | undefined} incomingPayload
+ * @param {number} [now]
+ */
+export function resolveWikiJobEnqueue(existingJob, incomingPayload, now = Date.now()) {
+  if (!existingJob) return { action: "create" };
+  const status = String(existingJob.status || "");
+  const payload = mergeWikiJobPayload(
+    existingJob.payload && typeof existingJob.payload === "object"
+      ? existingJob.payload
+      : {},
+    incomingPayload,
+  );
+  if (["succeeded", "failed", "cancelled"].includes(status)) {
+    const updatedMs = Date.parse(String(existingJob.updatedAt || "")) || 0;
+    if (updatedMs && now - updatedMs < WIKI_JOB_COOLDOWN_MS) {
+      return { action: "cooldown" };
+    }
+    return { action: "requeue", payload };
+  }
+  if (["queued", "running", "retry_wait"].includes(status)) {
+    return { action: "inflight", payload };
+  }
+  return { action: "create" };
+}
+
 /**
  * @param {import("node:sqlite").DatabaseSync} database
  */

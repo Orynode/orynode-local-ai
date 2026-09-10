@@ -14,7 +14,9 @@ export type KnowledgeErrorCode =
   | "index_backend_unavailable"
   | "export_failed"
   | "import_failed"
-  | "index_not_ready";
+  | "index_not_ready"
+  | "page_not_in_scope"
+  | "page_not_found";
 
 export class KnowledgeError extends Error {
   readonly code: KnowledgeErrorCode;

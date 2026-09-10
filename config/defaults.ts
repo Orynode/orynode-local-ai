@@ -75,6 +75,13 @@ export const CHUNK_CONFIG = {
  */
 export const SEARCH_CONFIG = {
   topK: 8,
+  /**
+   * 召回宽度：FTS/hybrid 先拿这么多，再词法 rerank 压到 topK。
+   * 对齐生产「宽召回再重排」，不加大 embedding。
+   */
+  recallK: 32,
+  /** FTS 候选硬顶，避免 recallK 把 MATCH LIMIT 放大 */
+  ftsCandidateK: 64,
   maxSearchTerms: 40,
   /** Quality 档：规则多查询变体上限（不含原句） */
   multiQueryVariants: 2,

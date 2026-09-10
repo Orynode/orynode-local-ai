@@ -11,6 +11,7 @@ import { OCR_CONFIG } from "../../../config/defaults";
 import type { OcrEngine } from "../../platform/types";
 import type { RenderedPageImage } from "./pdf-render";
 import { resolveKnowledgeFileKind } from "../formats";
+import { compileAndUpsertDocumentMirror } from "../wiki/compile-and-upsert";
 
 export type ChunkBlockRef = {
   blockId: string;
@@ -169,6 +170,8 @@ export type ProcessRevisionJobContext = {
     originalName?: string | null;
   } | null;
   ocrMode?: string;
+  /** 单测注入，避免默认 persist 打到正在跑的本机 data-service */
+  compileMirror?: typeof compileAndUpsertDocumentMirror;
 };
 
 function isRelatedBlock(content: string, blockText: string): boolean {
@@ -267,6 +270,7 @@ export async function runProcessRevisionJob(ctx: ProcessRevisionJobContext) {
     documentBlocks,
     getDocumentMeta,
     ocrMode = "auto",
+    compileMirror = compileAndUpsertDocumentMirror,
   } = ctx;
 
   const namespace =
@@ -618,6 +622,13 @@ export async function runProcessRevisionJob(ctx: ProcessRevisionJobContext) {
         chunkLocators,
       },
     );
+
+    await compileMirror({
+      namespace,
+      documentId,
+      title: String(meta.name || meta.originalName || documentId),
+      chunks,
+    });
 
     await setDocumentStatus(namespace, documentId, "ready", {
       errorMessage: ocrTruncated

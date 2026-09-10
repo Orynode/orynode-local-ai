@@ -23,7 +23,7 @@ export function WelcomeScreen({ connected, onSuggestionClick }: WelcomeScreenPro
         只在你的Mac上思考。
       </h1>
       <p>
-        开源、本地优先的 Mac 助手。对话与资料问答都在本机完成，不经过云端，也无需账号。
+        开源、本地优先的 Mac 助手。推理、会话和资料检索默认在本机完成，无需账号。安装模型或开启可选组件时需要联网。
       </p>
       <div className="suggestions">
         {suggestions.map((s) => (

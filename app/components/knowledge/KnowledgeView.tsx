@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { KnowledgeDocument, MessageAttachment } from "../../../services/types";
 import type { RetrievalHit } from "../../../services/knowledge/types";
 import type {
@@ -20,6 +20,12 @@ import { useDocumentPreview } from "../../lib/document-preview";
 import { Icon } from "../ui/Icon";
 import { ModalShell } from "../ui/ModalShell";
 import { DocumentCard } from "./DocumentCard";
+import type { WikiOutlinePage } from "./WikiOutlineDialog";
+import type { WikiPageSession } from "../../hooks/useWikiPageSession";
+import {
+  isActiveJobStatus,
+  type KnowledgeJob,
+} from "../../hooks/useKnowledgeJobs";
 import {
   summarizeDegradedReasons,
 } from "../../../services/knowledge/retrieval/degraded-labels";
@@ -52,18 +58,14 @@ interface KnowledgeViewProps {
    * 导入一或多个文件。单文件时可传 displayName；多文件一律用各自文件名。
    */
   onImport: (files: File[], options?: { displayName?: string }) => void;
-  onImportWeb: (url: string) => void;
-  onImportGitHub: (input: {
-    owner: string;
-    repo: string;
-    ref?: string;
-    pathPrefix?: string;
-    token?: string;
-  }) => void;
   /** 将选中资料写入新对话的本轮草稿，并切到助手 */
   onAttachToChat: (attachments: MessageAttachment[]) => void;
   /** 顶栏处理中心角标用的进行中任务数（页眉进度文案） */
   jobsActiveCount?: number;
+  jobs?: KnowledgeJob[];
+  wiki: WikiPageSession;
+  onCompileOutlines?: () => Promise<void> | void;
+  onCompileConcepts?: () => Promise<void> | void;
 }
 
 /**
@@ -83,10 +85,12 @@ export function KnowledgeView({
   onReindexAll,
   onRename,
   onImport,
-  onImportWeb,
-  onImportGitHub,
   onAttachToChat,
   jobsActiveCount = 0,
+  jobs = [],
+  wiki,
+  onCompileOutlines,
+  onCompileConcepts,
 }: KnowledgeViewProps) {
   const { openPreview } = useDocumentPreview();
   const fileInput = useRef<HTMLInputElement>(null);
@@ -98,15 +102,6 @@ export function KnowledgeView({
   const [page, setPage] = useState(1);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [displayName, setDisplayName] = useState("");
-  const [connectorMode, setConnectorMode] = useState<"web" | "github" | null>(
-    null,
-  );
-  const [webUrl, setWebUrl] = useState("");
-  const [ghOwner, setGhOwner] = useState("");
-  const [ghRepo, setGhRepo] = useState("");
-  const [ghRef, setGhRef] = useState("HEAD");
-  const [ghPrefix, setGhPrefix] = useState("");
-  const [ghToken, setGhToken] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   /** 最近一次成功检索用的 query，高亮与输入框解耦，避免改字未重搜时错位 */
   const [activeSearchQuery, setActiveSearchQuery] = useState("");
@@ -115,6 +110,17 @@ export function KnowledgeView({
   const [searchPage, setSearchPage] = useState(1);
   const [searchHits, setSearchHits] = useState<RetrievalHit[]>([]);
   const [searchDiag, setSearchDiag] = useState<string>("");
+  const [conceptPages, setConceptPages] = useState<WikiOutlinePage[]>([]);
+  const wikiOutlinesWasActive = useRef(false);
+  const wikiConceptsWasActive = useRef(false);
+  const wikiOutlinesCompiling = jobs.some(
+    (job) =>
+      job.type === "compile_wiki_outlines" && isActiveJobStatus(job.status),
+  );
+  const wikiConceptsCompiling = jobs.some(
+    (job) =>
+      job.type === "compile_wiki_concepts" && isActiveJobStatus(job.status),
+  );
 
   const semanticOn = meta?.semanticSearchEnabled === true;
   const documentViews = useMemo(
@@ -139,7 +145,8 @@ export function KnowledgeView({
     () => documentViews.filter(({ view }) => view.canAttach).map(({ document }) => document),
     [documentViews],
   );
-  const feedback = error || notice;
+  const wikiListError = !wiki.visible && wiki.error ? wiki.error : "";
+  const feedback = error || wikiListError || notice;
   const hasSelection = pickedIds.length > 0;
   const allUsableSelected =
     usableDocuments.length > 0 &&
@@ -190,6 +197,74 @@ export function KnowledgeView({
       unavailableCount > 0 ? ` · ${unavailableCount} 篇无法检索` : ""
     }`;
   })();
+
+  async function loadConcepts() {
+    try {
+      const response = await fetch("/api/knowledge/wiki?kind=concept&limit=80", {
+        cache: "no-store",
+      });
+      if (!response.ok) return;
+      const body = (await response.json()) as { pages?: WikiOutlinePage[] };
+      setConceptPages(body.pages ?? []);
+    } catch {
+      setConceptPages([]);
+    }
+  }
+
+  useEffect(() => {
+    void loadConcepts();
+  }, [documents.length]);
+
+  useEffect(() => {
+    if (wikiOutlinesCompiling) {
+      wikiOutlinesWasActive.current = true;
+      return;
+    }
+    if (wikiOutlinesWasActive.current) {
+      wikiOutlinesWasActive.current = false;
+      const libraryDocument = wiki.libraryDocument;
+      if (libraryDocument) {
+        void wiki.openLibraryDocument(libraryDocument);
+      }
+    }
+  // 只响应 outlines 任务边沿；session 对象每轮新建。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wikiOutlinesCompiling, wiki.libraryDocument, wiki.openLibraryDocument]);
+
+  useEffect(() => {
+    if (wikiConceptsCompiling) {
+      wikiConceptsWasActive.current = true;
+      return;
+    }
+    if (wikiConceptsWasActive.current) {
+      wikiConceptsWasActive.current = false;
+      void loadConcepts();
+    }
+  }, [wikiConceptsCompiling]);
+
+  async function generateOutlines() {
+    if (!onCompileOutlines) return;
+    wiki.reportError("");
+    try {
+      await onCompileOutlines();
+    } catch (caught) {
+      wiki.reportError(
+        caught instanceof Error ? caught.message : "无法开始重抽大纲",
+      );
+    }
+  }
+
+  async function generateConcepts() {
+    if (!onCompileConcepts) return;
+    wiki.reportError("");
+    try {
+      await onCompileConcepts();
+    } catch (caught) {
+      wiki.reportError(
+        caught instanceof Error ? caught.message : "无法开始整理概念",
+      );
+    }
+  }
 
   function togglePick(id: string) {
     setPickedIds((prev) =>
@@ -321,7 +396,7 @@ export function KnowledgeView({
           <span className="local-badge">LOCAL DOCS</span>
           <h1>本地资料库</h1>
           <p>
-            按文件内容去重（与显示名无关）；点选后「去对话」会新开对话并写入本轮草稿，发送后不会自动带到下一轮。
+            导入后对话会默认用整库（含 Wiki）回答，不必再选「全部资料」。点选再「去对话」只是收窄到这些篇。
           </p>
           <p className="knowledge-meta-line">{metaLine}</p>
         </div>
@@ -355,6 +430,36 @@ export function KnowledgeView({
                   {reindexing ? "索引中…" : "重建索引"}
                 </button>
               )}
+              {onCompileOutlines && documents.length > 0 ? (
+                <button
+                  className="knowledge-scope-btn"
+                  type="button"
+                  disabled={
+                    wikiOutlinesCompiling ||
+                    wikiConceptsCompiling ||
+                    uploading
+                  }
+                  onClick={() => void generateOutlines()}
+                  title="从现有切片重抽各篇大纲，不占用 Gemma，也不重建向量"
+                >
+                  {wikiOutlinesCompiling ? "正在重抽大纲…" : "重抽全部大纲"}
+                </button>
+              ) : null}
+              {onCompileConcepts && documents.length > 0 ? (
+                <button
+                  className="knowledge-scope-btn"
+                  type="button"
+                  disabled={
+                    wikiConceptsCompiling ||
+                    wikiOutlinesCompiling ||
+                    uploading
+                  }
+                  onClick={() => void generateConcepts()}
+                  title="从资料标题归并百科条目，不占用 Gemma，也不生成综述"
+                >
+                  {wikiConceptsCompiling ? "正在整理概念…" : "整理概念"}
+                </button>
+              ) : null}
             </>
           )}
           <button
@@ -368,22 +473,6 @@ export function KnowledgeView({
                 ? `导入中 ${uploadState.batchIndex}/${uploadState.batchTotal}`
                 : "正在解析..."
               : "导入资料"}
-          </button>
-          <button
-            className="knowledge-scope-btn"
-            type="button"
-            disabled={uploading}
-            onClick={() => setConnectorMode("web")}
-          >
-            网页 URL
-          </button>
-          <button
-            className="knowledge-scope-btn"
-            type="button"
-            disabled={uploading}
-            onClick={() => setConnectorMode("github")}
-          >
-            GitHub
           </button>
         </div>
         <input
@@ -410,8 +499,8 @@ export function KnowledgeView({
 
       {feedback ? (
         <p
-          className={`knowledge-feedback ${error ? "is-error" : ""}`}
-          role="status"
+          className={`knowledge-feedback ${error || wikiListError ? "is-error" : ""}`}
+          role={error || wikiListError ? "alert" : "status"}
         >
           {feedback}
         </p>
@@ -465,7 +554,7 @@ export function KnowledgeView({
                 void runSearch();
               }
             }}
-            placeholder="检索预览（与 Agent 同一 Search API；对话问答走 Retrieve）"
+            placeholder="检索预览（工作台 Search；对话问答走 Retrieve）"
             aria-label="资料库检索预览"
           />
           <button
@@ -492,6 +581,28 @@ export function KnowledgeView({
         <p className="knowledge-meta-line" role="status">
           {searchDiag}
         </p>
+      ) : null}
+
+      {conceptPages.length > 0 ? (
+        <div className="knowledge-wiki-concepts">
+          <h2>百科</h2>
+          <p className="knowledge-wiki-note">点开一页看正文和出处。</p>
+          <ul>
+            {conceptPages.map((page) => (
+              <li key={page.id || page.title}>
+                <button
+                  type="button"
+                  className="knowledge-wiki-concept"
+                  onClick={() => {
+                    if (page.id) void wiki.openPageById(page.id, "open");
+                  }}
+                >
+                  {page.title}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       ) : null}
 
       {searchHits.length > 0 ? (
@@ -610,6 +721,9 @@ export function KnowledgeView({
                     page: 1,
                   });
                 }}
+                onOpenWiki={(document) => {
+                  void wiki.openLibraryDocument(document);
+                }}
               />
             ))}
           </div>
@@ -712,121 +826,6 @@ export function KnowledgeView({
                 {pendingFiles.length === 1
                   ? "确认导入"
                   : `确认导入 ${pendingFiles.length} 个`}
-              </button>
-            </div>
-          </div>
-        </ModalShell>
-      ) : null}
-
-      {connectorMode ? (
-        <ModalShell open onClose={() => setConnectorMode(null)}>
-          <div
-            className="knowledge-import-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="connector-import-title"
-          >
-            <h2 id="connector-import-title">
-              {connectorMode === "web" ? "导入网页" : "同步 GitHub 仓库"}
-            </h2>
-            {connectorMode === "web" ? (
-              <label className="knowledge-import-label">
-                网页 URL
-                <input
-                  type="url"
-                  value={webUrl}
-                  onChange={(event) => setWebUrl(event.target.value)}
-                  placeholder="https://example.com/docs"
-                />
-              </label>
-            ) : (
-              <>
-                <label className="knowledge-import-label">
-                  Owner
-                  <input
-                    type="text"
-                    value={ghOwner}
-                    onChange={(event) => setGhOwner(event.target.value)}
-                    placeholder="Orynode"
-                  />
-                </label>
-                <label className="knowledge-import-label">
-                  Repo
-                  <input
-                    type="text"
-                    value={ghRepo}
-                    onChange={(event) => setGhRepo(event.target.value)}
-                    placeholder="orynode-local-ai"
-                  />
-                </label>
-                <label className="knowledge-import-label">
-                  Ref（分支/标签/commit）
-                  <input
-                    type="text"
-                    value={ghRef}
-                    onChange={(event) => setGhRef(event.target.value)}
-                    placeholder="HEAD"
-                  />
-                </label>
-                <label className="knowledge-import-label">
-                  路径前缀（可选）
-                  <input
-                    type="text"
-                    value={ghPrefix}
-                    onChange={(event) => setGhPrefix(event.target.value)}
-                    placeholder="docs"
-                  />
-                </label>
-                <label className="knowledge-import-label">
-                  Token（可选，不入库；也可设 ORYNODE_GITHUB_TOKEN）
-                  <input
-                    type="password"
-                    value={ghToken}
-                    onChange={(event) => setGhToken(event.target.value)}
-                    placeholder="ghp_…"
-                    autoComplete="off"
-                  />
-                </label>
-              </>
-            )}
-            <p className="knowledge-import-hint">
-              {connectorMode === "web"
-                ? "仅抓取正文，禁止脚本；私网/本地地址会被拒绝。"
-                : "文本文件进入统一资料管线；远端删除会标记 tombstone，默认不删本地文档。"}
-            </p>
-            <div className="knowledge-import-actions">
-              <button
-                type="button"
-                className="knowledge-scope-btn"
-                onClick={() => setConnectorMode(null)}
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                className="knowledge-upload"
-                disabled={uploading}
-                onClick={() => {
-                  if (connectorMode === "web") {
-                    if (!webUrl.trim()) return;
-                    onImportWeb(webUrl.trim());
-                    setConnectorMode(null);
-                    setWebUrl("");
-                    return;
-                  }
-                  if (!ghOwner.trim() || !ghRepo.trim()) return;
-                  onImportGitHub({
-                    owner: ghOwner.trim(),
-                    repo: ghRepo.trim(),
-                    ref: ghRef.trim() || "HEAD",
-                    pathPrefix: ghPrefix.trim() || undefined,
-                    token: ghToken.trim() || undefined,
-                  });
-                  setConnectorMode(null);
-                  setGhToken("");
-                }}
-              >
-                开始同步
               </button>
             </div>
           </div>

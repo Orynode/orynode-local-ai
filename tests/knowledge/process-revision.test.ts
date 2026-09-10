@@ -210,6 +210,7 @@ test("process_revision: Fake OCR 完成且成功后才 activate", async () => {
       processingBuilds: builds,
       documentBlocks: blocks,
       getDocumentMeta: () => ({ storedPath: pdfPath, contentHash: "h1" }),
+      compileMirror: async () => null,
     });
 
     assert.equal(activatedBeforeCommit, false);
@@ -328,6 +329,7 @@ test("process_revision: 失败保留 checkpoint，续跑跳过已完成页", asy
     processingBuilds: builds,
     documentBlocks: blocks,
     getDocumentMeta: () => ({ storedPath: pdfPath, contentHash: "h2" }),
+    compileMirror: async () => null,
   };
 
   await assert.rejects(() => runProcessRevisionJob(baseCtx), /OCR_TIMEOUT/);
@@ -446,6 +448,7 @@ test("process_revision: ocrMode=disabled 且 needsOcr 时整体 OCR_DISABLED", a
         processingBuilds: builds,
         documentBlocks: blocks,
         getDocumentMeta: () => ({ storedPath: pdfPath, contentHash: "hd" }),
+        compileMirror: async () => null,
       }),
     /OCR_DISABLED/,
   );

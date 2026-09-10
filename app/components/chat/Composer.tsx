@@ -14,11 +14,12 @@ import {
   knowledgeFileAccept,
 } from "../../../services/knowledge/formats";
 import {
-  allDocumentsAttachment,
-  isLibraryAll,
+  conversationFileAttachments,
+  dropPinnedDocument,
   removeDraftAttachment,
   toggleDraftConversationFile,
-  toggleDraftDocument,
+  togglePinnedDocument,
+  type LibraryGrounding,
 } from "../../lib/attachments";
 import { isUsableLibraryDocument } from "../../../services/knowledge/status";
 
@@ -72,11 +73,15 @@ interface ComposerProps {
   onInputChange: (value: string) => void;
   onSubmit: (hot?: HotSettings) => void;
   sending: boolean;
+  connected: boolean | null;
+  onOpenSettings: () => void;
   onStop: () => void;
   documents: KnowledgeDocument[];
   conversationFiles: ConversationFile[];
   draftAttachments: MessageAttachment[];
   onDraftAttachmentsChange: (next: MessageAttachment[]) => void;
+  libraryGrounding: LibraryGrounding;
+  onLibraryGroundingChange: (next: LibraryGrounding) => void;
   uploading: boolean;
   uploadState?: KnowledgeUploadState | null;
   /** 上传为本对话附件并自动选中 */
@@ -87,6 +92,8 @@ interface ComposerProps {
   onRemoveConversationFile?: (fileId: string) => void;
   /** 重建本会话附件向量 */
   onReindexConversationFile?: (fileId: string) => void;
+  /** 打开本会话附件大纲页 */
+  onOpenConversationWiki?: (file: ConversationFile) => void;
   hotSettings: HotSettings;
   onPatchHotSettings: (
     patch: Partial<HotSettings>,
@@ -98,17 +105,22 @@ export function Composer({
   onInputChange,
   onSubmit,
   sending,
+  connected,
+  onOpenSettings,
   onStop,
   documents,
   conversationFiles,
   draftAttachments,
   onDraftAttachmentsChange,
+  libraryGrounding,
+  onLibraryGroundingChange,
   uploading,
   uploadState = null,
   onAttachFileSelect,
   officeConverter = null,
   onRemoveConversationFile,
   onReindexConversationFile,
+  onOpenConversationWiki,
   hotSettings,
   onPatchHotSettings,
 }: ComposerProps) {
@@ -247,7 +259,7 @@ export function Composer({
 
   async function handleSubmit(event?: React.FormEvent) {
     event?.preventDefault();
-    if (!input.trim() || sending) return;
+    if (!input.trim() || sending || connected === false) return;
     setPanel("closed");
     // 用当前 draft 发送，同时落盘；避免防抖/React state 滞后用到旧热参
     if (saveTimer.current) {
@@ -263,22 +275,24 @@ export function Composer({
     fileInput.current?.click();
   }
 
-  const pendingAttachments = uploadState ? [] : draftAttachments;
-  const useAllDocuments = draftAttachments.some(isLibraryAll);
-  // 单篇选择仅列出可检索文档；「全部资料」仍用 library_all（FTS 会过滤不可用篇）
+  const fileAttachments = conversationFileAttachments(draftAttachments);
   const usableLibraryDocuments = documents.filter(isUsableLibraryDocument);
-  const selectedLibraryIds = draftAttachments
-    .filter((item) => item.kind === "library")
-    .map((item) => item.id);
-  const selectedFileIds = draftAttachments
-    .filter((item) => item.kind === "conversation_file")
-    .map((item) => item.id);
+  const selectedLibraryIds =
+    libraryGrounding.mode === "pins" ? libraryGrounding.documentIds : [];
+  const selectedFileIds = fileAttachments.map((item) => item.id);
+  const workspaceOn =
+    libraryGrounding.mode === "workspace" && usableLibraryDocuments.length > 0;
   const plusActive =
     panel === "actions" ||
     panel === "library" ||
-    pendingAttachments.length > 0 ||
+    fileAttachments.length > 0 ||
+    libraryGrounding.mode === "pins" ||
     Boolean(uploadState);
   const styleLabel = presetLabel(draft);
+  const pinnedDocuments = usableLibraryDocuments.filter((doc) =>
+    selectedLibraryIds.includes(doc.id),
+  );
+  const showGroundingBar = !uploadState && (workspaceOn || pinnedDocuments.length > 0 || fileAttachments.length > 0);
 
   return (
     <div className="composer-wrap">
@@ -318,26 +332,70 @@ export function Composer({
             </small>
           </span>
         </div>
-      ) : pendingAttachments.length > 0 ? (
-        <div className="composer-attachments" aria-label="下次发送附带的资料">
-          {pendingAttachments.map((item) => (
-            <div key={`${item.kind}:${item.id}`} className="composer-attachment">
+      ) : showGroundingBar ? (
+        <div className="composer-attachments" aria-label="资料范围">
+          {workspaceOn ? (
+            <button
+              type="button"
+              className="composer-grounding"
+              onClick={() => openSourcePicker()}
+              title="资料库默认用于回答。点此可收窄到单篇，或关掉。"
+            >
               <span className="composer-attachment-icon" aria-hidden>
-                <Icon
-                  name={item.kind === "library_all" ? "database" : "attach"}
-                />
+                <Icon name="database" />
               </span>
               <span className="composer-attachment-name">
-                {item.kind === "library_all"
-                  ? usableLibraryDocuments.length > 0
-                    ? `全部资料（可检索 ${usableLibraryDocuments.length}）`
-                    : "全部资料"
-                  : item.kind === "conversation_file"
-                    ? `${item.name}（本对话）`
-                    : item.name}
+                可用资料库 · {usableLibraryDocuments.length} 篇
               </span>
+            </button>
+          ) : null}
+          {pinnedDocuments.map((doc) => (
+            <div key={`library:${doc.id}`} className="composer-attachment">
+              <span className="composer-attachment-icon" aria-hidden>
+                <Icon name="attach" />
+              </span>
+              <span className="composer-attachment-name">{doc.name}</span>
               <button
                 type="button"
+                className="composer-attachment-remove"
+                onClick={() =>
+                  onLibraryGroundingChange(
+                    dropPinnedDocument(libraryGrounding, doc.id),
+                  )
+                }
+                aria-label={`取消收窄 ${doc.name}`}
+              >
+                <Icon name="close" />
+              </button>
+            </div>
+          ))}
+          {fileAttachments.map((item) => (
+            <div key={`${item.kind}:${item.id}`} className="composer-attachment">
+              <span className="composer-attachment-icon" aria-hidden>
+                <Icon name="attach" />
+              </span>
+              <span className="composer-attachment-name">
+                {`${item.name}（本对话）`}
+              </span>
+              {onOpenConversationWiki ? (
+                <button
+                  type="button"
+                  className="composer-attachment-wiki"
+                  onClick={() => {
+                    const file = conversationFiles.find(
+                      (entry) => entry.id === item.id,
+                    );
+                    if (file) onOpenConversationWiki(file);
+                  }}
+                  aria-label={`打开大纲 ${item.name}`}
+                  title="打开大纲页；综述需要你点一下才会用模型生成"
+                >
+                  大纲
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="composer-attachment-remove"
                 onClick={() =>
                   onDraftAttachmentsChange(
                     removeDraftAttachment(draftAttachments, item.id),
@@ -366,7 +424,7 @@ export function Composer({
               </span>
               <span className="composer-action-copy">
                 <strong>上传文件</strong>
-                <small>附到本对话，并用于下一条消息</small>
+                <small>附到本对话，只用于这些会话</small>
               </span>
             </button>
             <button
@@ -378,21 +436,24 @@ export function Composer({
                 <Icon name="database" />
               </span>
               <span className="composer-action-copy">
-                <strong>选择资料</strong>
-                <small>本对话附件或资料库，仅作用于下次发送</small>
+                <strong>资料范围</strong>
+                <small>默认检索整库；可收窄到单篇，或关掉</small>
               </span>
             </button>
           </div>
         ) : null}
 
         {panel === "library" ? (
-          <div className="composer-picker" role="dialog" aria-label="选择本条消息的检索资料">
+          <div className="composer-picker" role="dialog" aria-label="资料范围">
             <div className="composer-picker-head">
-              <strong>选择资料</strong>
+              <strong>资料范围</strong>
               <button type="button" onClick={() => setPanel("closed")}>
                 完成
               </button>
             </div>
+            <p className="composer-picker-empty">
+              资料库默认会用于回答，不必每条消息再选。勾选单篇只是收窄；寒暄不会翻资料。
+            </p>
             {conversationFiles.length > 0 ? (
               <>
                 <p className="composer-picker-section">本对话附件</p>
@@ -432,6 +493,17 @@ export function Composer({
                           </small>
                         </button>
                         <div className="composer-picker-row-actions">
+                          {onOpenConversationWiki ? (
+                            <button
+                              type="button"
+                              className="composer-picker-icon-btn"
+                              title="打开大纲页"
+                              aria-label={`打开大纲 ${file.name}`}
+                              onClick={() => onOpenConversationWiki(file)}
+                            >
+                              大纲
+                            </button>
+                          ) : null}
                           {needsReindex && onReindexConversationFile ? (
                             <button
                               type="button"
@@ -477,40 +549,32 @@ export function Composer({
                   <li>
                     <button
                       type="button"
-                      className={useAllDocuments ? "active" : ""}
-                      title="检索整个资料库；无法索引的文件会被自动跳过"
-                      onClick={() => {
-                        // 保留已选会话附件；仅替换资料库侧选中为「全部」
-                        const conversationOnly = draftAttachments.filter(
-                          (item) => item.kind === "conversation_file",
-                        );
-                        onDraftAttachmentsChange([
-                          ...conversationOnly,
-                          allDocumentsAttachment(),
-                        ]);
-                      }}
+                      className={libraryGrounding.mode === "workspace" ? "active" : ""}
+                      title="进入对话即使用整个资料库（含 Wiki 大纲/综述）；无法索引的文件会被跳过"
+                      onClick={() =>
+                        onLibraryGroundingChange({ mode: "workspace" })
+                      }
                     >
-                      <span>全部资料</span>
+                      <span>整库检索</span>
                       <small>可检索 {usableLibraryDocuments.length} 篇</small>
                     </button>
                   </li>
                   {usableLibraryDocuments.map((doc) => {
-                    const active =
-                      !useAllDocuments && selectedLibraryIds.includes(doc.id);
+                    const active = selectedLibraryIds.includes(doc.id);
                     return (
                       <li key={doc.id}>
                         <button
                           type="button"
                           className={active ? "active" : ""}
                           onClick={() =>
-                            onDraftAttachmentsChange(
-                              toggleDraftDocument(draftAttachments, doc),
+                            onLibraryGroundingChange(
+                              togglePinnedDocument(libraryGrounding, doc.id),
                             )
                           }
                         >
                           <span>{doc.name}</span>
                           <small>
-                            {active ? "已选" : `${doc.chunkCount} 片段`}
+                            {active ? "仅用这篇" : `${doc.chunkCount} 片段`}
                           </small>
                         </button>
                       </li>
@@ -519,15 +583,16 @@ export function Composer({
                 </ul>
               </>
             ) : null}
-            {draftAttachments.length > 0 && (
+            {libraryGrounding.mode !== "off" &&
+            usableLibraryDocuments.length > 0 ? (
               <button
                 type="button"
                 className="composer-picker-clear"
-                onClick={() => onDraftAttachmentsChange([])}
+                onClick={() => onLibraryGroundingChange({ mode: "off" })}
               >
-                不使用资料
+                仅用模型，不查资料库
               </button>
-            )}
+            ) : null}
           </div>
         ) : null}
 
@@ -636,6 +701,14 @@ export function Composer({
           </div>
         ) : null}
 
+        {connected === false ? (
+          <div className="composer-offline" role="status">
+            <span>本地模型未启动，暂时不能发送。</span>
+            <button type="button" onClick={onOpenSettings}>
+              查看启动方式
+            </button>
+          </div>
+        ) : null}
         <form
           className="composer"
           onSubmit={(event) => {
@@ -706,7 +779,8 @@ export function Composer({
               event.preventDefault();
               void handleSubmit();
             }}
-            placeholder="输入问题；@ 选择资料；Shift+Enter 换行"
+            placeholder="输入问题；@ 收窄资料；Shift+Enter 换行"
+            disabled={connected === false}
             rows={1}
           />
           <button
@@ -739,8 +813,8 @@ export function Composer({
             <button
               className="send"
               type="submit"
-              disabled={!input.trim()}
-              aria-label="发送"
+              disabled={!input.trim() || connected === false}
+              aria-label={connected === false ? "本地模型未启动" : "发送"}
             >
               <Icon name="send" />
             </button>

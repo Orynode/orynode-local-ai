@@ -33,9 +33,15 @@ function mockRetriever(
   };
 }
 
+const NO_WIKI = {
+  loadForScope: async () => null,
+  loadForQuery: async () => null,
+};
+
 test("search 与 retrieve 同源：相同 query/scope 命中 id 一致", async () => {
   let calls = 0;
   const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
     knowledgeTier: "lite",
     retriever: mockRetriever(() => {
       calls += 1;
@@ -68,6 +74,7 @@ test("search 与 retrieve 同源：相同 query/scope 命中 id 一致", async (
 
 test("无答案门禁一致：召回为空时 search 与 retrieve 皆空", async () => {
   const engine = createKnowledgeEngine({
+    wikiHits: NO_WIKI,
     knowledgeTier: "lite",
     retriever: mockRetriever(() => ({ strategy: "keyword", chunks: [] })),
   });

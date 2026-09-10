@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { migrateDatabase } from "../../scripts/data-service/migrations/index.mjs";
-import { createJobRepository } from "../../scripts/data-service/jobs.mjs";
+import { createJobRepository, mergeWikiJobPayload, resolveWikiJobEnqueue, WIKI_JOB_COOLDOWN_MS } from "../../scripts/data-service/jobs.mjs";
 import { createIndexBuildStore } from "../../scripts/data-service/index-builds.mjs";
 import { createResourceCoordinator } from "../../scripts/data-service/resource-coordinator.mjs";
 
@@ -72,6 +72,28 @@ test("jobs: defer 不消耗 attempts", () => {
     const again = jobs.claim("w", ["embed_document"], 5000);
     assert.equal(again.id, job.id);
     assert.equal(again.attempts, 1);
+    database.close();
+  });
+});
+
+test("jobs: 失败终态可由用户重新排队", () => {
+  withTempDb((dbPath) => {
+    const database = new DatabaseSync(dbPath);
+    migrateDatabase(database);
+    const jobs = createJobRepository(database);
+    const job = jobs.enqueue({
+      type: "compile_wiki",
+      idempotencyKey: "compile:retry:page-1",
+      payload: { pageId: "page-1" },
+      maxAttempts: 1,
+    });
+    const claimed = jobs.claim("worker-1", ["compile_wiki"], 5000);
+    jobs.fail(claimed.id, "worker-1", "模型暂时不可用", 0);
+    assert.equal(jobs.get(job.id).status, "failed");
+    const retried = jobs.requeueFromTerminal(job.id);
+    assert.equal(retried.status, "queued");
+    assert.equal(retried.attempts, 0);
+    assert.equal(jobs.requeueFromTerminal(job.id), null);
     database.close();
   });
 });
@@ -200,4 +222,74 @@ test("resource coordinator: 同一 owner 不可重入", () => {
     false,
   );
   resources.release(first.leaseId);
+});
+
+test("jobTypesToClaim: Chat 忙时仍领取 outlines/concepts", async () => {
+  const { jobTypesToClaim, CHAT_SAFE_JOB_TYPES } = await import(
+    "../../scripts/data-service/worker.mjs"
+  );
+  assert.deepEqual(jobTypesToClaim(true), CHAT_SAFE_JOB_TYPES);
+  assert.ok(jobTypesToClaim(true).includes("compile_wiki_outlines"));
+  assert.ok(jobTypesToClaim(true).includes("compile_wiki_concepts"));
+  assert.equal(jobTypesToClaim(true).includes("compile_wiki"), false);
+  assert.equal(jobTypesToClaim(true).includes("embed_document"), false);
+  assert.ok(jobTypesToClaim(false).includes("embed_document"));
+  assert.ok(jobTypesToClaim(false).includes("compile_wiki"));
+});
+
+test("wiki job: force 只升不降，终态重入队带上新 payload", () => {
+  assert.deepEqual(
+    mergeWikiJobPayload({ force: false, pageId: "p1" }, { force: true, title: "手册" }),
+    { force: true, pageId: "p1", title: "手册" },
+  );
+  assert.equal(
+    mergeWikiJobPayload({ force: true }, { force: false }).force,
+    true,
+  );
+
+  const now = Date.parse("2026-09-10T00:00:00.000Z");
+  assert.equal(
+    resolveWikiJobEnqueue(
+      { status: "succeeded", payload: { force: false }, updatedAt: "2026-09-10T00:00:00.000Z" },
+      { force: true },
+      now + 1000,
+    ).action,
+    "cooldown",
+  );
+  const retried = resolveWikiJobEnqueue(
+    { status: "succeeded", payload: { force: false, pageId: "p1" }, updatedAt: "2026-09-10T00:00:00.000Z" },
+    { force: true },
+    now + WIKI_JOB_COOLDOWN_MS + 1,
+  );
+  assert.equal(retried.action, "requeue");
+  assert.equal(retried.payload.force, true);
+  assert.equal(retried.payload.pageId, "p1");
+
+  const inflight = resolveWikiJobEnqueue(
+    { status: "queued", payload: { force: false } },
+    { force: true },
+  );
+  assert.equal(inflight.action, "inflight");
+  assert.equal(inflight.payload.force, true);
+});
+
+test("jobs: 终态 compile_wiki 重入队合并 force", () => {
+  withTempDb((dbPath) => {
+    const database = new DatabaseSync(dbPath);
+    migrateDatabase(database);
+    const jobs = createJobRepository(database);
+    const job = jobs.enqueue({
+      type: "compile_wiki",
+      idempotencyKey: "compile_wiki:library:page-1",
+      payload: { pageId: "page-1", force: false },
+      maxAttempts: 1,
+    });
+    const claimed = jobs.claim("worker-1", ["compile_wiki"], 5000);
+    jobs.complete(claimed.id, "worker-1");
+    jobs.mergePayload(job.id, { force: true });
+    const retried = jobs.requeueFromTerminal(job.id);
+    assert.equal(retried.status, "queued");
+    assert.equal(retried.payload.force, true);
+    database.close();
+  });
 });

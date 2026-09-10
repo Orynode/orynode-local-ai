@@ -19,6 +19,7 @@ import { officeWarningsToErrorMessage } from "../office-contract";
 import { parseOfficeMarkdown } from "../parser";
 import { createChunker } from "../chunker";
 import { assignChunkIds } from "../indexer";
+import { compileAndUpsertDocumentMirror } from "../wiki/compile-and-upsert";
 
 export type ConvertOfficeJobContext = {
   payload: {
@@ -71,6 +72,8 @@ export type ConvertOfficeJobContext = {
   hostMemoryClass?: "low" | "medium" | "high";
   jobId?: string;
   workerOwner?: string;
+  /** 单测注入，避免默认 persist 打到正在跑的本机 data-service */
+  compileMirror?: typeof compileAndUpsertDocumentMirror;
 };
 
 function mapErrorCode(error: unknown): string {
@@ -183,6 +186,13 @@ export async function runConvertOfficeJob(
         endLine: c.endLine,
       })),
     );
+
+    await (context.compileMirror ?? compileAndUpsertDocumentMirror)({
+      namespace,
+      documentId,
+      title: String(meta?.name || meta?.originalName || documentId),
+      chunks,
+    });
 
     await context.setDocumentStatus(namespace, documentId, "ready", {
       // 与 OCR_PAGE_TRUNCATED 同模式：成功态也可带降级码

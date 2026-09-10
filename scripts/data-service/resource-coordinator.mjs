@@ -19,7 +19,7 @@ import {
 } from "./host-memory.mjs";
 
 /**
- * @typedef {'chat' | 'embedding' | 'ocr' | 'rerank' | 'office_convert'} ResourceKind
+ * @typedef {'chat' | 'embedding' | 'ocr' | 'rerank' | 'office_convert' | 'wiki_compile'} ResourceKind
  */
 
 export function createResourceCoordinator(options = {}) {

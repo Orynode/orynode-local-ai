@@ -9,6 +9,10 @@ import {
   ORYNODE_DATA_URL,
   HTTP_TIMEOUT,
 } from "../../../../config/defaults";
+import {
+  EXTERNAL_CONNECTOR_DISABLED_MESSAGE,
+  isRetiredExternalConnector,
+} from "../../../../services/knowledge/connectors/registry";
 import { lanDeniedResponse, sanitizedErrorResponse } from "../../../../services/platform";
 
 const dataUrl = ORYNODE_DATA_URL;
@@ -36,6 +40,12 @@ export async function POST(request: Request) {
   if (denied) return denied;
   try {
     const body = await request.json();
+    if (isRetiredExternalConnector(body?.type)) {
+      return Response.json(
+        { error: EXTERNAL_CONNECTOR_DISABLED_MESSAGE },
+        { status: 400 },
+      );
+    }
     const response = await fetch(`${dataUrl}/sources/sync`, {
       method: "POST",
       headers: { "content-type": "application/json" },

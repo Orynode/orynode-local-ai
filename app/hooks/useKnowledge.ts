@@ -169,7 +169,7 @@ function summarizeReindex(
 
 /**
  * 本地资料库：CRUD / 上传（内容去重）/ 显示名重命名 / 索引。
- * 会话附件见 useConversationFiles；本轮检索选中见 draftAttachments。
+ * 会话附件见 useConversationFiles；资料库默认作为工作区记忆进入对话。
  */
 export function useKnowledge(options?: { onJobsChanged?: () => void }) {
   const onJobsChanged = options?.onJobsChanged;
@@ -710,75 +710,6 @@ export function useKnowledge(options?: { onJobsChanged?: () => void }) {
     }
   }, [flash, onJobsChanged, refresh, startStatusPolling]);
 
-  const importWeb = useCallback(
-    async (url: string) => {
-      setUploading(true);
-      setError("");
-      setNotice("");
-      try {
-        const response = await fetch("/api/knowledge/sources", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ type: "web", url }),
-        });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "网页导入失败");
-        const sync = result.result;
-        flash(
-          `网页已同步：新增 ${sync.imported}，更新 ${sync.updated}，不变 ${sync.unchanged}` +
-            (sync.errors?.length ? `，失败 ${sync.errors.length}` : ""),
-          Boolean(sync.errors?.length),
-        );
-        onJobsChanged?.();
-        await refresh();
-        startStatusPolling();
-      } catch (e) {
-        flash(e instanceof Error ? e.message : "网页导入失败", true);
-      } finally {
-        setUploading(false);
-      }
-    },
-    [flash, onJobsChanged, refresh, startStatusPolling],
-  );
-
-  const importGitHub = useCallback(
-    async (input: {
-      owner: string;
-      repo: string;
-      ref?: string;
-      pathPrefix?: string;
-      token?: string;
-    }) => {
-      setUploading(true);
-      setError("");
-      setNotice("");
-      try {
-        const response = await fetch("/api/knowledge/sources", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ type: "github", ...input }),
-        });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "GitHub 同步失败");
-        const sync = result.result;
-        flash(
-          `GitHub 已同步：新增 ${sync.imported}，更新 ${sync.updated}，不变 ${sync.unchanged}` +
-            (sync.tombstoned ? `，标记删除 ${sync.tombstoned}` : "") +
-            (sync.errors?.length ? `，失败 ${sync.errors.length}` : ""),
-          Boolean(sync.errors?.length),
-        );
-        onJobsChanged?.();
-        await refresh();
-        startStatusPolling();
-      } catch (e) {
-        flash(e instanceof Error ? e.message : "GitHub 同步失败", true);
-      } finally {
-        setUploading(false);
-      }
-    },
-    [flash, onJobsChanged, refresh, startStatusPolling],
-  );
-
   return {
     documents,
     meta,
@@ -795,7 +726,5 @@ export function useKnowledge(options?: { onJobsChanged?: () => void }) {
     reindex,
     reprocess,
     reindexAll,
-    importWeb,
-    importGitHub,
   };
 }

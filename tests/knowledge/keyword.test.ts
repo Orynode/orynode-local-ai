@@ -8,12 +8,13 @@ import {
   weightedRrfFusion,
 } from "../../services/knowledge/retrieval/keyword";
 
-test("extractSearchTerms: 中英混合抽取", () => {
-  const terms = extractSearchTerms("Orynode 本地知识库 retrieval");
-  assert.ok(terms.includes("orynode"));
-  assert.ok(terms.includes("retrieval"));
-  assert.ok(terms.some((term) => term.includes("本地") || term === "本地"));
-  assert.ok(terms.some((term) => term.includes("知识") || term === "知识"));
+test("extractSearchTerms: 中英粘连拆出拉丁标识", () => {
+  const terms = extractSearchTerms("zend内存池是什么");
+  assert.ok(terms.includes("zend"), `terms=${terms.join(",")}`);
+  assert.ok(
+    terms.some((term) => term.includes("内存")),
+    `terms=${terms.join(",")}`,
+  );
 });
 
 test("extractSearchTerms: 忽略过短 token", () => {

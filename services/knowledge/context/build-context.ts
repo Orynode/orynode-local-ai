@@ -27,6 +27,7 @@ import {
 } from "./token-pack";
 import { buildCitationExcerpt } from "./citation-excerpt";
 import { inferHeadingPathFromContent } from "../indexing/markdown-headings";
+import { contextualizeChunkText } from "../retrieval/search-text";
 
 const PROMPT_FRAME_OVERHEAD = `
 
@@ -158,7 +159,7 @@ export function citationFromHit(
   const content = hit.content;
   return {
     id: `S${index + 1}`,
-    chunkId: hit.id,
+    chunkId: hit.sourceChunkId ?? hit.id,
     documentId: hit.documentId,
     revisionId: hit.revisionId ?? LEGACY_REVISION_ID,
     processingBuildId: hit.processingBuildId ?? LEGACY_PROCESSING_BUILD_ID,
@@ -192,8 +193,12 @@ function citationLookup(
   request: ContextRequest,
 ): Map<string, Citation> {
   const map = new Map<string, Citation>();
-  for (const citation of request.citations ?? []) {
-    map.set(citation.chunkId, citation);
+  const citations = request.citations ?? [];
+  const count = Math.min(request.hits.length, citations.length);
+  for (let index = 0; index < count; index += 1) {
+    const hit = request.hits[index];
+    const citation = citations[index];
+    if (hit && citation) map.set(hit.id, citation);
   }
   return map;
 }
@@ -260,7 +265,7 @@ export function buildContextPackage(
 
   for (const hit of candidates) {
     const nextIndex = packedCitations.length;
-    let content = hit.content;
+    let content = contextualizeChunkText(hit.content, hit.headingPath);
     let citation = resolveCitationForHit(
       hit,
       nextIndex,
@@ -292,7 +297,7 @@ export function buildContextPackage(
       if (used + cost > budget) {
         // 极端小预算：仍放入截断后的首项，避免空知识上下文
         const emergency = truncateChunkForBudget(
-          hit.content,
+          contextualizeChunkText(hit.content, hit.headingPath),
           Math.max(4, budget - frameCost),
         );
         content = emergency.text;

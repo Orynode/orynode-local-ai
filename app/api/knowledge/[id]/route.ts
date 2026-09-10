@@ -4,6 +4,7 @@
 
 import { ORYNODE_DATA_URL, HTTP_TIMEOUT } from "../../../../config/defaults";
 import { lanDeniedResponse } from "../../../../services/platform";
+import { markWikiSourceDeleted } from "../../../../services/knowledge/wiki/persist";
 
 const dataUrl = ORYNODE_DATA_URL;
 
@@ -24,6 +25,9 @@ export async function DELETE(request: Request, context: RouteContext) {
         signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
       },
     );
+    if (response.ok) {
+      await markWikiSourceDeleted(id);
+    }
     return new Response(await response.text(), {
       status: response.status,
       headers: { "content-type": "application/json; charset=utf-8" },

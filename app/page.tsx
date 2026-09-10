@@ -12,6 +12,8 @@ import { ChatView } from "./components/chat/ChatView";
 import { WelcomeScreen } from "./components/chat/WelcomeScreen";
 import { Composer } from "./components/chat/Composer";
 import { KnowledgeView } from "./components/knowledge/KnowledgeView";
+import { WikiPageSessionHost } from "./components/knowledge/WikiPageSessionHost";
+import { type WikiOutlinePage } from "./components/knowledge/WikiOutlineDialog";
 import {
   KnowledgeJobsMenu,
 } from "./components/knowledge/KnowledgeJobsPanel";
@@ -23,15 +25,28 @@ import { useConversationFiles } from "./hooks/useConversationFiles";
 import { useKnowledge } from "./hooks/useKnowledge";
 import { useKnowledgeJobs } from "./hooks/useKnowledgeJobs";
 import { useSettings } from "./hooks/useSettings";
+import { useWikiPageSession } from "./hooks/useWikiPageSession";
 import { Icon } from "./components/ui/Icon";
 import { AlertDialog } from "./components/ui/AlertDialog";
 import { ConfirmDialog } from "./components/ui/ConfirmDialog";
 import { DocumentPreviewProvider } from "./lib/document-preview";
+import { wikiSettleTargetsFromMessage } from "../services/knowledge/wiki/settle-from-chat";
+import { isUsableLibraryDocument } from "../services/knowledge/status";
 import { GITHUB_REPO_URL } from "../config/defaults";
 import {
   readStoredDisplayName,
 } from "./lib/displayName";
-import { attachmentFromConversationFile } from "./lib/attachments";
+import {
+  WORKSPACE_GROUNDING,
+  attachmentFromConversationFile,
+  conversationFileAttachments,
+  displayMessageAttachments,
+  dropPinnedDocument,
+  groundingFromLibrarySelection,
+  hasSearchableLibrary,
+  resolveRetrievalScope,
+  type LibraryGrounding,
+} from "./lib/attachments";
 
 type PendingDelete =
   | { type: "conversation"; id: string }
@@ -99,20 +114,6 @@ function attachmentReadinessError(
         return `「${doc.name}」尚未可检索（${status}），请稍后再发送`;
       }
     }
-    if (item.kind === "library_all") {
-      const pending = documents.find(
-        (doc) => doc.status && PENDING_INDEX_STATUSES.has(doc.status),
-      );
-      if (pending) {
-        return `资料库中「${pending.name}」仍在处理中；全部资料检索可能不完整，请稍后再发送或取消「全部资料」`;
-      }
-      const failed = documents.find(
-        (doc) => doc.status && FAILED_INDEX_STATUSES.has(doc.status),
-      );
-      if (failed) {
-        return `资料库中「${failed.name}」处理失败；请先处理失败文档或取消「全部资料」后再发送`;
-      }
-    }
   }
   return null;
 }
@@ -130,10 +131,19 @@ export default function Home() {
   /** 内容去重命中时弹窗（对话页也可见） */
   const [duplicateNotice, setDuplicateNotice] =
     useState<KnowledgeDocument | null>(null);
-  /** 仅作用于下次发送；成功发送后清空，打开历史/新对话/删除当前会话不保留 */
+  /** 本轮会话附件；资料库范围走 libraryGrounding，不写 library_all */
   const [draftAttachments, setDraftAttachments] = useState<MessageAttachment[]>(
     [],
   );
+  /** 工作区默认整库；收窄或关掉是会话级，不是每条消息附件 */
+  const [libraryGrounding, setLibraryGrounding] =
+    useState<LibraryGrounding>(WORKSPACE_GROUNDING);
+  const [settleNotice, setSettleNotice] = useState("");
+  const [lastSettle, setLastSettle] = useState<{
+    messageId: string;
+    settleId: string;
+    pageId: string;
+  } | null>(null);
   /** 取消进行中的会话附件上传，避免 New Chat 后脏写 draft */
   const attachGenerationRef = useRef(0);
 
@@ -149,6 +159,14 @@ export default function Home() {
   const knowledge = useKnowledge({
     onJobsChanged: () => knowledgeJobs.notifyJobsChanged(),
   });
+  const wiki = useWikiPageSession({
+    jobs: knowledgeJobs.jobs,
+    onJobsChanged: () => knowledgeJobs.notifyJobsChanged(),
+    resolveLibraryDocument: (id) => {
+      const doc = knowledge.documents.find((item) => item.id === id);
+      return doc ? { id: doc.id, name: doc.name } : null;
+    },
+  });
   useEffect(() => {
     knowledgeRefreshRef.current = () => {
       void knowledge.refresh();
@@ -159,6 +177,10 @@ export default function Home() {
     semanticSearchEnabled: knowledge.meta?.semanticSearchEnabled,
   });
   const settingsHook = useSettings();
+
+  function handleDraftAttachmentsChange(next: MessageAttachment[]) {
+    setDraftAttachments(conversationFileAttachments(next));
+  }
 
   // ---- Init ----
   useEffect(() => {
@@ -202,9 +224,14 @@ export default function Home() {
     const content = input.trim();
     if (!content || chat.sending) return;
 
-    if (draftAttachments.length > 0) {
+    const attachments = displayMessageAttachments({
+      grounding: libraryGrounding,
+      attachments: draftAttachments,
+      documents: knowledge.documents,
+    });
+    if (attachments && attachments.length > 0) {
       const readiness = attachmentReadinessError(
-        draftAttachments,
+        attachments,
         conversationFiles.files,
         knowledge.documents,
       );
@@ -223,15 +250,19 @@ export default function Home() {
       maxTokens: settingsHook.settings.maxTokens,
     };
 
-    const attachments =
-      draftAttachments.length > 0 ? [...draftAttachments] : undefined;
-    setDraftAttachments([]);
+    const retrievalScope = resolveRetrievalScope({
+      grounding: libraryGrounding,
+      attachments: draftAttachments,
+      conversationId,
+      hasSearchableLibrary: hasSearchableLibrary(knowledge.documents),
+    });
 
     const result = await chat.sendMessage(
       content,
       conversationId,
       conversationTitle,
       attachments,
+      retrievalScope,
       sampling.temperature,
       sampling.topP,
       sampling.topK,
@@ -246,7 +277,6 @@ export default function Home() {
       void conversations.refresh();
     } else {
       setInput(content);
-      if (attachments) setDraftAttachments(attachments);
     }
   }
 
@@ -260,6 +290,7 @@ export default function Home() {
       setConversationId(conv.id);
       setConversationTitle(conv.title);
       chat.setMessages(conv.messages ?? []);
+      setLibraryGrounding(WORKSPACE_GROUNDING);
       setDraftAttachments([]);
       await conversationFiles.refresh(conv.id);
       setViewMode("assistant");
@@ -290,6 +321,7 @@ export default function Home() {
           setConversationId(null);
           setConversationTitle("");
           chat.clearChat();
+          setLibraryGrounding(WORKSPACE_GROUNDING);
           setDraftAttachments([]);
           conversationFiles.clear();
         }
@@ -302,13 +334,9 @@ export default function Home() {
 
     const removed = await knowledge.remove(current.id);
     if (!removed) return;
+    setLibraryGrounding((prev) => dropPinnedDocument(prev, current.id));
     setDraftAttachments((prev) =>
-      prev.filter(
-        (item) =>
-          item.kind === "library_all" ||
-          item.kind === "conversation_file" ||
-          item.id !== current.id,
-      ),
+      conversationFileAttachments(prev),
     );
     if (conversationId) {
       void conversationFiles.refresh(conversationId);
@@ -426,6 +454,7 @@ export default function Home() {
     setConversationId(null);
     setConversationTitle("");
     chat.clearChat();
+    setLibraryGrounding(WORKSPACE_GROUNDING);
     setDraftAttachments([]);
     setViewMode("assistant");
     // 仅清理真正空壳；列表为空但草稿仍挂会话附件时不删，避免 refresh 失败误删
@@ -443,7 +472,7 @@ export default function Home() {
     }
   }
 
-  /** 资料库「去对话」：始终新开空对话，再挂上本轮资料库草稿 */
+  /** 资料库「去对话」：新开对话。全选=工作区记忆，子集=收窄到这些篇 */
   function handleAttachToChat(attachments: MessageAttachment[]) {
     attachGenerationRef.current += 1;
     conversationFiles.abortUpload();
@@ -451,9 +480,14 @@ export default function Home() {
     setConversationId(null);
     setConversationTitle("");
     chat.clearChat();
-    setDraftAttachments(
-      attachments.filter((item) => item.kind !== "conversation_file"),
-    );
+    const selectedIds = attachments
+      .filter((item) => item.kind === "library")
+      .map((item) => item.id);
+    const usableIds = knowledge.documents
+      .filter(isUsableLibraryDocument)
+      .map((doc) => doc.id);
+    setLibraryGrounding(groundingFromLibrarySelection(selectedIds, usableIds));
+    setDraftAttachments([]);
     setViewMode("assistant");
   }
 
@@ -492,6 +526,103 @@ export default function Home() {
       }, 1600);
     } catch {
       chat.setError("复制失败，请检查浏览器剪贴板权限");
+    }
+  }
+
+  async function handleSettleToWiki(message: Message) {
+    const targets = wikiSettleTargetsFromMessage(message);
+    if (targets.length === 0) {
+      chat.setError("这条回答没有可写入的资料引用");
+      return;
+    }
+    try {
+      const response = await fetch("/api/knowledge/wiki/settle", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          markdown: message.content,
+          conversationId,
+          messageId: message.id,
+          targets: targets.map((target) => ({
+            documentId: target.documentId,
+            namespace: target.namespace,
+            title: target.title,
+          })),
+        }),
+      });
+      const body = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        page?: WikiOutlinePage;
+        pages?: WikiOutlinePage[];
+        settled?: Array<{
+          page?: WikiOutlinePage;
+          documentId?: string;
+          namespace?: "library" | "conversation";
+          settleId?: string;
+        }>;
+        pendingMerge?: boolean;
+        settleId?: string;
+      };
+      if (!response.ok) {
+        chat.setError(body.error || "无法写入百科页");
+        return;
+      }
+      const pages = body.pages?.length ? body.pages : body.page ? [body.page] : [];
+      setSettleNotice(
+        body.pendingMerge
+          ? `已写入「${pages[0]?.title || targets[0]?.title}」，多源沉淀待审核`
+          : `已写入「${pages[0]?.title || targets[0]?.title}」`,
+      );
+      const first = body.settled?.[0];
+      const firstPage = first?.page || pages[0];
+      if (firstPage) {
+        void wiki.openSeedPage(firstPage, {
+          conversationId:
+            first?.namespace === "conversation" ? conversationId : null,
+        });
+        const settleId = body.settleId || first?.settleId;
+        if (settleId && firstPage.id) {
+          setLastSettle({
+            messageId: message.id,
+            settleId,
+            pageId: firstPage.id,
+          });
+        }
+      }
+      setTimeout(() => setSettleNotice(""), 5000);
+    } catch {
+      chat.setError("无法写入百科页");
+    }
+  }
+
+  async function handleUndoSettle() {
+    if (!lastSettle) return;
+    try {
+      const response = await fetch("/api/knowledge/wiki/settle", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "undo",
+          settleId: lastSettle.settleId,
+          pageId: lastSettle.pageId,
+          conversationId,
+        }),
+      });
+      const body = (await response.json().catch(() => ({}))) as {
+        error?: string;
+      };
+      if (!response.ok) {
+        chat.setError(body.error || "无法撤销写入");
+        return;
+      }
+      setLastSettle(null);
+      setSettleNotice("已撤销本次写入");
+      if (wiki.page?.id === lastSettle.pageId) {
+        void wiki.reload();
+      }
+      setTimeout(() => setSettleNotice(""), 4000);
+    } catch {
+      chat.setError("无法撤销写入");
     }
   }
 
@@ -568,6 +699,8 @@ export default function Home() {
               activeCount={knowledgeJobs.activeCount}
               loading={knowledgeJobs.loading}
               error={knowledgeJobs.error}
+              tab={knowledgeJobs.tab}
+              onTabChange={knowledgeJobs.setTab}
               onToggle={knowledgeJobs.togglePanel}
               onClose={knowledgeJobs.closePanel}
               onRefresh={() => {
@@ -613,14 +746,36 @@ export default function Home() {
             onImport={(files, options) => {
               void handleUploadKnowledge(files, options);
             }}
-            onImportWeb={(url) => {
-              void knowledge.importWeb(url);
-            }}
-            onImportGitHub={(input) => {
-              void knowledge.importGitHub(input);
-            }}
             onAttachToChat={handleAttachToChat}
             jobsActiveCount={knowledgeJobs.activeCount}
+            jobs={knowledgeJobs.jobs}
+            wiki={wiki}
+            onCompileOutlines={async () => {
+              const response = await fetch("/api/knowledge/wiki", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ action: "outlines" }),
+              });
+              const body = (await response.json().catch(() => ({}))) as {
+                error?: string;
+              };
+              if (!response.ok) {
+                throw new Error(body.error || "无法开始重抽大纲");
+              }
+              knowledgeJobs.notifyJobsChanged();
+            }}
+            onCompileConcepts={async () => {
+              const response = await fetch("/api/knowledge/wiki", {
+                method: "POST",
+              });
+              const body = (await response.json().catch(() => ({}))) as {
+                error?: string;
+              };
+              if (!response.ok) {
+                throw new Error(body.error || "无法开始整理概念");
+              }
+              knowledgeJobs.notifyJobsChanged();
+            }}
           />
         ) : chat.messages.length === 0 ? (
           <>
@@ -651,11 +806,15 @@ export default function Home() {
               onInputChange={setInput}
               onSubmit={(hot) => { void handleSubmit(hot); }}
               sending={chat.sending}
+              connected={chat.connected}
+              onOpenSettings={() => setSettingsOpen(true)}
               onStop={chat.stopGeneration}
               documents={knowledge.documents}
               conversationFiles={conversationFiles.files}
               draftAttachments={draftAttachments}
-              onDraftAttachmentsChange={setDraftAttachments}
+              onDraftAttachmentsChange={handleDraftAttachmentsChange}
+              libraryGrounding={libraryGrounding}
+              onLibraryGroundingChange={setLibraryGrounding}
               uploading={
                 knowledge.uploading || conversationFiles.uploading
               }
@@ -671,6 +830,11 @@ export default function Home() {
               }}
               onReindexConversationFile={(fileId) => {
                 void handleReindexConversationFile(fileId);
+              }}
+              onOpenConversationWiki={(file) => {
+                const cid = conversationId || file.conversationId;
+                if (!cid) return;
+                void wiki.openConversationFile({ conversationId: cid, file });
               }}
               hotSettings={{
                 temperature: settingsHook.settings.temperature,
@@ -713,17 +877,33 @@ export default function Home() {
               copiedMessageId={copiedMessageId}
               conversationId={conversationId}
               onCopy={handleCopy}
+              onSettleToWiki={(message) => {
+                void handleSettleToWiki(message);
+              }}
+              lastSettledMessageId={lastSettle?.messageId ?? null}
+              onUndoSettle={() => {
+                void handleUndoSettle();
+              }}
             />
+            {settleNotice ? (
+              <div className="notice-banner" role="status">
+                {settleNotice}
+              </div>
+            ) : null}
             <Composer
               input={input}
               onInputChange={setInput}
               onSubmit={(hot) => { void handleSubmit(hot); }}
               sending={chat.sending}
+              connected={chat.connected}
+              onOpenSettings={() => setSettingsOpen(true)}
               onStop={chat.stopGeneration}
               documents={knowledge.documents}
               conversationFiles={conversationFiles.files}
               draftAttachments={draftAttachments}
-              onDraftAttachmentsChange={setDraftAttachments}
+              onDraftAttachmentsChange={handleDraftAttachmentsChange}
+              libraryGrounding={libraryGrounding}
+              onLibraryGroundingChange={setLibraryGrounding}
               uploading={
                 knowledge.uploading || conversationFiles.uploading
               }
@@ -739,6 +919,11 @@ export default function Home() {
               }}
               onReindexConversationFile={(fileId) => {
                 void handleReindexConversationFile(fileId);
+              }}
+              onOpenConversationWiki={(file) => {
+                const cid = conversationId || file.conversationId;
+                if (!cid) return;
+                void wiki.openConversationFile({ conversationId: cid, file });
               }}
               hotSettings={{
                 temperature: settingsHook.settings.temperature,
@@ -756,6 +941,11 @@ export default function Home() {
           </>
         )}
       </section>
+
+      <WikiPageSessionHost
+        session={wiki}
+        documents={knowledge.documents}
+      />
 
       <AlertDialog
         open={duplicateNotice != null}

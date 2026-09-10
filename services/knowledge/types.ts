@@ -81,6 +81,11 @@ export interface RetrievalHit {
   content: string;
   score: number;
   source: "library" | "conversation_file";
+  /**
+   * 打开原件 / Citation.chunkId 用的稳定切片主键。
+   * Wiki 综述命中的 id 与源 chunk 不同，避免装箱去重吞掉首节。
+   */
+  sourceChunkId?: string;
   /** 有 IndexBuild 时由 data-service 附带；否则 citations 用 legacy */
   revisionId?: string;
   processingBuildId?: string;

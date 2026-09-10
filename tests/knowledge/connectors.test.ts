@@ -129,3 +129,17 @@ test("redactSecrets: fine-grained PAT（github_pat_ 前缀）同样脱敏", () =
   assert.equal(out.includes(fineGrained), false);
   assert.match(out, /REDACTED_GITHUB_TOKEN/);
 });
+
+test("网页与 GitHub 入库已停用", async () => {
+  const { createAndSyncWebSource, createAndSyncGitHubSource } = await import(
+    "../../services/knowledge/application/sync-source"
+  );
+  await assert.rejects(
+    () => createAndSyncWebSource({ url: "https://example.com" }),
+    /仅支持导入本地文件/,
+  );
+  await assert.rejects(
+    () => createAndSyncGitHubSource({ owner: "Orynode", repo: "orynode-local-ai" }),
+    /仅支持导入本地文件/,
+  );
+});

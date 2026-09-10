@@ -1,9 +1,10 @@
 /**
  * 词法覆盖率（与 services/knowledge/query/lexical-coverage.ts + latin-stopwords.ts 对齐）
  *
- * 拉丁功能词仅作：分类形态信号 + general 阶梯匹配词清洗。
- * 不在 search-text.extractSearchTerms 硬删。
+ * MATCH 清洗：拉丁功能词 + 中文低信息/助词。不在 search-text.extractSearchTerms 硬删。
  */
+
+import { ZH_LOW_INFO_BIGRAMS } from "./search-text.mjs";
 
 const LATIN_STOPWORDS = new Set([
   "what",
@@ -98,6 +99,86 @@ export function containsLatinStopword(query) {
   return words.some((word) => isLatinStopword(word));
 }
 
+const ZH_FUNCTION_CHARS = new Set([
+  "是",
+  "的",
+  "了",
+  "吗",
+  "呢",
+  "吧",
+  "啊",
+  "嘛",
+  "着",
+  "过",
+  "得",
+  "地",
+  "么",
+  "啥",
+  "呀",
+]);
+
+/**
+ * @param {string} run
+ * @returns {boolean[]}
+ */
+function markZhLowInfoChars(run) {
+  const skip = Array.from({ length: run.length }, () => false);
+  for (let i = 0; i < run.length - 1; i += 1) {
+    if (ZH_LOW_INFO_BIGRAMS.has(run.slice(i, i + 2))) {
+      skip[i] = true;
+      skip[i + 1] = true;
+    }
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < run.length; i += 1) {
+      if (skip[i] || !ZH_FUNCTION_CHARS.has(run[i])) continue;
+      const adjacent =
+        (i > 0 && skip[i - 1]) || (i + 1 < run.length && skip[i + 1]);
+      if (adjacent) {
+        skip[i] = true;
+        changed = true;
+      }
+    }
+  }
+  return skip;
+}
+
+/**
+ * @param {string} term
+ * @returns {string}
+ */
+export function peelZhFunctionAffixes(term) {
+  const raw = String(term ?? "").trim();
+  if (!raw) return "";
+  if (!/^[\p{Script=Han}]+$/u.test(raw)) return raw;
+  const skip = markZhLowInfoChars(raw);
+  let best = "";
+  let i = 0;
+  while (i < raw.length) {
+    if (skip[i]) {
+      i += 1;
+      continue;
+    }
+    let j = i;
+    while (j < raw.length && !skip[j]) j += 1;
+    let span = raw.slice(i, j);
+    while (span.length > 0 && ZH_FUNCTION_CHARS.has(span[0])) {
+      span = span.slice(1);
+    }
+    while (
+      span.length > 0 &&
+      ZH_FUNCTION_CHARS.has(span[span.length - 1])
+    ) {
+      span = span.slice(0, -1);
+    }
+    if (span.length > best.length) best = span;
+    i = j;
+  }
+  return best.length >= 2 ? best : "";
+}
+
 /**
  * @param {string[]} terms
  */
@@ -106,8 +187,29 @@ export function contentTermsForLexicalMatch(terms) {
     ? terms.map((t) => String(t ?? "").trim()).filter(Boolean)
     : [];
   if (raw.length === 0) return [];
-  const content = raw.filter((t) => !isLatinStopword(t));
-  return content.length > 0 ? content : raw;
+  const content = [];
+  const seen = new Set();
+  for (const term of raw) {
+    const hanOnly = /^[\p{Script=Han}]+$/u.test(term);
+    if (isLatinStopword(term) || ZH_LOW_INFO_BIGRAMS.has(term)) continue;
+    if (
+      hanOnly &&
+      term.length === 2 &&
+      [...term].some((char) => ZH_FUNCTION_CHARS.has(char))
+    ) {
+      continue;
+    }
+    const next = hanOnly ? peelZhFunctionAffixes(term) : term;
+    if (!next || next.length < 2) continue;
+    if (isLatinStopword(next) || ZH_LOW_INFO_BIGRAMS.has(next)) continue;
+    const key = next.toLocaleLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    content.push(next);
+  }
+  if (content.length > 0) return content;
+  if (raw.every((term) => isLatinStopword(term))) return raw;
+  return [];
 }
 
 /**

@@ -9,4 +9,4 @@
 | [images/](images/) | README 配图 |
 | [deck/](deck/README.md) | 项目演示 PPT / 口播 |
 
-阅读发布变更请优先看根目录 CHANGELOG **1.3.0**（Office 摄取；引用可用性见 **1.2.1**，检索闭环基线见 **1.2.0**）；RAG 实现说明见 [架构文档 · 知识库/RAG](ARCHITECTURE_zh-CN.md#知识库--rag-系统)。
+阅读发布变更请优先看根目录 CHANGELOG **1.4.0**（LLM Wiki；Office 摄取见 **1.3.0**，引用可用性见 **1.2.1**，检索闭环基线见 **1.2.0**）；RAG / Wiki 实现说明见 [架构文档 · 知识库/RAG](ARCHITECTURE_zh-CN.md#知识库--rag-系统)。

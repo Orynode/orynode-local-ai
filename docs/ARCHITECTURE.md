@@ -2,9 +2,9 @@
 
 [简体中文](ARCHITECTURE_zh-CN.md) | [English](ARCHITECTURE.md)
 
-This document describes the **service architecture, data flow, module layering, extension interfaces**, and **knowledge base / RAG system** design of Orynode Local AI (current implementation as of **1.3.0**).
+This document describes the **service architecture, data flow, module layering, extension interfaces**, and **knowledge base / RAG system** design of Orynode Local AI (current tree, including the Wiki compile layer).
 
-The Chinese architecture doc is the source of truth for implementation detail: [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md). Release notes: [CHANGELOG 1.3.0](../CHANGELOG.md#130--2026-08-09).
+The Chinese architecture doc is the source of truth for implementation detail: [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md). Shipped release notes: [CHANGELOG 1.4.0](../CHANGELOG.md#140--2026-09-10).
 
 Target audience: developers who want to understand the internals, reuse modules, or extend functionality.
 
@@ -23,6 +23,7 @@ Target audience: developers who want to understand the internals, reuse modules,
   - [Embedder](#3-embedder)
   - [VectorStore](#4-vectorstore)
   - [Retriever](#5-retriever)
+  - [LLM Wiki compile layer](#llm-wiki-compile-layer)
 - [Extension Interfaces](#extension-interfaces)
   - [Swap Embedder](#swap-embedder)
   - [Swap VectorStore](#swap-vectorstore)
@@ -102,8 +103,9 @@ API Gateway Layer
 Business Service Layer
   services/
   ├── chat/        - System prompt, conversation context
-  ├── inference/   - Inference backend adapter (TurboFieldfare, swappable)
-  ├── knowledge/   - PDF/TXT/MD parsing, chunking, embedding, retrieval
+  ├── platform/    - Host / ModelRuntime / LAN / OCR (Windows stubs)
+  ├── knowledge/   - Parse, chunk, embed, retrieve, Wiki compile
+  ├── agent/       - Guarded tools + Agent space (no product UI)
   └── settings/    - Runtime settings
      ↓
 Persistence Layer
@@ -127,21 +129,23 @@ Configuration Layer
 ### Chat Flow
 
 ```
-Composer draftAttachments (next turn only; cleared after send)
-  → page.tsx → useChat.sendMessage(attachments)
-      → persist message.attachments (bubble + SQLite)
-      → scopeFromAttachments → RetrievalScope (library + conversationFiles)
+Composer: workspace grounding (default library:all) + optional pins + conversation files
+  → page.tsx → useChat.sendMessage(displayAttachments, retrievalScope)
+      → persist only conversation files / pinned docs (never library_all on new messages)
+      → resolveRetrievalScope (workspace → library:all)
       → POST /api/chat
+          → casual queries skip retrieve
           → normalizeRetrievalScope (compat: knowledgeScope)
-          → KnowledgeEngine.retrieve (rewrite → plan → HybridRetriever)
+          → KnowledgeEngine.retrieve (rewrite → plan → HybridRetriever; Wiki merge when multi_document)
           → buildSystemPrompt + TurboFieldfare SSE
   → page.tsx renders Markdown incrementally
 ```
 
 **Product semantics:**
 
-- **Library** is durable storage (`useKnowledge`); **conversation files** bind to `conversationId` and cascade-delete with the chat
-- `draftAttachments` are the **per-message** retrieval scope only; opening history reloads the conversation file list for re-selection, not the previous draft
+- **Library** is durable storage and the chat workspace memory (`useKnowledge`); **conversation files** bind to `conversationId` and cascade-delete with the chat
+- With searchable library docs, chat **defaults to `library:all`** (Wiki + chunks) without a per-message “all documents” chip. Pinning a doc narrows; “仅用模型” turns grounding off
+- Casual greetings skip retrieval even with workspace grounding
 - Drag / “attach to chat” → conversation files; persistence requires an explicit “import to library” (no one-click lift from chat attachments)
 
 ### Shared ingest (dual target)
@@ -210,22 +214,25 @@ orynode-local-ai/
 │       │   └── [id]/route.ts         #
 │       ├── knowledge/
 │       │   ├── route.ts              #   list / upload
+│       │   ├── wiki/                #   Wiki pages / settle; decisions are experimental
 │       │   ├── reindex/route.ts      #   batch reindex
 │       │   └── [id]/
 │       │       ├── route.ts          #   delete
+│       │       ├── wiki/route.ts     #   per-document outline / synthesis
 │       │       └── reindex/route.ts  #   single reindex
 │       └── settings/route.ts
 │
 ├── services/                         # Pure TypeScript business logic
 │   ├── types.ts
 │   ├── chat/prompt.ts                #   System prompt only
-│   ├── inference/                    #   Shared by chat + status
-│   ├── knowledge/                    #   Only smart layer
-│   │   ├── application/engine.ts     #   KnowledgeEngine entry
-│   │   ├── query/                    #   planner / rewrite / lexical-coverage / latin-stopwords
-│   │   ├── retrieval/                #   profile / highlight / honest term extraction
-│   │   ├── retriever.ts              #   HybridRetriever (executes; does not invent ladder)
-│   │   └── index.ts                  #   Wired exports only
+│   ├── platform/                    #   Host / ModelRuntime / LAN / OCR
+│   ├── knowledge/                  #   Only smart layer
+│   │   ├── application/engine.ts   #   KnowledgeEngine entry
+│   │   ├── wiki/                    #   Outline / synthesis / concepts / settle
+│   │   ├── query/                  #   planner / rewrite / lexical-coverage / latin-stopwords / zh-function-words
+│   │   ├── retrieval/              #   profile / highlight / honest term extraction
+│   │   ├── retriever.ts            #   HybridRetriever (executes; does not invent ladder)
+│   │   └── index.ts                #   Wired exports only
 │   └── settings/
 │
 ├── config/defaults.ts
@@ -274,6 +281,8 @@ See `config/embedding-artifacts.ts` and [CHANGELOG 1.2.0](../CHANGELOG.md#120--2
 > **1.2.1:** Citation availability fixes on top of 1.2.0 (scoped document read, phased memory scheduling, text line locators, TOC demotion). See [CHANGELOG 1.2.1](../CHANGELOG.md#121--2026-08-09).
 >
 > **1.3.0:** Local Office ingest (`convert_office` + on-device `@firecrawl/anydoc`); IndexedText preview aligned with citation line numbers; no embedded-image indexing. See [CHANGELOG 1.3.0](../CHANGELOG.md#130--2026-08-09).
+>
+> **1.4.0:** LLM Wiki compile layer (outlines / synthesis / concept pages / settle-from-chat); Chat defaults to the whole library; web/GitHub ingest retired. See [CHANGELOG 1.4.0](../CHANGELOG.md#140--2026-09-10).
 
 
 The full RAG pipeline is implemented across five modules in `services/knowledge/`:
@@ -307,6 +316,22 @@ User uploads PDF / TXT / Markdown / Office
 │ retriever  │  Unique entry: scope + keyword/hybrid (RRF on chunk id)
 └───────────┘
 ```
+
+### LLM Wiki compile layer
+
+Wiki is **not** a second retriever. L0 remains chunk + FTS/vectors. Wiki is a compile layer on Knowledge Engine: outline pages, Gemma-produced knowledge IR, terminology-backed concept identity, and a 2-hop semantic graph.
+
+| Layer | When | Gemma? |
+|-------|------|--------|
+| W0 `document_mirror` | After chunks commit; optional `compile_wiki_outlines` | No. Cap 48 sections / doc, 500 docs / scan |
+| W1 knowledge | User click → `compile_wiki`; token-packed batches, JSON schema + one repair, map-reduce claims; failed runs do not publish | Yes. Deferred while Chat holds Gemma |
+| W1 concepts | User click → `compile_wiki_concepts`; aliases reuse the shared terminology catalog | Identity cluster: no. Knowledge compile: yes, on click |
+| W2 graph | Resolved semantic relations + `cites`; Engine `openPage` / `followLink` | No. 2-hop cap; Scope required |
+| W3 settle | PATCH article (locks `user_edited`); Chat writes `notes_markdown` | No. Does **not** revive auto `conversation_settle_v1`. Merge/split/pending-merge stay compiler internals, not daily UI |
+
+Chat routing: intent outranks source count. Summarize (`document_read`) short-circuits to a compiled-page budget (single-doc mirror dump, or workspace overview of synthesis/notes — not TOC dump). Translation / full-text / analysis (`document_qa`) stays on L0 even for `library:all`. Remaining factual questions on workspace/multi-source (`multi_document`) fuse Wiki sections with L0 via weighted RRF (sources outrank compiled outlines). Chat defaults to workspace `library:all` (not a per-message attachment). `wiki_compile` is `heavyKind` and must **not** `markChatActive`. Chat-busy workers still claim `compile_wiki_outlines` / `compile_wiki_concepts`. Settle **appends** chat notes to **one** aligned page (concept if matched, else the first cited mirror); multi-source cites become a `pending_merge` candidate instead of broadcasting. Undo uses `action=undo` plus `settleId`. Merge/split decisions remain API-only; the library UI is pages, article, sources, and related. Unresolved semantic relations stay in `wiki_pending_edges`. Source delete withdraws claims that lose evidence, drops the document from concept sections, and deletes the library mirror. Stale synthesis is dropped from retrieval; sections and notes remain. Wiki page GET goes through `knowledgeOpenPage` (Scope required). Writes use `HTTP_TIMEOUT.knowledge` and throw on failure. Article/notes/knowledge changes snapshot into `wiki_page_revisions` (20 per page) for restore. `/wiki/*` HMAC is off by default (vinext Workers cannot read the token file; data-service already binds `127.0.0.1`). `ORYNODE_DATA_INTERNAL_AUTH=1` still allows unsigned loopback and verifies headers when present. Failed compiles stay visible via `wiki_compile_runs`.
+
+Chinese doc is the implementation source of truth: [ARCHITECTURE_zh-CN.md](ARCHITECTURE_zh-CN.md).
 
 ### 1. Parser
 
@@ -379,7 +404,7 @@ Current implementation: **SQLite BLOB + JavaScript cosine (`blob_scan`)**. Produ
 - Production entry: `KnowledgeEngine.retrieve` (`resolveQueryRewrite` then `planQuery`)
 - `HybridRetriever` runs FTS / hybrid; **lexical ladder is supplied via `keywordQuery.lexicalLadder`** — the index must not invent policy
 - `keywordQuery.terms` (`plan.searchTerms`) is the **honest** term list (highlight / diagnostics); **MATCH uses each ladder step’s `terms`**
-- Scope: `RetrievalScope`; UI derives it from the turn’s draft attachments — no auto-scope from older messages
+- Scope: `RetrievalScope`; UI derives it from workspace grounding + this-turn conversation files — no auto-scope from older messages
 - Keyword always; hybrid when Embedder + vectors exist and the tier allows; **phrase hits may short-circuit vectors**
 - Degraded reasons come only from capabilities/profile; phrase short-circuit must not falsely mark `VECTOR_INDEX_NOT_READY`
 
@@ -393,7 +418,7 @@ Current implementation: **SQLite BLOB + JavaScript cosine (`blob_scan`)**. Produ
 
 Contributor constraints:
 
-- Latin function words (`query/latin-stopwords.ts`) are only (1) an NL morphology signal and (2) MATCH-term cleaning for **`general`** ladder steps.
+- Latin function words (`query/latin-stopwords.ts`) and Chinese low-info/function morphemes (`query/zh-function-words.ts`) are only (1) an NL morphology signal and (2) MATCH-term cleaning for **`general`** ladder steps (`contentTermsForLexicalMatch`). Wiki search must consume those content terms — do not add question-tail regexes.
 - Do **not** hard-delete function words inside `extractSearchTerms` / `scripts/data-service/search-text.mjs` (mirrors Chinese low-info bigrams: demote, don’t delete at extract).
 - `scripts/data-service/lexical-coverage.mjs` is a **parity mirror**, not a second source of truth.
 - Filename detection must look like a path/basename (no whitespace, or contains `/` `\`); do not treat trailing `.js` in an English question as a filename.
@@ -574,6 +599,14 @@ Offline smoke: `npm run test:smoke-rag`.
 | PUT | `/conversation-files/:id/status` | Update conversation-file index status |
 | POST | `/conversation-files/vectors` | Batch write conversation-file embeddings |
 | POST | `/retrieval/chunks/query` | Unified chunk export (library + conversationFiles; requires conversationId for files) |
+| GET/PUT/PATCH/DELETE | `/wiki/pages` (`/:id`, `/:id/links`) | Wiki page CRUD / edges (compile policy stays in `services/knowledge/wiki`) |
+| PUT | `/wiki/pages/publish` | Atomic page + links + pendingEdges (W1 knowledge compile) |
+| POST | `/wiki/builds` | Record an outline/concept compile batch |
+| POST | `/wiki/compile-runs` | Knowledge compile diagnostics (publish/fail, repair, tokens) |
+| GET/POST | `/wiki/decisions` | Human merge/split/accept/reject; applied on concept compile |
+| PUT | `/wiki/pending-edges` | Unresolved semantic relations; never invent pages |
+| POST | `/wiki/candidates` | Settle pending-merge / review candidates |
+| POST | `/wiki/source-changed` | Mark concept pages stale, or drop a deleted document (claims, sections, mirror) |
 
 App-layer reindex (not data-service):
 
@@ -611,6 +644,14 @@ CREATE TABLE conversation_files (
 CREATE TABLE conversation_file_chunks (
   id TEXT PRIMARY KEY, file_id TEXT NOT NULL, ..., embedding BLOB,
   FOREIGN KEY (file_id) REFERENCES conversation_files(id) ON DELETE CASCADE);
+
+-- Wiki compile layer (018–026). W0 outline uses PUT /wiki/pages;
+-- W1 knowledge uses PUT /wiki/pages/publish. UNIQUE(namespace, source_document_id) from 026.
+CREATE TABLE wiki_pages (
+  id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE,
+  namespace TEXT NOT NULL, source_document_id TEXT NOT NULL, ...);
+CREATE TABLE wiki_links (from_id TEXT NOT NULL, to_id TEXT NOT NULL, rel TEXT NOT NULL, ...);
+CREATE TABLE wiki_page_revisions (id TEXT PRIMARY KEY, page_id TEXT NOT NULL, ...);
 ```
 
 ### SQLite Optimizations

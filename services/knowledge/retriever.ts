@@ -2,7 +2,7 @@
  * 混合检索器（唯一检索入口）
  *
  * 经 KeywordIndex / VectorIndex adapters（默认 FTS5 + BLOB），
- * 不再在本文件直接拼 data-service HTTP。
+ * 不经过 resolveIndexes()；sqlite-vec registry 不是生产路径。
  */
 
 import type {
@@ -26,6 +26,7 @@ import type { IndexCandidate, KeywordQuery } from "./ports/indexes";
 import { planVectorScanScope } from "./retrieval/vector-scan-scope";
 import { isDocumentReadIntent } from "./application/access-mode";
 import { rankTocAfterBody } from "./retrieval/toc-chunk";
+import { contextualizeChunkText } from "./retrieval/search-text";
 
 type ChunkRow = {
   id: string;
@@ -246,7 +247,11 @@ export class HybridRetriever implements Retriever {
 
     const topK = options.topK ?? SEARCH_CONFIG.topK;
     const ftsQuery = options.keywordQuery ?? { text: query };
-    const fts = await this.searchFts(ftsQuery, scope, Math.max(topK * 8, 64));
+    const fts = await this.searchFts(
+      ftsQuery,
+      scope,
+      SEARCH_CONFIG.ftsCandidateK,
+    );
 
     if (!options.preferKeyword) {
       const embedder = await this.getEmbedder();
@@ -442,7 +447,10 @@ export class HybridRetriever implements Retriever {
     const terms = extractSearchTerms(query);
     const scored = chunks.map((chunk) => ({
       ...chunk,
-      score: keywordScore(chunk.content, terms),
+      score: keywordScore(
+        contextualizeChunkText(chunk.content, chunk.headingPath),
+        terms,
+      ),
     }));
     scored.sort(
       (a, b) =>
@@ -498,7 +506,10 @@ export class HybridRetriever implements Retriever {
       keywordRanked = [...chunks]
         .map((chunk) => ({
           id: chunk.id,
-          score: keywordScore(chunk.content, terms),
+          score: keywordScore(
+            contextualizeChunkText(chunk.content, chunk.headingPath),
+            terms,
+          ),
         }))
         .filter((item) => item.score > 0)
         .sort((a, b) => b.score - a.score)

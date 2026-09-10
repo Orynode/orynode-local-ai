@@ -73,7 +73,7 @@ export function createMacosHostRuntime(
         ocr: ocrCap.available,
         ftsTokenizer: null,
         memoryTier: hostKnowledgeCeiling(hostClass, semantic),
-        externalConnectors: { web: true, github: true },
+        externalConnectors: { web: false, github: false },
       };
     },
     credentials: () => unsupportedCredentials,

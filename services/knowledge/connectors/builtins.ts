@@ -1,18 +1,10 @@
 /**
- * 内置 Connector 注册（仅 Node / data-service；会加载 jsdom、octokit）
+ * 内置 Connector 注册（仅 Node / data-service）
  *
+ * 网页 / GitHub 入库已停用，不再注册；实现仍保留供既有文档预览与单测。
  * Workers / vinext API 不得 import 本文件。
  */
 
-import { registerConnector } from "./registry";
-import { webUrlConnector } from "./web";
-import { githubRepoConnector } from "./github";
-
-let registered = false;
-
 export function registerBuiltinConnectors(): void {
-  if (registered) return;
-  registerConnector("web", () => webUrlConnector);
-  registerConnector("github", () => githubRepoConnector);
-  registered = true;
+  // no-op：资料库只接受本地文件导入
 }

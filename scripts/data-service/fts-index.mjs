@@ -17,6 +17,7 @@ import {
 } from "./lexical-coverage.mjs";
 import {
   buildSearchText,
+  contextualizeChunkText,
   escapeFtsToken,
   extractSearchTerms,
 } from "./search-text.mjs";
@@ -134,7 +135,11 @@ export function upsertFtsChunks(database, namespace, documentId, chunks) {
       `INSERT INTO ${table} (chunk_id, document_id, search_text) VALUES (?, ?, ?)`,
     );
     for (const chunk of chunks) {
-      insert.run(chunk.id, documentId, buildSearchText(chunk.content));
+      insert.run(
+        chunk.id,
+        documentId,
+        buildSearchText(chunk.content, chunk.headingPath),
+      );
     }
   }
 
@@ -153,7 +158,10 @@ export function upsertFtsChunks(database, namespace, documentId, chunks) {
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
     for (const chunk of chunks) {
-      const fields = buildMultilingualFields(chunk.content);
+      const fields = buildMultilingualFields(
+        chunk.content,
+        chunk.headingPath,
+      );
       insert.run(
         chunk.id,
         documentId,
@@ -357,7 +365,10 @@ export function searchKeywordIndex(database, options) {
     if (!requiresContiguousPhrase || !normalizedPhrase) return;
     const needle = normalizedPhrase.toLocaleLowerCase();
     for (const [id, chunk] of [...byId.entries()]) {
-      const hay = String(chunk.content ?? "").toLocaleLowerCase();
+      const hay = contextualizeChunkText(
+        chunk.content,
+        chunk.headingPath,
+      ).toLocaleLowerCase();
       if (!hay.includes(needle)) byId.delete(id);
     }
   };
@@ -601,7 +612,10 @@ function runMinimumMatch({
  */
 function filterByCoverage(byId, terms, minimum) {
   for (const [id, chunk] of [...byId.entries()]) {
-    const content = String(chunk.content ?? "");
+    const content = contextualizeChunkText(
+      chunk.content,
+      chunk.headingPath,
+    );
     if (!passesCoverage(content, terms, minimum)) {
       byId.delete(id);
     }

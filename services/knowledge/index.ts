@@ -38,6 +38,10 @@ export {
 export { ingestDocument } from "./ingest";
 export type { IngestTarget, IngestResult } from "./ingest";
 export {
+  compileDocumentMirror,
+  WIKI_COMPILER_ID,
+} from "./wiki/compile-document-mirror";
+export {
   hashContent,
   resolveDisplayName,
 } from "./hash";

@@ -10,6 +10,7 @@ import {
   knowledgeCitation,
   knowledgeListSources,
   knowledgeOpen,
+  knowledgeOpenPage,
 } from "../../services/agent/knowledge-tools";
 
 const policy = createScopePolicy();
@@ -146,6 +147,20 @@ test("Agent knowledgeOpen: 无 scope 抛 CHUNK_NOT_IN_SCOPE", async () => {
       err instanceof KnowledgeError &&
       err.code === "chunk_not_in_scope" &&
       err.message === "CHUNK_NOT_IN_SCOPE",
+  );
+});
+
+test("Agent knowledgeOpenPage: 无 scope 抛 PAGE_NOT_IN_SCOPE", async () => {
+  await assert.rejects(
+    () =>
+      knowledgeOpenPage("concept:library:x", {
+        scope: { mode: "none" },
+        ownerRef: "t1",
+      }),
+    (err: unknown) =>
+      err instanceof KnowledgeError &&
+      err.code === "page_not_in_scope" &&
+      err.message === "PAGE_NOT_IN_SCOPE",
   );
 });
 

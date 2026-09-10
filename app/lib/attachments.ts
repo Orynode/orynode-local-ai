@@ -1,13 +1,11 @@
 /**
  * 对话附件 ↔ 检索范围
  *
- * - library / library_all：持久资料库
- * - conversation_file：本会话附件
- * 草稿选中只作用于本条消息；会话文件本身绑 conversationId 可再选。
+ * 资料库是工作区记忆（NotebookLM / Claude Projects）：
+ * 有可检索文档时默认 library:all，不写成消息附件。
+ * 选单篇是收窄；本轮附件只保留会话文件。
  *
- * library_all 表示「整库检索范围」。无法检索的文档（processing_error 等）
- * 仍会被 FTS / chunk 查询白名单过滤，不会当成证据返回。
- * 资料库页的「全部可检索资料」则显式枚举当前可用 id，语义更窄。
+ * library_all 仍可从旧消息里读出，新发送不再写入。
  */
 
 import type {
@@ -16,6 +14,15 @@ import type {
   MessageAttachment,
 } from "../../services/types";
 import type { RetrievalScope } from "../../services/knowledge/types";
+import { isUsableLibraryDocument } from "../../services/knowledge/status";
+
+/** 工作区资料库怎么进这一轮检索：默认整库，可收窄或关掉 */
+export type LibraryGrounding =
+  | { mode: "workspace" }
+  | { mode: "off" }
+  | { mode: "pins"; documentIds: string[] };
+
+export const WORKSPACE_GROUNDING: LibraryGrounding = { mode: "workspace" };
 
 /** 将可能含旧 kind 的附件规范为新模型 */
 export function normalizeAttachment(
@@ -49,6 +56,71 @@ export function normalizeAttachments(
   return items.length > 0 ? items : undefined;
 }
 
+type ConversationFileScope = {
+  conversationId: string;
+  fileIds: string[];
+};
+
+function conversationFileScope(
+  attachments: MessageAttachment[] | undefined,
+  conversationId?: string | null,
+): ConversationFileScope | undefined {
+  if (!attachments || !conversationId) return undefined;
+  const fileIds = attachments
+    .filter((item) => item.kind === "conversation_file")
+    .map((item) => item.id);
+  if (fileIds.length === 0) return undefined;
+  return { conversationId, fileIds };
+}
+
+function withSources(
+  library: { documentIds: string[] } | "all" | undefined,
+  conversationFiles: ConversationFileScope | undefined,
+): RetrievalScope {
+  if (!library && !conversationFiles) return { mode: "none" };
+  return {
+    mode: "sources",
+    ...(library ? { library } : {}),
+    ...(conversationFiles ? { conversationFiles } : {}),
+  };
+}
+
+/**
+ * 当前产品入口：工作区 grounding + 本轮会话附件。
+ * 空附件不再等于「不查资料库」。
+ */
+export function resolveRetrievalScope(input: {
+  grounding: LibraryGrounding;
+  attachments?: MessageAttachment[];
+  conversationId?: string | null;
+  hasSearchableLibrary: boolean;
+}): RetrievalScope {
+  const conversationFiles = conversationFileScope(
+    input.attachments,
+    input.conversationId,
+  );
+  if (input.grounding.mode === "off") {
+    return withSources(undefined, conversationFiles);
+  }
+  if (input.grounding.mode === "pins") {
+    const documentIds = [
+      ...new Set(input.grounding.documentIds.map((id) => id.trim()).filter(Boolean)),
+    ];
+    return withSources(
+      documentIds.length > 0 ? { documentIds } : undefined,
+      conversationFiles,
+    );
+  }
+  return withSources(
+    input.hasSearchableLibrary ? "all" : undefined,
+    conversationFiles,
+  );
+}
+
+/**
+ * 兼容旧路径：只从附件推导 scope。
+ * 空附件 = none（历史气泡 / 旧调用）。新 Chat 请用 resolveRetrievalScope。
+ */
 export function scopeFromAttachments(
   attachments: MessageAttachment[] | undefined,
   conversationId?: string | null,
@@ -61,30 +133,15 @@ export function scopeFromAttachments(
   const libraryIds = attachments
     .filter((item) => item.kind === "library")
     .map((item) => item.id);
-  const fileIds = attachments
-    .filter((item) => item.kind === "conversation_file")
-    .map((item) => item.id);
+  const conversationFiles = conversationFileScope(attachments, conversationId);
 
   const library = useAllLibrary
     ? ("all" as const)
     : libraryIds.length > 0
       ? { documentIds: libraryIds }
       : undefined;
-  // 无 conversationId 时不传会话附件 scope，避免跨会话按 fileId 检索
-  const conversationFiles =
-    fileIds.length > 0 && conversationId
-      ? { conversationId, fileIds }
-      : undefined;
 
-  if (!library && !conversationFiles) {
-    return { mode: "none" };
-  }
-
-  return {
-    mode: "sources",
-    ...(library ? { library } : {}),
-    ...(conversationFiles ? { conversationFiles } : {}),
-  };
+  return withSources(library, conversationFiles);
 }
 
 export function attachmentFromDocument(
@@ -115,23 +172,6 @@ export function allDocumentsAttachment(): MessageAttachment {
   };
 }
 
-/** 草稿里切换单篇资料库文档：若当前是「全部」，先拆成单篇再切换 */
-export function toggleDraftDocument(
-  draft: MessageAttachment[],
-  document: KnowledgeDocument,
-): MessageAttachment[] {
-  const withoutAll = draft.filter((item) => item.kind !== "library_all");
-  const exists = withoutAll.some(
-    (item) => item.kind === "library" && item.id === document.id,
-  );
-  if (exists) {
-    return withoutAll.filter(
-      (item) => !(item.kind === "library" && item.id === document.id),
-    );
-  }
-  return [...withoutAll, attachmentFromDocument(document)];
-}
-
 /** 草稿里切换本会话附件 */
 export function toggleDraftConversationFile(
   draft: MessageAttachment[],
@@ -157,4 +197,74 @@ export function removeDraftAttachment(
 
 export function isLibraryAll(item: MessageAttachment): boolean {
   return item.kind === "library_all";
+}
+
+export function conversationFileAttachments(
+  attachments: MessageAttachment[],
+): MessageAttachment[] {
+  return attachments.filter((item) => item.kind === "conversation_file");
+}
+
+export function togglePinnedDocument(
+  grounding: LibraryGrounding,
+  documentId: string,
+): LibraryGrounding {
+  const current = grounding.mode === "pins" ? grounding.documentIds : [];
+  const exists = current.includes(documentId);
+  const next = exists
+    ? current.filter((id) => id !== documentId)
+    : [...current, documentId];
+  if (next.length === 0) return WORKSPACE_GROUNDING;
+  return { mode: "pins", documentIds: next };
+}
+
+/** 资料库多选「去对话」：全选等于工作区，子集才收窄 */
+export function groundingFromLibrarySelection(
+  selectedIds: string[],
+  usableIds: string[],
+): LibraryGrounding {
+  if (selectedIds.length === 0) return WORKSPACE_GROUNDING;
+  if (
+    usableIds.length > 0 &&
+    usableIds.every((id) => selectedIds.includes(id))
+  ) {
+    return WORKSPACE_GROUNDING;
+  }
+  return { mode: "pins", documentIds: [...selectedIds] };
+}
+
+export function dropPinnedDocument(
+  grounding: LibraryGrounding,
+  documentId: string,
+): LibraryGrounding {
+  if (grounding.mode !== "pins") return grounding;
+  const next = grounding.documentIds.filter((id) => id !== documentId);
+  return next.length > 0 ? { mode: "pins", documentIds: next } : WORKSPACE_GROUNDING;
+}
+
+export function hasSearchableLibrary(
+  documents: Array<{ status?: string | null; chunkCount?: number | null }>,
+): boolean {
+  return documents.some((doc) => isUsableLibraryDocument(doc));
+}
+
+/** 写入气泡的附件：只记会话文件和收窄钉住的篇，不写 library_all */
+export function displayMessageAttachments(input: {
+  grounding: LibraryGrounding;
+  attachments: MessageAttachment[];
+  documents: Array<{ id: string; name: string }>;
+}): MessageAttachment[] | undefined {
+  const files = conversationFileAttachments(input.attachments);
+  const pins =
+    input.grounding.mode === "pins"
+      ? input.grounding.documentIds
+          .flatMap((id) => {
+            const document = input.documents.find((item) => item.id === id);
+            return document
+              ? [{ kind: "library" as const, id: document.id, name: document.name }]
+              : [];
+          })
+      : [];
+  const items = [...files, ...pins];
+  return items.length > 0 ? items : undefined;
 }

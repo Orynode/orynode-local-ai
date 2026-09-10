@@ -269,4 +269,17 @@ test("normalizeDiagnosticStrategies: 不按 profile 预填 vector/rrf/lexical_re
 
   const lexical = normalizeDiagnosticStrategies(["keyword", "lexical_rerank"]);
   assert.ok(lexical.includes("lexical_rerank"));
+
+  const wiki = normalizeDiagnosticStrategies(["keyword", "wiki_document_mirror"]);
+  assert.ok(wiki.includes("wiki_document_mirror"));
+
+  const wikiFusion = normalizeDiagnosticStrategies([
+    "keyword",
+    "wiki_rrf",
+    "wiki_graph",
+    "wiki_follow_link",
+  ]);
+  assert.ok(wikiFusion.includes("wiki_rrf"));
+  assert.ok(wikiFusion.includes("wiki_graph"));
+  assert.ok(wikiFusion.includes("wiki_follow_link"));
 });

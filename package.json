@@ -1,6 +1,6 @@
 {
   "name": "orynode-local-ai",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "Orynode Local AI — open-source, local-first AI assistant for Apple Silicon Macs",
   "author": "Orynode",
@@ -29,6 +29,8 @@
     "test:unit": "tsx --test tests/knowledge/*.test.ts tests/chat/*.test.ts tests/data-service/*.test.mjs tests/platform/*.test.mjs tests/platform/*.test.ts",
     "test:knowledge": "tsx --test tests/knowledge/*.test.ts tests/chat/*.test.ts",
     "test:retrieval-eval": "node --import tsx scripts/knowledge/run-retrieval-eval.ts --json .orynode/eval/latest.json --md .orynode/eval/latest.md",
+    "test:semantic-eval": "node --import tsx scripts/knowledge/run-semantic-eval.ts",
+    "test:e2e": "playwright test",
     "test:smoke-rag": "node scripts/knowledge/smoke-rag-8gb.mjs",
     "test:smoke-office": "node scripts/knowledge/smoke-office-8gb.mjs",
     "knowledge:benchmark-embedding": "node --import tsx scripts/knowledge/benchmark-embedding-artifacts.ts --dry-run",
@@ -49,7 +51,7 @@
     "@octokit/rest": "^21.1.1",
     "@xenova/transformers": "^2.17.2",
     "jsdom": "^26.1.0",
-    "next": "^16.2.12",
+    "next": "^16.3.3",
     "pdfjs-dist": "^6.2.108",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -60,6 +62,7 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.53.1",
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/postcss": "4.3.3",
     "@types/jsdom": "^21.1.7",
     "@types/node": "22.19.19",
@@ -68,13 +71,17 @@
     "@vitejs/plugin-react": "6.1.0",
     "@vitejs/plugin-rsc": "^0.5.34",
     "eslint": "9.39.4",
-    "eslint-config-next": "16.3.2",
+    "eslint-config-next": "^16.3.3",
     "react-server-dom-webpack": "^19.2.8",
     "tailwindcss": "4.3.3",
     "typescript": "5.9.3",
     "vinext": "^1.0.0-beta.8",
     "vite": "^8.2.2",
     "wrangler": "^4.125.0"
+  },
+  "overrides": {
+    "protobufjs": "7.6.3",
+    "sharp": "0.35.4"
   },
   "type": "module"
 }

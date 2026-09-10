@@ -7,6 +7,8 @@ Orynode Local AI 是一款面向 Apple Silicon Mac 的开源、本地优先 AI
 
 ## 界面预览
 
+预览来自运行中的本机。若本机开启了可选语义检索，资料库页眉会显示「关键词 + 语义」；**默认安装只做关键词检索**。
+
 ### 首页
 
 ![首页](docs/images/home.png)
@@ -34,6 +36,7 @@ V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复�
 
 - 本地 Web 对话（流式输出、停止生成、自动滚动；Orynode SSE v1 + 结构化引用）
 - **RAG / Knowledge Engine**（1.1.0 主链路 + **1.2.x** 检索/引用修订 + **1.3.0** 本地 Office 摄取）：Scope 授权、Hybrid、可学习 Query Rewrite、词法阶梯、Citation、ProcessingBuild、处理队列、知识工作台 Search 预览；Office 经本机 anydoc → Markdown
+- **LLM Wiki（1.4.0）**：资料库大纲与概念页；点「写这一页」才用本机 Gemma 生成带引用综述；对话可将回答写入对准的一篇百科（可撤销）。Wiki 不是第二套 RAG，重要结论仍回原文
 - TurboFieldfare 连接状态与当前模型显示（经 ModelRuntime，不直连）
 - OpenAI 兼容对话接口代理
 - 可复现的 TurboFieldfare / Gemma 4 安装；一条命令同时启动模型与 Web
@@ -57,9 +60,10 @@ V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复�
 | Embedding 兼容 | bge-small-zh-v1.5 | 旧索引对照；勿与 E5 混用 |
 | OCR | Apple Vision（`orynode-ocr`） | macOS；Windows 预留 PP-OCR/ONNX stub |
 | Office 转换 | `@firecrawl/anydoc` | `npm install` 拉取；**仅本机** Office→Markdown；**禁止** Firecrawl 云端 Parse |
+| Wiki 编译 | 本机 Gemma + SQLite `wiki_*` | 叠在 Engine 上；不另起检索栈 |
 | 应用栈 | Next.js · React · vinext · TypeScript · SQLite | 本地 Web + Data Service `:4318` |
 
-完整清单与版本边界见 [CHANGELOG 1.3.0](CHANGELOG.md#130--2026-08-09)（引用可用性：[1.2.1](CHANGELOG.md#121--2026-08-09)；检索闭环：[1.2.0](CHANGELOG.md#120--2026-08-05)；KE 首发：[1.1.0](CHANGELOG.md#110--2026-08-03)）。
+完整清单与版本边界见 [CHANGELOG 1.4.0](CHANGELOG.md#140--2026-09-10)（Office：[1.3.0](CHANGELOG.md#130--2026-08-09)；引用可用性：[1.2.1](CHANGELOG.md#121--2026-08-09)；检索闭环：[1.2.0](CHANGELOG.md#120--2026-08-05)；KE 首发：[1.1.0](CHANGELOG.md#110--2026-08-03)）。
 
 ## 本地资料与检索
 
@@ -74,8 +78,9 @@ V2 将提供经过签名的 macOS 启动器和 DMG 安装包。启动器会复�
 
 1. **解析**：按类型提取文本——PDF / TXT / Markdown 走原生解析（扫描/混合 PDF 可走 Apple Vision OCR，`process_revision` Job）；常见 Office（docx/pptx/xlsx 等）走本机 `@firecrawl/anydoc`（`convert_office` Job，**禁止**云端 Parse）
 2. **分块 / 索引**：切成可检索片段写入 SQLite；资料库入库前内容哈希去重
-3. **检索**：按**本轮消息**勾选范围 → `HybridRetriever`（默认 FTS；可选向量 + RRF）→ 注入上下文并带结构化引用
-4. 草稿选中发送后清空；打开历史不自动恢复上次勾选，但可再次从本会话附件列表选择
+3. **检索**：有可检索资料时**默认整库**（可含已生成的 Wiki 大纲/综述，权重低于原文）→ `HybridRetriever`（默认 FTS；可选向量 + RRF）→ 注入上下文并带结构化引用。可收窄到单篇或关掉资料库
+4. 本轮会话附件可勾选；打开历史不自动恢复上次草稿勾选，但可再次从本会话附件列表选择
+5. **Wiki（可选）**：入库后自动抽大纲（不跑模型）；点「写这一页」才生成综述；「整理概念」只归并条目、不占用 Gemma
 
 资料库显示名可在导入时填写，也可事后重命名；改名不会重建索引。
 
@@ -150,6 +155,11 @@ Trusted-LAN 正式路径使用一次性配对码与可撤销会话；
 `ORYNODE_TRUSTED_LAN_UNSAFE=1` 仅为**无认证开发预览**，不得当作安全共享模式，
 也不要映射 3000 端口到公网。按下 `Control+C` 可以停止服务。
 
+正式运行、升级、备份恢复与故障处理清单见
+[生产运行与恢复](docs/PRODUCTION_READINESS.md)。公网、多租户、Windows 完整运行
+不在当前支持范围。网页 / GitHub 入库已停用；`sources`、Wiki merge/split
+decisions 与 pending-edges 仍是**无完整用户界面**的实验/内部 HTTP 接口，不要当成稳定 API。
+
 如果你已经单独管理 TurboFieldfare，可以执行 `npm run dev`，只启动 Web
 界面。如需修改本地 API 地址，请将 `.env.example` 复制为
 `.env.local`，然后修改其中的配置。
@@ -166,8 +176,8 @@ orynode-local-ai/
 ├── services/                     # 核心业务逻辑（纯 TypeScript）
 │   ├── chat/                     #   Prompt / SSE v1 / 上下文预算
 │   ├── platform/                 #   Host / ModelRuntime / LAN / OCR 装配（含 Windows stub）
-│   ├── knowledge/                #   Knowledge Engine：解析/分块/检索/OCR 管线
-│   ├── agent/                    #   受控知识工具 + Agent space（无 UI 主路径）
+│   ├── knowledge/                #   Knowledge Engine：解析/分块/检索/OCR + wiki/ 编译层
+│   ├── agent/                    #   受控知识工具 + Agent space（无产品主路径 UI）
 │   └── settings/                 #   运行时设置
 ├── native/macos/orynode-ocr/     # Apple Vision OCR helper（源码；.build 不入库）
 ├── config/                       # defaults + embedding-artifacts
@@ -221,7 +231,7 @@ orynode-local-ai/
 
 ## 贡献说明
 
-当前阶段**不接受外部 Pull Request / 代码贡献**。欢迎通过 Issues 反馈问题或建议，详见 [CONTRIBUTING_zh-CN.md](CONTRIBUTING_zh-CN.md)。
+MIT 允许你 fork 本仓库。当前阶段**不接受外部 Pull Request 合入 upstream**；欢迎通过 Issues 反馈问题或建议，详见 [CONTRIBUTING_zh-CN.md](CONTRIBUTING_zh-CN.md)。
 
 ## 抖音
 
@@ -233,6 +243,7 @@ orynode-local-ai/
 
 ## 开源许可证
 
-Orynode Local AI 使用 [MIT License](LICENSE)。
+Orynode Local AI 使用 [MIT License](LICENSE)，允许 fork、修改与再分发。
+`package.json` 的 `"private": true` 只阻止误发布到 npm registry，**不是**闭源。
 
 Copyright (c) 2026 Orynode。

@@ -52,6 +52,9 @@ interface MessageBubbleProps {
   /** 会话附件「查看原文」需要绑定当前会话 */
   conversationId?: string | null;
   onCopy: (message: Message, format: "txt" | "md") => void;
+  onSettleToWiki?: (message: Message) => void;
+  canUndoSettle?: boolean;
+  onUndoSettle?: () => void;
 }
 
 function locatorLabel(citation: MessageCitation): string {
@@ -425,6 +428,9 @@ export function MessageBubble({
   copiedMessageId,
   conversationId = null,
   onCopy,
+  onSettleToWiki,
+  canUndoSettle = false,
+  onUndoSettle,
 }: MessageBubbleProps) {
   const [activeChipId, setActiveChipId] = useState<string | null>(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
@@ -601,6 +607,32 @@ export function MessageBubble({
                         : "复制 MD"}
                     </span>
                   </button>
+                  {onSettleToWiki &&
+                  message.content.trim() &&
+                  (message.citations?.length ?? 0) > 0 ? (
+                    <button
+                      type="button"
+                      className="message-action"
+                      onClick={() => onSettleToWiki(message)}
+                      aria-label="写入百科"
+                      title="把本轮回答写进对准的百科页，不会调用模型"
+                    >
+                      <Icon name="database" />
+                      <span>写入百科</span>
+                    </button>
+                  ) : null}
+                  {canUndoSettle && onUndoSettle ? (
+                    <button
+                      type="button"
+                      className="message-action"
+                      onClick={() => onUndoSettle()}
+                      aria-label="撤销写入"
+                      title="撤回刚刚写入百科页的内容"
+                    >
+                      <Icon name="refresh" />
+                      <span>撤销写入</span>
+                    </button>
+                  ) : null}
                   {typeof message.durationMs === "number" && (
                     <span className="message-duration">
                       耗时 {formatDuration(message.durationMs)}
@@ -627,9 +659,11 @@ export function MessageBubble({
                       />
                     </span>
                     <span className="message-attachment-name">
-                      {item.kind === "conversation_file"
-                        ? `${item.name}（本对话）`
-                        : item.name}
+                      {item.kind === "library_all"
+                        ? "资料库"
+                        : item.kind === "conversation_file"
+                          ? `${item.name}（本对话）`
+                          : item.name}
                     </span>
                   </div>
                 ))}

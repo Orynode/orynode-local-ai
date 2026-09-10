@@ -1,5 +1,9 @@
 /**
  * Index Adapter Registry — 上层只依赖 KeywordIndex / VectorIndex
+ *
+ * 生产 HybridRetriever 直接 new Fts5KeywordIndex / BlobScanVectorIndex，
+ * 不走本 registry。sqlite-vec 分支仅供探测与单测；设置
+ * ORYNODE_INDEX_BACKEND=sqlite-vec 不会改变生产检索路径。
  */
 
 import type { KeywordIndex, VectorIndex } from "../ports/indexes";

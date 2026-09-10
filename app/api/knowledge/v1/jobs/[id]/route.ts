@@ -40,3 +40,33 @@ export async function GET(request: Request, { params }: Params) {
     );
   }
 }
+
+export async function POST(request: Request, { params }: Params) {
+  const access = requireLanAccess(request);
+  if (!access.ok) {
+    return Response.json(
+      { error: access.error, code: access.code },
+      { status: access.status },
+    );
+  }
+  const { id } = await params;
+  try {
+    const response = await fetch(
+      `${ORYNODE_DATA_URL}/jobs/${encodeURIComponent(id)}/retry`,
+      {
+        method: "POST",
+        signal: AbortSignal.timeout(HTTP_TIMEOUT.knowledge),
+      },
+    );
+    const body = await response.json().catch(() => ({}));
+    return Response.json(
+      { apiVersion: "v1", ...body },
+      { status: response.status },
+    );
+  } catch {
+    return Response.json(
+      { error: "本地资料库服务尚未启动", code: "data_service_unavailable" },
+      { status: 503 },
+    );
+  }
+}

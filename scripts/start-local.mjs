@@ -42,6 +42,33 @@ loadEnvFiles();
 const children = new Set();
 let stopping = false;
 
+function loadWikiInternalToken() {
+  const path = resolve(projectRoot, ".orynode/data-internal.token");
+  try {
+    const token = readFileSync(path, "utf8").trim();
+    if (token) process.env.ORYNODE_DATA_INTERNAL_TOKEN = token;
+  } catch {
+    // data-service 稍后写入
+  }
+}
+
+async function waitForWikiInternalToken() {
+  const path = resolve(projectRoot, ".orynode/data-internal.token");
+  for (let i = 0; i < 50; i += 1) {
+    try {
+      const token = readFileSync(path, "utf8").trim();
+      if (token) {
+        process.env.ORYNODE_DATA_INTERNAL_TOKEN = token;
+        return;
+      }
+    } catch {
+      // wait
+    }
+    await delay(50);
+  }
+  loadWikiInternalToken();
+}
+
 function run(command, args, options = {}) {
   const child = spawn(command, args, {
     cwd: projectRoot,
@@ -86,6 +113,24 @@ async function isOrynodeDataService() {
   } catch {
     return false;
   }
+}
+
+/** 旧进程强制 HMAC 时 vinext Worker 读不到 token，打开百科会 401。 */
+async function wikiBlockedByHmac() {
+  try {
+    const response = await fetch(
+      "http://127.0.0.1:4318/wiki/pages?namespace=library&limit=1",
+      { signal: AbortSignal.timeout(1500) },
+    );
+    return response.status === 401;
+  } catch {
+    return false;
+  }
+}
+
+function startDataService() {
+  console.log("Starting the Orynode local data service...");
+  run("node", ["--disable-warning=ExperimentalWarning", "scripts/local-data-service.mjs"]);
 }
 
 function portIsOpen(port, host = "127.0.0.1") {
@@ -215,14 +260,20 @@ if (await portIsOpen(3000, "localhost")) {
 }
 
 if (!(await portIsOpen(4318, "127.0.0.1"))) {
-  console.log("Starting the Orynode local data service...");
-  run("node", ["--disable-warning=ExperimentalWarning", "scripts/local-data-service.mjs"]);
+  startDataService();
 } else if (await isOrynodeDataService()) {
-  console.log("Using the Orynode data service already running on port 4318.");
+  if (await wikiBlockedByHmac()) {
+    console.log(
+      "Restarting data-service: wiki HMAC blocked the Web worker (cannot read the token file).",
+    );
+    await mustFreePort(4318, "Port 4318");
+    startDataService();
+  } else {
+    console.log("Using the Orynode data service already running on port 4318.");
+  }
 } else {
   await mustFreePort(4318, "Port 4318");
-  console.log("Starting the Orynode local data service...");
-  run("node", ["--disable-warning=ExperimentalWarning", "scripts/local-data-service.mjs"]);
+  startDataService();
 }
 
 if (!(await portIsOpen(8080, "127.0.0.1"))) {
@@ -294,4 +345,5 @@ if (accessMode === "trusted_lan" && trustedLanUnsafe) {
 console.log(
   "TurboFieldfare and SQLite remain private on 127.0.0.1 and are not exposed directly.\n",
 );
+await waitForWikiInternalToken();
 run("npm", ["run", "dev", "--", "--hostname", webHostname]);

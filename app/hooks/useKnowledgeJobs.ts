@@ -65,6 +65,23 @@ export function partitionKnowledgeJobs(jobs: KnowledgeJob[]): {
   return { activeJobs, recentJobs };
 }
 
+export type KnowledgeJobsPanelTab = "active" | "recent";
+
+function activeJobIds(jobs: KnowledgeJob[]): string[] {
+  return jobs.filter((job) => isActiveJobStatus(job.status)).map((job) => job.id);
+}
+
+/** 新任务入队切到进行中；队列清空切到最近完成；其余保持用户当前 tab */
+export function jobsPanelTabForActiveChange(
+  prevActiveIds: readonly string[],
+  nextActiveIds: readonly string[],
+): KnowledgeJobsPanelTab | null {
+  const prevSet = new Set(prevActiveIds);
+  if (nextActiveIds.some((id) => !prevSet.has(id))) return "active";
+  if (prevActiveIds.length > 0 && nextActiveIds.length === 0) return "recent";
+  return null;
+}
+
 export function jobTypeLabel(type: string): string {
   switch (type) {
     case "embed_document":
@@ -73,12 +90,42 @@ export function jobTypeLabel(type: string): string {
       return "PDF/OCR 处理";
     case "convert_office":
       return "Office 转换";
+    case "compile_wiki":
+      return "生成综述";
+    case "compile_wiki_outlines":
+      return "重抽大纲";
+    case "compile_wiki_concepts":
+      return "整理概念";
     case "sync_source":
       return "来源同步";
     case "garbage_collect":
       return "清理";
     default:
       return type;
+  }
+}
+
+export function wikiCompileErrorLabel(error: string): string {
+  const code = String(error || "").split(":")[0]?.trim();
+  switch (code) {
+    case "WIKI_SYNTHESIS_TOO_SHORT":
+      return "模型写得太短，综述没有入库";
+    case "WIKI_SYNTHESIS_NO_CITATION":
+      return "综述缺少出处编号";
+    case "WIKI_SYNTHESIS_UNCITED_PARAGRAPH":
+      return "有段落没有出处";
+    case "WIKI_SYNTHESIS_BAD_CITATION":
+      return "出处编号对不上大纲";
+    case "WIKI_KNOWLEDGE_NO_CLAIMS":
+      return "没有抽出可核验的主张";
+    case "WIKI_KNOWLEDGE_NO_EVIDENCE":
+      return "主张缺少原文证据";
+    case "WIKI_KNOWLEDGE_NOT_JSON":
+      return "模型输出不是可用的知识结构";
+    case "WIKI_KNOWLEDGE_SCHEMA":
+      return "模型输出结构不对";
+    default:
+      return error;
   }
 }
 
@@ -123,6 +170,11 @@ export function formatJobProgress(
   if (phase === "embedding") return "向量化中";
   if (phase === "keyword_index") return "关键词索引";
   if (phase === "chunking") return "分块中";
+  if (phase === "synthesizing") return "生成综述";
+  if (phase === "loading") return "读取大纲";
+  if (phase === "clustering") return "归并概念";
+  if (phase === "extracting") return "重抽大纲";
+  if (phase === "writing") return "写入百科";
   return phase;
 }
 
@@ -185,11 +237,15 @@ export function useKnowledgeJobs(options?: {
   const [jobs, setJobs] = useState<KnowledgeJob[]>([]);
   const [summary, setSummary] = useState<KnowledgeJobsSummary>(EMPTY_SUMMARY);
   const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState<KnowledgeJobsPanelTab>("recent");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const hadActiveRef = useRef(false);
+  const jobsRef = useRef(jobs);
+  const prevActiveIdsRef = useRef<string[]>([]);
   const onQueueSettledRef = useRef(options?.onQueueSettled);
+  jobsRef.current = jobs;
   useEffect(() => {
     onQueueSettledRef.current = options?.onQueueSettled;
   });
@@ -246,6 +302,7 @@ export function useKnowledgeJobs(options?: {
 
   const openPanel = useCallback(() => {
     setOpen(true);
+    setTab(activeJobIds(jobsRef.current).length > 0 ? "active" : "recent");
     void refreshJobs().then((result) => {
       if (result && snapshotHasActive(result)) startPolling();
       else stopPolling();
@@ -258,6 +315,7 @@ export function useKnowledgeJobs(options?: {
     setOpen((prev) => {
       const next = !prev;
       if (next) {
+        setTab(activeJobIds(jobsRef.current).length > 0 ? "active" : "recent");
         void refreshJobs().then((result) => {
           if (result && snapshotHasActive(result)) startPolling();
           else stopPolling();
@@ -267,14 +325,56 @@ export function useKnowledgeJobs(options?: {
     });
   }, [refreshJobs, startPolling, stopPolling]);
 
-  /** 入队后：刷新角标；有任务时展开顶栏下拉并轮询 */
+  /** 入队后：打开处理队列并切到进行中，再刷新角标 / 轮询 */
   const notifyJobsChanged = useCallback(() => {
     setOpen(true);
+    setTab("active");
     void refreshJobs().then((result) => {
       if (result && snapshotHasActive(result)) startPolling();
       else stopPolling();
     });
   }, [refreshJobs, startPolling, stopPolling]);
+
+  const retryJob = useCallback(
+    async (jobId: string) => {
+      setLoading(true);
+      try {
+        const response = await fetch(
+          `/api/knowledge/v1/jobs/${encodeURIComponent(jobId)}`,
+          { method: "POST" },
+        );
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          setError(
+            typeof body.error === "string" ? body.error : "无法重新排队任务",
+          );
+          return false;
+        }
+        setTab("active");
+        const snapshot = await refreshJobs({ quiet: true });
+        if (snapshot && snapshotHasActive(snapshot)) startPolling();
+        return true;
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : "无法重新排队任务");
+        return false;
+      } finally {
+        setLoading(false);
+      }
+    },
+    [refreshJobs, startPolling],
+  );
+
+  useEffect(() => {
+    const nextIds = activeJobIds(jobs);
+    if (!open) {
+      prevActiveIdsRef.current = nextIds;
+      return;
+    }
+    const prevIds = prevActiveIdsRef.current;
+    prevActiveIdsRef.current = nextIds;
+    const nextTab = jobsPanelTabForActiveChange(prevIds, nextIds);
+    if (nextTab) setTab(nextTab);
+  }, [open, jobs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -304,6 +404,8 @@ export function useKnowledgeJobs(options?: {
     summary,
     activeCount,
     open,
+    tab,
+    setTab,
     loading,
     error,
     setOpen,
@@ -311,6 +413,7 @@ export function useKnowledgeJobs(options?: {
     closePanel,
     togglePanel,
     refreshJobs,
+    retryJob,
     notifyJobsChanged,
     startPolling,
     stopPolling,

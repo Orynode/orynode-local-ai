@@ -80,7 +80,7 @@ export function createWindowsHostRuntime(
         ftsTokenizer: null,
         // stub 阶段 embedding runtime 未落地
         memoryTier: hostKnowledgeCeiling(hostClass, false),
-        externalConnectors: { web: true, github: true },
+        externalConnectors: { web: false, github: false },
       };
     },
     credentials: () => unsupportedCredentials,
